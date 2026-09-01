@@ -1,0 +1,6 @@
+# Claude Code plugin bookkeeping. A directory-source marketplace installs in place,
+# so Claude writes its per-PID liveness registry into the working tree.
+.in_use/
+
+# Python bytecode from the address-pr-reviews provider modules and the hook scripts.
+__pycache__/

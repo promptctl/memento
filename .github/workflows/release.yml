@@ -1,0 +1,87 @@
+name: release
+
+# On every push to master, release each plugin whose manifest version has not been
+# released before. The "tag already exists" check makes every tag immutable (never
+# moved), makes a release fire only when that plugin's version bumps, and makes the
+# whole workflow safe to re-run.
+
+on:
+  push:
+    branches: [master]
+
+# One release at a time; never let two runs race to create the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create tags, cut releases
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # This repo ships two independently-versioned plugins, so a release is per
+      # plugin, not per repo. The tag shape is `{name}--v{version}` because that is
+      # what `claude plugin tag` creates and reads - matching it keeps the CLI usable
+      # against tags this workflow made. [LAW:one-source-of-truth] the version is read
+      # from the plugin's own manifest, the single place it is declared; the
+      # marketplace entries deliberately carry no version, so there is nothing that
+      # can disagree.
+      #
+      # One sequential job rather than a matrix: the steps below create tags on a
+      # shared ref, and two jobs doing that concurrently is exactly the ambient
+      # ordering dependency that would make releases flaky.
+      # [LAW:no-ambient-temporal-coupling]
+      - name: Release each plugin whose version is new
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Each plugin's release notes cover only the commits that touched it, so a
+          # bump to one plugin does not attribute the other's work to itself. The
+          # paths are the plugin's own directory plus the shared sources it exposes.
+          release_plugin() {
+            local name="$1"; shift
+            local manifest="$name/.claude-plugin/plugin.json"
+
+            local version
+            version="$(jq -r '.version' "$manifest")"
+            if [ -z "$version" ] || [ "$version" = "null" ]; then
+              echo "::error::$manifest has no .version"; exit 1
+            fi
+
+            local tag="$name--v$version"
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "$tag already exists - nothing to release for $name."
+              return 0
+            fi
+
+            # Highest previously released tag for THIS plugin. Empty on its first
+            # release, in which case the range covers the whole history.
+            local prev range bullets
+            prev="$(git tag --list "$name--v*" --sort=-version:refname | head -n1 || true)"
+            if [ -n "$prev" ]; then range="$prev..HEAD"; else range=""; fi
+
+            bullets="$(git log --no-merges --pretty='- %s' ${range} -- "$@")"
+            [ -n "$bullets" ] || bullets="- No changes."
+
+            git tag -a "$tag" -m "$tag"        # annotated
+            git push origin "refs/tags/$tag"   # create-only; never force-pushed
+
+            printf '%s\n' "$bullets" \
+              | gh release create "$tag" --title "$tag" --notes-file -
+            echo "released $tag"
+          }
+
+          release_plugin memento \
+            memento skills/next skills/address-pr-reviews skills/message-in-a-bottle
+          release_plugin auto-bottle \
+            auto-bottle hooks skills/message-in-a-bottle
