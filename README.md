@@ -8,8 +8,9 @@ a session that hits the context limit and forgets what it was doing.
 - **`memento`** gives you three skills you invoke by hand: pull the next ticket,
   work a PR review to clean, write a handoff for the next session. No hooks. Nothing
   fires on its own.
-- **`auto-bottle`** takes the handoff skill and makes it mandatory, with a `Stop` hook
-  that refuses to let a session end past a token ceiling until it has written one.
+- **`auto-bottle`** takes the handoff skill and makes it mandatory, with a hook that
+  refuses to let a session past a token ceiling end its turn, or call any other tool,
+  until it has written one.
 
 Install `memento` if you want the skills available. Also install `auto-bottle` if you
 want the close-out enforced instead of remembered.
@@ -91,25 +92,52 @@ and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
 
 Version 0.1.0. It exposes the same `message-in-a-bottle` skill — the identical file,
 not a second copy — and adds the thing that makes it fire without being asked:
-`hooks/scripts/context-ceiling.py`, registered on `Stop`.
+`hooks/scripts/context-ceiling.py`, registered on both `Stop` and `PreToolUse`.
 
-When a session tries to end its turn, the hook reads the transcript for the most recent
-assistant message's token usage (all four fields — input, output, cache creation, cache
-read — because that is what the next request carries) and compares it to a ceiling of
-250,000 tokens. Set `MEMENTO_CONTEXT_CEILING` to change it. Under the ceiling, the hook
-says nothing and the turn ends.
+On either event the hook reads the transcript for the most recent assistant message's
+token usage (all four fields — input, output, cache creation, cache read — because that
+is what the next request carries) and compares it to the ceiling. Under the ceiling, the
+hook says nothing.
 
-Over it, the hook returns `{"decision": "block"}`. Claude Code refuses the stop and
-hands the hook's `reason` back to the agent as its next instruction: commit or push
-everything outstanding first, then run the `finalize-session` launcher with a handoff
-message. `Stop` is the hook with teeth here, and it is deliberately not a `PreToolUse`
-deny — committing and running the launcher are themselves tool calls, so blocking tools
-would block the only exit.
+The ceiling is 250,000 tokens by default. `MEMENTO_CONTEXT_CEILING` overrides that;
+failing that, the hook reads `~/.claude/memento/context-ceiling` (put the file elsewhere
+with `MEMENTO_CEILING_FILE`). Either source may hold `off`, `none`, `never`, or
+`disabled` in place of a number, which turns the ceiling off entirely. Anything else — a
+typo, a unit suffix — stops the hook with an error rather than quietly falling back to
+the default, on the grounds that a ceiling you believe you moved and did not is worse
+than no ceiling. Every decision the hook makes is appended to
+`~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
+you can tell an allow apart from a hook that never ran.
+
+Over the ceiling on `Stop`, the hook returns `{"decision": "block"}`. Claude Code refuses
+the stop and hands the hook's `reason` back to the agent as its next instruction: commit
+or push everything outstanding first, then run the `finalize-session` launcher with a
+handoff message.
 
 It forces this **once per session**. If the session stops again, the hook sees
 `stop_hook_active` and lets the stop proceed, printing a visible system message saying
 the one forced attempt was spent. A second block would spend more context on the problem
 that *is* too much context.
+
+`Stop` alone is not enough, because it only has teeth in a session that stops — and an
+autonomous session never stops, which is exactly the session the ceiling exists to
+catch. So `PreToolUse` enforces the same ceiling inside the tool loop, where it cannot
+be avoided. Above the ceiling it is default-deny: the tool call is not run, and the
+agent gets the close-out instruction back as the denial reason. Only three things
+are permitted through:
+
+- the `message-in-a-bottle` skill, under either namespace — `auto-bottle:message-in-a-bottle`
+  or `memento:message-in-a-bottle` name the one skill file, and denying one of them would
+  block the close-out for whoever invoked it by the other name;
+- a Bash call to the `finalize-session` launcher, matched by resolved path rather than by
+  name, so something else wearing that name is still not the close-out;
+- `git status`, `diff`, `log`, `show`, `rev-parse`, `add`, `commit`, and `push`, which is
+  enough to see the tree and get outstanding work committed before the handoff.
+
+A Bash command the hook cannot parse is denied too; if it was reaching for the launcher,
+the denial says so and explains how to requote it. Denial withholds tools and never the
+exit, so it cannot wedge a session — which is why `PreToolUse` needs no spent-attempt
+valve and keeps no state.
 
 ## Repo layout
 
