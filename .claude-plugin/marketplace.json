@@ -1,0 +1,19 @@
+{
+  "name": "memento",
+  "description": "Agent-native workflow tooling: pull the next ticket, address PR review findings, and carry a goal across a context reset.",
+  "owner": {
+    "name": "Brandon Fryslie"
+  },
+  "plugins": [
+    {
+      "name": "memento",
+      "source": "./memento",
+      "description": "Pull the next lit ticket (next), address PR review findings with judgment (address-pr-reviews), and write the handoff a future session wakes up with (message-in-a-bottle)."
+    },
+    {
+      "name": "auto-bottle",
+      "source": "./auto-bottle",
+      "description": "The context ceiling, enforced: a Stop hook that refuses to let a session past the token maximum end its turn until it has written the handoff."
+    }
+  ]
+}
