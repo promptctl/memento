@@ -45,6 +45,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          # `git tag -a` writes a tag object, which carries a tagger and therefore needs
+          # an identity. This step declares its own rather than inheriting one set
+          # elsewhere in the job. [LAW:no-ambient-temporal-coupling]
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
           # Each plugin's release notes cover only the commits that touched it, so a
           # bump to one plugin does not attribute the other's work to itself. The
           # paths are the plugin's own directory plus the shared sources it exposes.
