@@ -1,6 +1,6 @@
 {
   "name": "auto-bottle",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "The context ceiling, enforced: a Stop hook that refuses to let a session past the hard token maximum end its turn until it has run the message-in-a-bottle close-out, so the next session wakes up with a handoff instead of nothing.",
   "author": {
     "name": "Brandon Fryslie"

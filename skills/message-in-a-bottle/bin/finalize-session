@@ -131,6 +131,18 @@ _infer_reset() {
   if _wants_compact "$1"; then printf 'compact'; else printf 'clear'; fi
 }
 
+# Empty the input box before writing into it. The box is shared mutable state -
+# a stray keystroke, a half-typed prompt, a previous delivery - and whatever is
+# already sitting there FUSES with whatever arrives next: `/clear` typed onto a
+# stray `m` submits as the prompt `m/clear`, and a handoff pasted onto residue
+# arrives as `junk[Pasted text #1 +40 lines]`. Escape does not empty the box;
+# C-u does. [LAW:single-enforcer] every writer clears first, so no writer has to
+# know what the last one left behind.
+_clear_box() {
+  tmux send-keys -t "$1" C-u
+  sleep 0.3
+}
+
 # Walk the process ancestry from the launcher's parent up to the interactive
 # `claude` process — the one to kill and relaunch. Matched by program name so it
 # survives whatever flags the user launched with.
@@ -641,6 +653,7 @@ case "$MODE" in
 
     tmux send-keys -t "$TARGET" Escape
     sleep 1
+    _clear_box "$TARGET"
     tmux send-keys -t "$TARGET" "/$RESET"
     sleep 0.5
     tmux send-keys -t "$TARGET" Enter
@@ -672,6 +685,7 @@ case "$MODE" in
     # that had, in every case the logs recorded, already worked.
     log "/$RESET $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
+    _clear_box "$TARGET"
     tmux load-buffer -b "$BUFFER" "$MSGFILE"
     tmux paste-buffer -d -b "$BUFFER" -t "$TARGET" -p
     sleep 0.5
@@ -684,6 +698,7 @@ case "$MODE" in
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
       sleep 1
+      _clear_box "$TARGET"
       { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" -
       tmux paste-buffer -d -b "$GOALBUF" -t "$TARGET" -p
       sleep 0.5
@@ -935,6 +950,7 @@ OSA2
     if [[ -s "$GOALFILE" ]]; then
       sleep 1
       log "re-establishing carried goal"
+      _clear_box "$SESSION"
       { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" -
       tmux paste-buffer -d -b "$GOALBUF" -t "$SESSION" -p
       sleep 0.5
