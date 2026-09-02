@@ -324,7 +324,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
-        message="handoff"):
+        message="handoff", handoff_dir=None):
     """Launch finalize-session under a real `nest` chain and return its dry-run report."""
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
@@ -360,6 +360,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["NEST_REHOST_AT"] = str(rehost_at)
     if tmux_pane is not None:
         env["TMUX_PANE"] = tmux_pane
+    # The handoff is durable by design, so a case that does not redirect it would
+    # write into the developer's real ~/.claude/memento/handoffs.
+    if handoff_dir is not None:
+        env["MEMENTO_HANDOFF_DIR"] = handoff_dir
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
@@ -886,6 +890,91 @@ check("a process that refuses TERM is still retired, by escalation to KILL",
 check("and the escalation says so, rather than the pid quietly disappearing",
       "survived TERM; sending KILL" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r}")
+
+
+# ---------------------------------------------------------------------------
+# The handoff is durable, and every delivery names it.
+#
+# A handoff that exists only in flight is one bad paste from gone. These cases
+# pin the property that makes the transport's failures survivable: the payload
+# is on disk before any transport is chosen, no code path removes it, and the
+# message carries its own path so a reader who got a mangled copy can find the
+# whole one. [LAW:one-source-of-truth]
+# ---------------------------------------------------------------------------
+
+def tmux_worker_case(pane_text, timeout="2"):
+    """Run one tmux worker and report what it did with the handoff.
+
+    Returns (done, msgfile, tmux_log). `pane_text` is what capture-pane shows, so
+    "the reset never registered" is a value rather than a mode - the same shape
+    the detached worker's readiness fixture already uses.
+    """
+    workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
+    msgfile = os.path.join(workdir, "handoff.md")
+    goalfile = os.path.join(workdir, "goal")
+    with open(msgfile, "w") as handle:
+        handle.write("the whole handoff")
+    open(goalfile, "w").close()
+    tmuxlog = os.path.join(workdir, "tmux.log")
+    env = {
+        "PATH": ":".join([FIXTURES, REAL_DIRS]),
+        "HOME": os.environ.get("HOME", workdir),
+        "TMPDIR": workdir,
+        "FIXTURE_TMUX_LOG": tmuxlog,
+        "FIXTURE_TMUX_PANE_TEXT": pane_text,
+        "MEMENTO_RESET_TIMEOUT_SECONDS": timeout,
+    }
+    try:
+        done = subprocess.run(
+            [LAUNCHER, "--worker", "%1", "clear", msgfile, goalfile],
+            text=True, capture_output=True, env=env, timeout=180)
+        log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+        return done, os.path.exists(msgfile), log
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    registered = pool.submit(tmux_worker_case, "Claude Code v1.2.3")
+    never = pool.submit(tmux_worker_case, "still working on the previous turn")
+
+done, survived, log = registered.result()
+check("a reset the worker can see delivers the handoff",
+      "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
+check("and the handoff file outlives the worker that delivered it",
+      survived, f"out={done.stdout!r}")
+
+# The regression itself. The reset is typed while the pane's agent is still
+# mid-turn, so Claude queues it and the banner does not appear inside any fixed
+# window. The old worker read that as a misfire, refused to send, and let its
+# EXIT trap delete the handoff - a cleared session whose whole content was the
+# note that the handoff was lost. Ordering is preserved by tmux type-ahead, so
+# sending is always right; withholding never was.
+done, survived, log = never.result()
+check("a reset the worker never sees still delivers the handoff",
+      "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
+check("and says plainly that it could not confirm the reset",
+      "not observed" in done.stdout, f"out={done.stdout!r}")
+check("and never claims the handoff was withheld",
+      "NOT sent" not in done.stdout and "misfired" not in log,
+      f"out={done.stdout!r} log={log!r}")
+check("and above all does not delete the handoff it could not confirm",
+      survived, f"out={done.stdout!r}")
+
+# The launcher's half: the payload lands in its durable home and names itself.
+handoff_home = tempfile.mkdtemp(prefix="finalize-home.")
+try:
+    done = run(message="carry this forward", handoff_dir=handoff_home)
+    written = [os.path.join(handoff_home, f) for f in os.listdir(handoff_home)]
+    check("the launcher writes the handoff into its durable home",
+          len(written) == 1, f"found={written} out={done.stdout!r}")
+    body = open(written[0]).read() if len(written) == 1 else ""
+    check("the handoff on disk carries the agent's message",
+          "carry this forward" in body, f"body={body!r}")
+    check("and names its own path, so a mangled copy is still recoverable",
+          written and written[0] in body, f"body={body!r}")
+finally:
+    shutil.rmtree(handoff_home, ignore_errors=True)
 
 STRANGER.terminate()
 STRANGER.wait()
