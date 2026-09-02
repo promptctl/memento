@@ -34,10 +34,26 @@
 set -euo pipefail
 
 # [LAW:one-source-of-truth] timing lives here once. HANDOFF_DELAY_SECONDS is how
-# long to wait before firing; SETTLE_SECONDS is how long to let the reset render
-# before reading the pane back to verify it ran (tmux).
+# long to wait before firing; RESET_REGISTER_* bound the poll that watches the
+# reset land (tmux).
 HANDOFF_DELAY_SECONDS=10
-SETTLE_SECONDS=5
+# The reset is typed into a pane whose agent is usually still mid-turn, because
+# finalize-session is itself invoked from inside that turn. Claude holds typed
+# input as type-ahead and runs it only once the turn ends, so how long the reset
+# takes to appear is the turn's business, not this worker's. A fixed settle read
+# the pane before that happened and called the queued reset a misfire - 12 of 58
+# handoffs on 2026-09-01/02, each one deleting the handoff it failed to confirm.
+# [LAW:no-ambient-temporal-coupling] wait for the state; never bet on a duration.
+# Overridable so the timeout arm is reachable in a test without waiting it out.
+# A failure arm nobody can execute is a failure arm nobody has tested.
+RESET_REGISTER_TIMEOUT_SECONDS="${MEMENTO_RESET_TIMEOUT_SECONDS:-300}"
+RESET_REGISTER_POLL_SECONDS=0.5
+
+# [LAW:one-source-of-truth] the handoff's authoritative home. Every pasted or
+# relaunched copy is derived from this file, and a derived copy can be lost to a
+# bad paste, a wrong pane, or a reset that never lands. The file cannot, so no
+# downstream failure can destroy the only record of what the session was doing.
+HANDOFF_DIR="${MEMENTO_HANDOFF_DIR:-$HOME/.claude/memento/handoffs}"
 # Upper bound on how long to wait for a freshly relaunched claude to become ready
 # — its banner drawn, input box up — before queueing a carried /goal into it
 # (iTerm2 transport only). We POLL the session contents and proceed the instant it
@@ -447,16 +463,26 @@ case "$MODE" in
     # [LAW:one-source-of-truth] the only place RESET is assigned. (tmux only.)
     RESET="${RESET_ARG:-$(_infer_reset "$AGENT_MESSAGE")}"
 
-    # [LAW:one-source-of-truth] the wrapped value is assembled once, here.
-    MESSAGE=$(printf '%s\n%s\n%s' "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX")
+    # [LAW:dataflow-not-control-flow] the message flows through a file as a value,
+    # bypassing every shell-quoting hazard between argv → worker → transport. No
+    # escaping branches anywhere. The file is durable rather than temporary
+    # because it is the handoff itself, not a copy of it in flight.
+    mkdir -p -- "$HANDOFF_DIR" \
+      || { echo "finalize-session: cannot create handoff directory $HANDOFF_DIR" >&2; exit 2; }
+    MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
-    # [LAW:dataflow-not-control-flow] the message flows through a tempfile as a
-    # value, bypassing every shell-quoting hazard between argv → worker →
-    # transport. No escaping branches anywhere.
-    MSGFILE=$(mktemp -t finalize-msg.XXXXXX)
+    # [LAW:one-source-of-truth] the wrapped value is assembled once, here - and it
+    # carries the path of the file it is written to, so the location travels with
+    # every copy. A paste that arrives truncated, garbled, into the wrong pane, or
+    # not at all still leaves the next agent one `cat` from the whole handoff.
+    MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
+      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
+
     GOALFILE=$(mktemp -t finalize-goal.XXXXXX)
     LOGFILE=""
-    trap 'rm -f -- "$MSGFILE" "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
+    # [LAW:no-silent-failure] MSGFILE is deliberately absent from this trap and
+    # from every worker's: the transient files go, the handoff stays.
+    trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
     printf '%s' "$MESSAGE" > "$MSGFILE"
     # [LAW:dataflow-not-control-flow] the goal rides its own tempfile as a value,
     # empty when none was carried. Workers read it and re-issue /goal only when it
@@ -572,17 +598,21 @@ case "$MODE" in
       # [LAW:parse-dont-validate] the failure arm of the parse above. Exiting
       # nonzero is the whole of it: the close-out did not happen, and the caller
       # learns that from the exit code rather than from prose it may not read.
-      # [LAW:no-silent-failure] writing the message to a file here would be an
-      # answer-shaped void — exit 0 with the shape of delivery and none of the
-      # substance, since nothing reads that file. A message parked on disk is a
-      # message lost, and lost loudly beats lost while claiming success.
-      # This is now the sole genuine no-transport case: no owned pane, no
-      # reachable iTerm2 session, and no tmux binary to spawn a fresh window
-      # with either — there is truly nothing on this machine to deliver into.
+      # [LAW:no-silent-failure] the nonzero exit is what makes naming the file
+      # safe here. The handoff is already on disk - it is written before any
+      # transport is chosen - so the path is a recovery route, not a claim of
+      # delivery: nothing was delivered, this says so, and it says where the
+      # message is. Reporting the path while exiting 0 would be the
+      # answer-shaped void; reporting it while exiting 2 is just not throwing
+      # the work away on the way out.
+      # This is the sole genuine no-transport case: no owned pane, no reachable
+      # iTerm2 session, and no tmux binary to spawn a fresh window with either
+      # — there is truly nothing on this machine to deliver into.
       echo "finalize-session: no tmux, iTerm2, or tmux binary to spawn a fresh window with." >&2
       echo "Nothing on this machine to deliver the close-out into." >&2
+      echo "The handoff was NOT delivered. It is preserved at: $MSGFILE" >&2
       exit 2
-      # MSGFILE and GOALFILE cleaned by the EXIT trap.
+      # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
     fi
     ;;
 
@@ -598,7 +628,7 @@ case "$MODE" in
 
     BUFFER="finalize-$$"
     GOALBUF="finalize-goal-$$"
-    trap 'rm -f "$MSGFILE" "$GOALFILE"' EXIT
+    trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
     case "$RESET" in
@@ -614,30 +644,48 @@ case "$MODE" in
     tmux send-keys -t "$TARGET" "/$RESET"
     sleep 0.5
     tmux send-keys -t "$TARGET" Enter
-    sleep "$SETTLE_SECONDS"
 
-    if tmux capture-pane -t "$TARGET" -p | grep -qE "$REGISTERED_RE"; then
-      log "/$RESET registered; sending message"
-      tmux load-buffer -b "$BUFFER" "$MSGFILE"
-      tmux paste-buffer -d -b "$BUFFER" -t "$TARGET" -p
-      sleep 0.5
-      tmux send-keys -t "$TARGET" Enter
-
-      # [LAW:dataflow-not-control-flow] carry the goal only when the value is
-      # present. It goes in as a queued input *after* the handoff prompt, so it
-      # never races the handoff turn — Claude type-aheads it and the session-scoped
-      # /goal governs the turns that follow. The /clear or /compact above wiped it.
-      if [[ -s "$GOALFILE" ]]; then
-        log "re-establishing carried goal"
-        sleep 1
-        { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" -
-        tmux paste-buffer -d -b "$GOALBUF" -t "$TARGET" -p
-        sleep 0.5
-        tmux send-keys -t "$TARGET" Enter
+    # [LAW:no-ambient-temporal-coupling] poll for the reset to land rather than
+    # betting on a duration. Correctness now holds however long the pane's turn
+    # runs, which is exactly the variable the old fixed settle was guessing at.
+    # Counted in polls because bash 3.2 - still /bin/bash on macOS - has no float
+    # arithmetic.
+    POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
+    POLLS=0
+    OBSERVED="WARNING: not observed within ${RESET_REGISTER_TIMEOUT_SECONDS}s"
+    while :; do
+      if tmux capture-pane -t "$TARGET" -p | grep -qE "$REGISTERED_RE"; then
+        OBSERVED="registered after $(awk "BEGIN{printf \"%.1f\", $POLLS * $RESET_REGISTER_POLL_SECONDS}")s"
+        break
       fi
-    else
-      log "MISFIRE: /$RESET did not register; message NOT sent"
-      tmux send-keys -t "$TARGET" -l "finalize-session handoff misfired: the scheduled /$RESET never registered, so the queued handoff was NOT sent. Please tell the user the finalize-session handoff misfired."
+      [[ "$POLLS" -ge "$POLL_BUDGET" ]] && break
+      sleep "$RESET_REGISTER_POLL_SECONDS"
+      POLLS=$((POLLS + 1))
+    done
+
+    # [LAW:dataflow-not-control-flow] the handoff is sent on every path; what the
+    # poll saw is a value in the log line, never a branch over whether the payload
+    # goes. tmux type-ahead preserves order, so a handoff pasted while the turn is
+    # still running lands after the queued reset exactly as an observed one does -
+    # which is why withholding it was never protection. That was the old misfire
+    # arm: it destroyed the handoff to report that it could not confirm a step
+    # that had, in every case the logs recorded, already worked.
+    log "/$RESET $OBSERVED; sending handoff (preserved at $MSGFILE)"
+
+    tmux load-buffer -b "$BUFFER" "$MSGFILE"
+    tmux paste-buffer -d -b "$BUFFER" -t "$TARGET" -p
+    sleep 0.5
+    tmux send-keys -t "$TARGET" Enter
+
+    # [LAW:dataflow-not-control-flow] carry the goal only when the value is
+    # present. It goes in as a queued input *after* the handoff prompt, so it
+    # never races the handoff turn — Claude type-aheads it and the session-scoped
+    # /goal governs the turns that follow. The /clear or /compact above wiped it.
+    if [[ -s "$GOALFILE" ]]; then
+      log "re-establishing carried goal"
+      sleep 1
+      { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" -
+      tmux paste-buffer -d -b "$GOALBUF" -t "$TARGET" -p
       sleep 0.5
       tmux send-keys -t "$TARGET" Enter
     fi
@@ -654,7 +702,7 @@ case "$MODE" in
     GOALFILE="$4"
     FLAGS="${5:-}"
 
-    trap 'rm -f "$MSGFILE" "$GOALFILE"' EXIT
+    trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
     log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
@@ -763,7 +811,7 @@ OSA2
       log "ERROR: could not write relaunch to iTerm2 session $UUID"
     fi
 
-    # Give the shell time to read the message file before the trap removes it.
+    # Give the shell time to read the message file before this worker exits.
     sleep 3
     ;;
 
@@ -782,7 +830,7 @@ OSA2
     OLD_CLAUDE_IDENT="$8"
 
     GOALBUF="finalize-goal-$$"
-    trap 'rm -f "$MSGFILE" "$GOALFILE"' EXIT
+    trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
     log "waking; detached session=$SESSION cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
