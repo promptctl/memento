@@ -360,10 +360,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["NEST_REHOST_AT"] = str(rehost_at)
     if tmux_pane is not None:
         env["TMUX_PANE"] = tmux_pane
-    # The handoff is durable by design, so a case that does not redirect it would
-    # write into the developer's real ~/.claude/memento/handoffs.
-    if handoff_dir is not None:
-        env["MEMENTO_HANDOFF_DIR"] = handoff_dir
+    # The handoff is durable by design, so EVERY case must redirect it - one that
+    # did not would write into the developer's real ~/.claude/memento/handoffs and
+    # leave it there, since nothing downstream deletes a handoff any more. The
+    # default lands inside the workdir this case already tears down; a case that
+    # wants to read the handoff back passes a directory it owns instead.
+    env["MEMENTO_HANDOFF_DIR"] = handoff_dir or os.path.join(workdir, "handoffs")
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
