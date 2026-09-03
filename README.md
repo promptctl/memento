@@ -183,12 +183,7 @@ is no second declaration that could disagree with the manifest.
 
 Releases follow the org-wide procedure in
 [promptctl/.github's RELEASING.md](https://github.com/promptctl/.github/blob/master/RELEASING.md).
-In short: a PR bumps the plugin's `plugin.json` version and adds a `## vX.Y.Z - date`
-section to that plugin's `CHANGELOG.md`; after merge, `claude plugin tag <plugin-dir> --push`
-creates the `{name}--v{version}` tag; the pushed tag runs `.github/workflows/release.yml`,
-which calls the shared workflow to check that the tag, the manifest, and the changelog
-agree, and publishes that changelog section as the release notes. Merging alone releases
-nothing, nothing is written to `master`, and tags are never moved.
+This repo's `.github/workflows/release.yml` only says when that procedure runs; the how lives there.
 
 ## License
 
