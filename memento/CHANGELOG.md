@@ -1,5 +1,9 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.2.0 - 2026-09-03
+
+- feat(next)!: retire the executable skill; /next is now a pointer stub, and the procedure ships with the lit binary (0.12.0+), which writes it to `.claude/skills/next/SKILL.md` on `lit init`
+
 ## v0.1.2 - 2026-09-02
 
 - fix(message-in-a-bottle): clear the input box before writing into it
