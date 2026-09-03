@@ -181,20 +181,14 @@ Each plugin carries its own version in its own `.claude-plugin/plugin.json` and 
 independently. The marketplace entries deliberately carry **no** version field, so there
 is no second declaration that could disagree with the manifest.
 
-`.github/workflows/release.yml` runs on every push to `master`. For each plugin it reads
-the version from that plugin's manifest and checks whether the tag `{name}--v{version}`
-already exists. If it does, nothing happens. If it does not, the workflow tags that
-commit and cuts a GitHub release whose notes are the commits since that plugin's previous
-tag, filtered to the paths that plugin actually ships — `memento` counts its own directory
-plus the three skills; `auto-bottle` counts its own directory, `hooks/`, and
-`skills/message-in-a-bottle/`. So a bump to one plugin does not attribute the other's work
-to itself, tags are never moved, and the workflow is safe to re-run.
-
-The tag shape matches what `claude plugin tag` creates and reads, so that CLI stays usable
-against tags this workflow made.
-
-To cut a release: bump the version in the plugin's `plugin.json`, merge to `master`, and
-the workflow does the rest.
+Releases follow the org-wide procedure in
+[promptctl/.github's RELEASING.md](https://github.com/promptctl/.github/blob/master/RELEASING.md).
+In short: a PR bumps the plugin's `plugin.json` version and adds a `## vX.Y.Z - date`
+section to that plugin's `CHANGELOG.md`; after merge, `claude plugin tag <plugin-dir> --push`
+creates the `{name}--v{version}` tag; the pushed tag runs `.github/workflows/release.yml`,
+which calls the shared workflow to check that the tag, the manifest, and the changelog
+agree, and publishes that changelog section as the release notes. Merging alone releases
+nothing, nothing is written to `master`, and tags are never moved.
 
 ## License
 
