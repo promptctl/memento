@@ -39,7 +39,7 @@ default; `claude plugin install --scope project` (or `local`) puts it elsewhere.
 
 ## The `memento` plugin
 
-Three skills, version 0.1.0, no hooks.
+Three skills, no hooks.
 
 **`next`** — picks up the next ready ticket and starts work. It assumes the `lit`
 issue tracker is on your PATH, and begins by running `lit quickstart`. Before touching
@@ -90,7 +90,7 @@ and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
 
 ## The `auto-bottle` plugin
 
-Version 0.1.0. It exposes the same `message-in-a-bottle` skill — the identical file,
+It exposes the same `message-in-a-bottle` skill — the identical file,
 not a second copy — and adds the thing that makes it fire without being asked:
 `hooks/scripts/context-ceiling.py`, registered on both `Stop` and `PreToolUse`.
 
@@ -181,20 +181,9 @@ Each plugin carries its own version in its own `.claude-plugin/plugin.json` and 
 independently. The marketplace entries deliberately carry **no** version field, so there
 is no second declaration that could disagree with the manifest.
 
-`.github/workflows/release.yml` runs on every push to `master`. For each plugin it reads
-the version from that plugin's manifest and checks whether the tag `{name}--v{version}`
-already exists. If it does, nothing happens. If it does not, the workflow tags that
-commit and cuts a GitHub release whose notes are the commits since that plugin's previous
-tag, filtered to the paths that plugin actually ships — `memento` counts its own directory
-plus the three skills; `auto-bottle` counts its own directory, `hooks/`, and
-`skills/message-in-a-bottle/`. So a bump to one plugin does not attribute the other's work
-to itself, tags are never moved, and the workflow is safe to re-run.
-
-The tag shape matches what `claude plugin tag` creates and reads, so that CLI stays usable
-against tags this workflow made.
-
-To cut a release: bump the version in the plugin's `plugin.json`, merge to `master`, and
-the workflow does the rest.
+Releases follow the org-wide procedure in
+[promptctl/.github's RELEASING.md](https://github.com/promptctl/.github/blob/master/RELEASING.md).
+This repo's `.github/workflows/release.yml` only says when that procedure runs; the how lives there.
 
 ## License
 
