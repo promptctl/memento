@@ -39,7 +39,7 @@ default; `claude plugin install --scope project` (or `local`) puts it elsewhere.
 
 ## The `memento` plugin
 
-Three skills, version 0.1.0, no hooks.
+Three skills, no hooks.
 
 **`next`** — picks up the next ready ticket and starts work. It assumes the `lit`
 issue tracker is on your PATH, and begins by running `lit quickstart`. Before touching
@@ -90,7 +90,7 @@ and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
 
 ## The `auto-bottle` plugin
 
-Version 0.1.0. It exposes the same `message-in-a-bottle` skill — the identical file,
+It exposes the same `message-in-a-bottle` skill — the identical file,
 not a second copy — and adds the thing that makes it fire without being asked:
 `hooks/scripts/context-ceiling.py`, registered on both `Stop` and `PreToolUse`.
 
