@@ -309,8 +309,10 @@ def reviews_handler(args):
         raise AssertionError(f"unexpected gh call: {args}")
     if args[2] != "repos/o/r/pulls/7/reviews":
         raise AssertionError(f"unexpected endpoint: {args[2]}")
-    page_one = '{"review_id": 11, "author": "bot", "commit_id": "aaa"}\n'
-    page_two = '{"review_id": 12, "author": "bot", "commit_id": "bbb"}\n'
+    page_one = ('{"review_id": 11, "author": "bot", "commit_id": "aaa", '
+                '"state": "CHANGES_REQUESTED", "body": "a\\nb"}\n')
+    page_two = ('{"review_id": 12, "author": "bot", "commit_id": "bbb", '
+                '"state": "CHANGES_REQUESTED", "body": "c"}\n')
     return (page_one + "\n" + page_two).strip()
 
 
@@ -318,6 +320,8 @@ fake = install(reviews_handler)
 reviews = gt.change_requests(PR)["reviews"]
 check("change_requests: JSONL from every page is parsed",
       [r["review_id"] for r in reviews] == [11, 12], f"got {reviews}")
+check("change_requests: the contract's projection, nothing more",
+      reviews[0] == {"review_id": 11, "author": "bot", "commit_id": "aaa"}, f"got {reviews[0]}")
 check("change_requests: asks gh to walk every page",
       "--paginate" in fake.calls[0], f"got {fake.calls[0]}")
 

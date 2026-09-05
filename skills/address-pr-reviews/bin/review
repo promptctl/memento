@@ -87,12 +87,26 @@ def cmd_setup_check(provider, args) -> tuple[dict, str | None]:
 
 def cmd_wait(provider, args) -> tuple[dict, str | None]:
     result = provider.wait(pr_url(args.pr))
-    # [LAW:no-silent-failure] a non-success conclusion means the reviewer
-    # errored — its findings are absent, not empty. Surface the run URL.
-    failure = None if result["conclusion"] == "success" else (
-        f"review run concluded {result['conclusion']!r}, not success — "
-        f"findings are absent, not empty. Run: {result.get('url')}"
-    )
+    # [LAW:no-silent-failure] two facts, each a halt on its own. A non-success
+    # conclusion means the reviewer errored — its findings are absent, not
+    # empty. A completed run that did not review the head (a spent round cap
+    # exits 0 by design and says so on the PR) leaves the head unreviewed with
+    # the same zero findings, which is the shape that once merged unreviewed
+    # code. The first names the more specific cause when both hold.
+    if result["conclusion"] != "success":
+        failure = (
+            f"review run concluded {result['conclusion']!r}, not success — "
+            f"findings are absent, not empty. Run: {result.get('url')}"
+        )
+    elif not result["reviewed"]:
+        failure = (
+            f"review run for {result['sha']} completed but did not review it "
+            f"({result['not_reviewed_reason']}) — the head commit stands "
+            f"unreviewed; findings are absent, not empty. Do not merge. "
+            f"Run: {result.get('url')}"
+        )
+    else:
+        failure = None
     return result, failure
 
 

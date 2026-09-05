@@ -60,17 +60,31 @@ Blocks until the review for the PR's current head SHA is complete.
 {
     "status":     "completed",          # always "completed" on success
     "conclusion": "success" | "...",    # provider-specific string; skill surfaces non-success
-    "sha":        "abc123",             # the head SHA that was reviewed
+    "sha":        "abc123",             # the head SHA the run was for
     "url":        "https://..." | None, # link to the review run, if available
+    "reviewed":   True | False,         # did the reviewer actually review `sha`?
+    "not_reviewed_reason":              # None exactly when reviewed is True
+        None | "round-cap" | "fork" | "no-review-for-head",
 }
 ```
+
+`reviewed` is a separate fact from `conclusion`. A run can complete
+successfully without reading the head — the GitHub Action reviewer exits 0 on
+a spent `MAX_REVIEW_ROUNDS` cap by design (a cost control must not red a
+required check) and says so on the PR with a marked not-reviewed review — and
+such a run has zero findings for the same reason a clean review does. The
+skill halts on `reviewed: False` exactly as it halts on a non-success
+conclusion; `not_reviewed_reason` names why, in the reviewer's own vocabulary
+where it has one. `[LAW:no-silent-failure]`
 
 Raises `RuntimeError` with a human-readable message on timeout or unrecoverable
 failure. Never returns a dict with `status != "completed"` — callers do not poll.
 
 For providers that review synchronously inside `fetch`, implement `wait` as a
 no-op that returns `{"status": "completed", "conclusion": "success", "sha": "",
-"url": None}` and document that behavior.
+"url": None, "reviewed": True, "not_reviewed_reason": None}` and document that
+behavior — a synchronous provider's `wait` verifying its own review exists IS
+the proof the head was reviewed.
 
 ### `fetch(pr_url: str) -> dict`
 

@@ -384,8 +384,10 @@ def wait(pr_url: str) -> dict:
             f"No adversarial review posted for head SHA {sha} — call "
             "provider.trigger(pr_url) first; this provider does not fire on push."
         )
+    # The existence check above IS the proof the head was reviewed.
     return {"status": "completed", "conclusion": "success", "sha": sha,
-            "url": review.get("html_url")}
+            "url": review.get("html_url"),
+            "reviewed": True, "not_reviewed_reason": None}
 
 
 # ---------------------------------------------------------------------------

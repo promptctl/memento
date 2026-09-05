@@ -230,25 +230,27 @@ def resolve(thread_id: str) -> dict:
     return {"thread_id": thread_id, "is_resolved": True}
 
 
-def change_requests(pr_url: str) -> dict:
-    """Return the automated reviewer's blocking reviews — the CHANGES_REQUESTED
-    reviews this round must dismiss once its findings are addressed.
+# Which reviews are the automated reviewer's is decided HERE, once, for every
+# consumer — the dismiss set and the reviewed-verdict alike. `.user.type` is the
+# verified discriminator: a User can't even post CHANGES_REQUESTED on their own
+# PR, so every review here is a non-author's, and Bot vs User is exactly
+# automated-reviewer vs human. [LAW:single-enforcer]
+_BOT_REVIEWS_JQ = (
+    '.[] | select(.user.type=="Bot")'
+    ' | {review_id: .id, author: .user.login, commit_id, state, body}'
+)
 
-    [LAW:no-silent-failure] scoped to Bot authors: a human's CHANGES_REQUESTED
-    is cleared only by that human re-reviewing, never auto-dismissed. `.user.type`
-    is the verified discriminator — a User can't even post CHANGES_REQUESTED on
-    their own PR, so every blocking review here is a non-author, and Bot vs User
-    is exactly automated-reviewer vs human.
 
-    Read at fetch-time and dismissed by id at round end. [LAW:one-source-of-truth]
-    the dismiss set is what was read and addressed, never re-derived after a push
-    — the push's fresh re-review carries a new id this read never saw.
+def bot_reviews(pr_url: str) -> list[dict]:
+    """Every review the automated reviewer has posted on the PR, oldest first —
+    `{review_id, author, commit_id, state, body}` each.
 
     `--paginate` walks every page of the reviews endpoint. A PR that survives
     several review rounds accumulates a review per round per re-run and crosses
-    100 easily; a single-page read would silently omit the blocking review and
-    leave the merge stuck with nothing to point at. Completeness is structural
-    here rather than a count this function has to check afterwards.
+    100 easily; a single-page read would silently omit the newest review, which
+    is the one the reviewed-verdict reasons about, or the blocking one the
+    dismiss set must clear. Completeness is structural here rather than a count
+    this function has to check afterwards.
 
     With `--jq`, gh applies the filter per page and concatenates the results, so
     a filter emitting one object per line yields JSONL across the whole set —
@@ -258,11 +260,27 @@ def change_requests(pr_url: str) -> dict:
     owner, repo, pr_num = parse_pr(pr_url)
     out = gh(
         "api", "--paginate", f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
-        "--jq", '.[] | select(.state=="CHANGES_REQUESTED" and .user.type=="Bot")'
-                ' | {review_id: .id, author: .user.login, commit_id}',
+        "--jq", _BOT_REVIEWS_JQ,
     )
-    blocking = [json.loads(line) for line in out.splitlines() if line.strip()]
-    return {"reviews": blocking}
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def change_requests(pr_url: str) -> dict:
+    """Return the automated reviewer's blocking reviews — the CHANGES_REQUESTED
+    reviews this round must dismiss once its findings are addressed.
+
+    [LAW:no-silent-failure] scoped to the automated reviewer by `bot_reviews`: a
+    human's CHANGES_REQUESTED is cleared only by that human re-reviewing, never
+    auto-dismissed.
+
+    Read at fetch-time and dismissed by id at round end. [LAW:one-source-of-truth]
+    the dismiss set is what was read and addressed, never re-derived after a push
+    — the push's fresh re-review carries a new id this read never saw.
+    """
+    return {"reviews": [
+        {"review_id": r["review_id"], "author": r["author"], "commit_id": r["commit_id"]}
+        for r in bot_reviews(pr_url) if r["state"] == "CHANGES_REQUESTED"
+    ]}
 
 
 def dismiss_review(pr_url: str, review_id: int, message: str) -> dict:

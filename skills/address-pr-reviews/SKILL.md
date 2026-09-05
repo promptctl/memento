@@ -63,9 +63,11 @@ Then wait for the review to complete (all providers, always):
 result = provider.wait(PR_URL)
 ```
 
-Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
+Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, reviewed, not_reviewed_reason}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
 
 [LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Stop and surface the run `url`; do not treat a failed run as a clean review.
+
+[LAW:no-silent-failure] if `reviewed` is `False`, the run completed **without reviewing the head** — a spent `MAX_REVIEW_ROUNDS` cap, a fork PR, or a run that left no review for this commit (`not_reviewed_reason` names which). Its findings are absent for the same reason a clean review's are, so step 2 would return zero and the loop would merge an unreviewed commit — which is exactly how real code once shipped green and unread. Stop and surface `sha`, `not_reviewed_reason`, and `url`; the user decides whether to raise the cap and re-run, or review by another provider. Never treat it as a clean pass.
 
 ### 2. Fetch findings, and capture the change requests to dismiss
 
@@ -104,7 +106,7 @@ Schema:
 }
 ```
 
-**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null when the provider declares `resolve: True`. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed, so empty is unambiguous. Proceed to **Finalize** below.
+**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null when the provider declares `resolve: True`. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed *and reviewed the head*, so empty is unambiguous. Proceed to **Finalize** below.
 
 [LAW:verifiable-goals] this empty `fetch` is the **only** thing that establishes done. Never infer doneness from "I pushed my fixes" or "I addressed everything" — re-run `fetch` and read zero unresolved. A fixed-but-unresolved finding still counts as unresolved here, which is the safety net: it re-surfaces as `already_fixed`, and you resolve it now rather than leaving it open forever.
 

@@ -47,7 +47,8 @@ def wait(pr_url: str) -> dict:
         "local_provider.wait is not yet implemented. "
         "If the local agent runs synchronously inside trigger(), implement wait "
         "as a no-op returning {\"status\": \"completed\", \"conclusion\": \"success\", "
-        '"sha\": \"\", \"url\": None}. If it runs asynchronously, poll for completion.'
+        '"sha\": \"\", \"url\": None, \"reviewed\": True, \"not_reviewed_reason\": None}. '
+        "If it runs asynchronously, poll for completion."
     )
 
 
