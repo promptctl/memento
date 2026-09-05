@@ -71,5 +71,20 @@ except RuntimeError as e:
 else:
     check("wait: no marker review for the head raises", False, "did not raise")
 
+quoted = {"body": f"did `{ap.MARKER_FMT.format(sha=HEAD)}` get posted twice?\n\nanyway",
+          "html_url": "https://r/quoted", "state": "COMMENTED"}
+gt.subprocess = FakeGh(HEAD, [marker_review(OLD), quoted])
+try:
+    ap.wait(PR)
+except RuntimeError:
+    check("wait: a marker quoted mid-body for the head is nobody's proof; only the last line counts", True)
+else:
+    check("wait: a marker quoted mid-body for the head is nobody's proof", False, "reported reviewed")
+
+trailing = {**marker_review(HEAD), "body": marker_review(HEAD)["body"] + "\r\n  "}
+gt.subprocess = FakeGh(HEAD, [trailing])
+check("wait: trailing whitespace after the marker still proves it",
+      ap.wait(PR)["reviewed"] is True)
+
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)

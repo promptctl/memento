@@ -42,7 +42,12 @@ REVIEW_TIMEOUT_S = 1200
 
 # Embedded in the review body; binds a posted review to the SHA it reviewed.
 MARKER_FMT = "<!-- adversarial-review sha={sha} -->"
-MARKER_RE = re.compile(r"<!-- adversarial-review sha=([0-9a-f]{7,40}) -->")
+# _post_review writes the marker as the body's last line, so that is where a
+# review of ours carries it; a marker quoted mid-body — a reviewer discussing a
+# prior one — is nobody's proof. The anchor is the strongest true theorem about
+# where our marker lives, and wait() trusts this match to report `reviewed`.
+# [LAW:types-are-the-program]
+MARKER_RE = re.compile(r"<!-- adversarial-review sha=([0-9a-f]{7,40}) -->\s*$")
 
 
 # ---------------------------------------------------------------------------

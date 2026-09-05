@@ -49,7 +49,8 @@ def wait(pr_url: str) -> dict:
         "If the local agent runs synchronously inside trigger(), wait still proves "
         "the head was reviewed: find this provider's own review on the head SHA and "
         "return it as reviewed: True, or raise naming the SHA — never a constant "
-        "(see adversarial_provider.wait). If it runs asynchronously, poll for completion."
+        "(see adversarial_provider.wait). If it runs asynchronously, poll for completion, "
+        "then prove the head was reviewed the same way — completion alone is not that proof."
     )
 
 

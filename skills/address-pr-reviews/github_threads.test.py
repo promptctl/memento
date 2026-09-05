@@ -331,6 +331,8 @@ check("change_requests: only the blocking reviews, in the contract's projection"
       reviews == [{"review_id": 11, "author": "bot", "commit_id": "aaa"},
                   {"review_id": 13, "author": "bot", "commit_id": "bbb"}],
       f"got {reviews}")
+check("change_requests: its own gh call walks every page",
+      len(fake.calls) == 2 and "--paginate" in fake.calls[1], f"got {fake.calls}")
 
 
 # --- the jq filter itself, through a real jq -------------------------------
@@ -370,8 +372,6 @@ check_returns("jq filter: keeps every Bot review whatever its state, drops the h
                 "state": "COMMENTED", "body": "reviewed\n<!-- m -->"},
                {"review_id": 23, "author": "github-actions[bot]", "commit_id": "bbb",
                 "state": "CHANGES_REQUESTED", "body": "blocking"}])
-check("change_requests: asks gh to walk every page",
-      "--paginate" in fake.calls[0], f"got {fake.calls[0]}")
 
 
 # --- response-shape helper: a null at each level names that field ----------
