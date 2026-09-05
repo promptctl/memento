@@ -232,9 +232,9 @@ def resolve(thread_id: str) -> dict:
 
 # Which reviews are the automated reviewer's is decided HERE, once, for every
 # consumer — the dismiss set and the reviewed-verdict alike. `.user.type` is the
-# verified discriminator: a User can't even post CHANGES_REQUESTED on their own
-# PR, so every review here is a non-author's, and Bot vs User is exactly
-# automated-reviewer vs human. [LAW:single-enforcer]
+# discriminator: the reviewer posts through the Actions token as a Bot and a
+# person posts as a User, whatever state either review carries, so Bot vs User
+# is exactly automated-reviewer vs human. [LAW:single-enforcer]
 _BOT_REVIEWS_JQ = (
     '.[] | select(.user.type=="Bot")'
     ' | {review_id: .id, author: .user.login, commit_id, state, body}'
