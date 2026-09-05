@@ -351,18 +351,25 @@ raw_page = [
     {"id": 23, "user": {"login": "github-actions[bot]", "type": "Bot"},
      "state": "CHANGES_REQUESTED", "commit_id": "bbb", "body": "blocking"},
 ]
-jq_out = real_subprocess.run(
-    ["jq", "-c", gt._BOT_REVIEWS_JQ], input=json.dumps(raw_page), text=True,
-    capture_output=True, check=True,
-).stdout
-rows = [json.loads(line) for line in jq_out.splitlines() if line.strip()]
-check("jq filter: keeps every Bot review whatever its state, drops the human",
-      [(r["review_id"], r["state"]) for r in rows] == [(21, "COMMENTED"), (23, "CHANGES_REQUESTED")],
-      f"got {rows}")
-check("jq filter: emits the bot_reviews projection, one object per line",
-      rows[0] == {"review_id": 21, "author": "github-actions[bot]", "commit_id": "aaa",
-                  "state": "COMMENTED", "body": "reviewed\n<!-- m -->"},
-      f"got {rows[0]}")
+
+
+def through_jq():
+    out = real_subprocess.run(
+        ["jq", "-c", gt._BOT_REVIEWS_JQ], input=json.dumps(raw_page), text=True,
+        capture_output=True, check=True,
+    ).stdout
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+# Behind check_returns so a missing jq fails THIS check and the rest of the
+# suite still runs and reports.
+check_returns("jq filter: keeps every Bot review whatever its state, drops the human, "
+              "emits the bot_reviews projection one object per line",
+              through_jq,
+              [{"review_id": 21, "author": "github-actions[bot]", "commit_id": "aaa",
+                "state": "COMMENTED", "body": "reviewed\n<!-- m -->"},
+               {"review_id": 23, "author": "github-actions[bot]", "commit_id": "bbb",
+                "state": "CHANGES_REQUESTED", "body": "blocking"}])
 check("change_requests: asks gh to walk every page",
       "--paginate" in fake.calls[0], f"got {fake.calls[0]}")
 

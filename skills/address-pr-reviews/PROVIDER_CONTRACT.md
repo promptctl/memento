@@ -63,10 +63,16 @@ Blocks until the review for the PR's current head SHA is complete.
     "sha":        "abc123",             # the head SHA the run was for
     "url":        "https://..." | None, # link to the review run, if available
     "reviewed":   True | False,         # did the reviewer actually review `sha`?
-    "not_reviewed_reason":              # None exactly when reviewed is True
-        None | "round-cap" | "fork" | "no-review-for-head",
+    "not_reviewed_reason": None | str,  # None exactly when reviewed is True
 }
 ```
+
+`not_reviewed_reason` is a `str`, not a closed union: whatever reason the
+reviewer's own not-reviewed marker names passes through verbatim (today
+`"round-cap"` and `"fork"`; a reason the reviewer adds later still halts the
+loop, it just names itself), plus `"no-review-for-head"` from the provider
+when the run completed and the reviewer's newest artifact reviews some other
+commit or nothing is there.
 
 `reviewed` is a separate fact from `conclusion`. A run can complete
 successfully without reading the head — the GitHub Action reviewer exits 0 on
