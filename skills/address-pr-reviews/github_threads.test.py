@@ -309,17 +309,69 @@ def reviews_handler(args):
         raise AssertionError(f"unexpected gh call: {args}")
     if args[2] != "repos/o/r/pulls/7/reviews":
         raise AssertionError(f"unexpected endpoint: {args[2]}")
-    page_one = '{"review_id": 11, "author": "bot", "commit_id": "aaa"}\n'
-    page_two = '{"review_id": 12, "author": "bot", "commit_id": "bbb"}\n'
+    page_one = ('{"review_id": 11, "author": "bot", "commit_id": "aaa", '
+                '"state": "CHANGES_REQUESTED", "body": "a\\nb"}\n'
+                '{"review_id": 12, "author": "bot", "commit_id": "aaa", '
+                '"state": "COMMENTED", "body": "<!-- marker -->"}\n')
+    page_two = ('{"review_id": 13, "author": "bot", "commit_id": "bbb", '
+                '"state": "CHANGES_REQUESTED", "body": "c"}\n')
     return (page_one + "\n" + page_two).strip()
 
 
 fake = install(reviews_handler)
-reviews = gt.change_requests(PR)["reviews"]
-check("change_requests: JSONL from every page is parsed",
-      [r["review_id"] for r in reviews] == [11, 12], f"got {reviews}")
-check("change_requests: asks gh to walk every page",
+reviews = gt.bot_reviews(PR)
+check("bot_reviews: JSONL from every page is parsed, every state kept",
+      [(r["review_id"], r["state"]) for r in reviews]
+      == [(11, "CHANGES_REQUESTED"), (12, "COMMENTED"), (13, "CHANGES_REQUESTED")],
+      f"got {reviews}")
+check("bot_reviews: asks gh to walk every page",
       "--paginate" in fake.calls[0], f"got {fake.calls[0]}")
+reviews = gt.change_requests(PR)["reviews"]
+check("change_requests: only the blocking reviews, in the contract's projection",
+      reviews == [{"review_id": 11, "author": "bot", "commit_id": "aaa"},
+                  {"review_id": 13, "author": "bot", "commit_id": "bbb"}],
+      f"got {reviews}")
+check("change_requests: its own gh call walks every page",
+      len(fake.calls) == 2 and "--paginate" in fake.calls[1], f"got {fake.calls}")
+
+
+# --- the jq filter itself, through a real jq -------------------------------
+# A fake gh hands back whatever the test wrote, so nothing above can see the
+# filter regress (a `state` clause creeping back in, say). Running the real
+# string through jq over a raw reviews page does. jq is required, not
+# optional: a skipped check is a silent one. [LAW:no-silent-failure]
+
+import shutil  # noqa: E402
+import subprocess as real_subprocess  # noqa: E402
+
+check("jq filter: jq is installed (brew install jq)", shutil.which("jq") is not None)
+raw_page = [
+    {"id": 21, "user": {"login": "github-actions[bot]", "type": "Bot"},
+     "state": "COMMENTED", "commit_id": "aaa", "body": "reviewed\n<!-- m -->"},
+    {"id": 22, "user": {"login": "alice", "type": "User"},
+     "state": "CHANGES_REQUESTED", "commit_id": "aaa", "body": "human"},
+    {"id": 23, "user": {"login": "github-actions[bot]", "type": "Bot"},
+     "state": "CHANGES_REQUESTED", "commit_id": "bbb", "body": "blocking"},
+]
+
+
+def through_jq():
+    out = real_subprocess.run(
+        ["jq", "-c", gt._BOT_REVIEWS_JQ], input=json.dumps(raw_page), text=True,
+        capture_output=True, check=True,
+    ).stdout
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+# Behind check_returns so a missing jq fails THIS check and the rest of the
+# suite still runs and reports.
+check_returns("jq filter: keeps every Bot review whatever its state, drops the human, "
+              "emits the bot_reviews projection one object per line",
+              through_jq,
+              [{"review_id": 21, "author": "github-actions[bot]", "commit_id": "aaa",
+                "state": "COMMENTED", "body": "reviewed\n<!-- m -->"},
+               {"review_id": 23, "author": "github-actions[bot]", "commit_id": "bbb",
+                "state": "CHANGES_REQUESTED", "body": "blocking"}])
 
 
 # --- response-shape helper: a null at each level names that field ----------
