@@ -184,7 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("wait", cmd_wait,
             help="block until the head SHA's review completes; nonzero exit "
-                 "unless conclusion is success")
+                 "unless conclusion is success AND the head was reviewed (a "
+                 "spent round cap completes green without reading it)")
     p.add_argument("pr", help="PR URL or number")
 
     p = add("fetch", cmd_fetch, help="canonical findings JSON")
