@@ -86,11 +86,12 @@ where it has one. `[LAW:no-silent-failure]`
 Raises `RuntimeError` with a human-readable message on timeout or unrecoverable
 failure. Never returns a dict with `status != "completed"` — callers do not poll.
 
-For providers that review synchronously inside `fetch`, implement `wait` as a
-no-op that returns `{"status": "completed", "conclusion": "success", "sha": "",
-"url": None, "reviewed": True, "not_reviewed_reason": None}` and document that
-behavior — a synchronous provider's `wait` verifying its own review exists IS
-the proof the head was reviewed.
+A provider that reviews synchronously (inside `trigger` or `fetch`) has
+nothing to poll, but its `wait` still has to prove the head was reviewed: read
+the PR for the review this provider posted on the head SHA and return it as
+`reviewed: True` with that review's URL, or raise naming the SHA. `reviewed:
+True` is never a constant — an asserted-but-unchecked verdict is the exact hole
+this field exists to close. `adversarial_provider.wait` is the reference shape.
 
 ### `fetch(pr_url: str) -> dict`
 

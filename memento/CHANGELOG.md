@@ -3,7 +3,7 @@ Each version's section is written in the PR that bumps `.claude-plugin/plugin.js
 ## v0.3.0 - 2026-09-05
 
 - feat(address-pr-reviews): `wait()` reports whether the head was actually reviewed (`reviewed`, `not_reviewed_reason`), read from the reviewer's newest artifact; `review wait` exits nonzero on an unreviewed head, so a spent round cap halts the loop instead of merging green and unread
-- test(address-pr-reviews): the bot-review jq filter runs through a real jq; the adversarial provider's `wait` and `review wait`'s halt gate are covered end to end
+- test(address-pr-reviews): the action provider's reviewed-verdict (`parse_agent_artifact`, `head_review_verdict`, `wait()` through a fake `gh`), the bot-review jq filter through a real jq, the adversarial provider's `wait`, and `review wait`'s halt gate are covered end to end
 
 ## v0.2.0 - 2026-09-03
 

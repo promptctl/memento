@@ -6,7 +6,8 @@ NotImplementedError on every method until the local agent is implemented.
 
 To implement:
 1. Decide how the local agent is invoked (binary, Python script, claude -p, etc.)
-2. Implement `wait` (or make it a synchronous no-op if `fetch` blocks)
+2. Implement `wait`: even when the agent runs synchronously, `wait` proves the
+   head was reviewed by finding this provider's own review on the head SHA
 3. Implement `fetch` to run the agent and emit canonical findings JSON
 4. If the agent can mark findings as done, implement `resolve`
 5. Add a `setup_check` that verifies the binary / model is available
@@ -45,10 +46,10 @@ def trigger(pr_url: str) -> dict:
 def wait(pr_url: str) -> dict:
     raise NotImplementedError(
         "local_provider.wait is not yet implemented. "
-        "If the local agent runs synchronously inside trigger(), implement wait "
-        "as a no-op returning {\"status\": \"completed\", \"conclusion\": \"success\", "
-        '"sha\": \"\", \"url\": None, \"reviewed\": True, \"not_reviewed_reason\": None}. '
-        "If it runs asynchronously, poll for completion."
+        "If the local agent runs synchronously inside trigger(), wait still proves "
+        "the head was reviewed: find this provider's own review on the head SHA and "
+        "return it as reviewed: True, or raise naming the SHA — never a constant "
+        "(see adversarial_provider.wait). If it runs asynchronously, poll for completion."
     )
 
 
