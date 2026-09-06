@@ -208,9 +208,9 @@ The plugin carries its version in `memento/.claude-plugin/plugin.json`. The mark
 entry deliberately carries **no** version field, so there is no second declaration that
 could disagree with the manifest.
 
-Tags are named `<plugin>--v<version>` — `memento--v0.4.0` for the current release — which
-with a single plugin means one tag per release. `claude plugin tag memento --push`
-creates it and publishes `memento/CHANGELOG.md`'s newest section as the release notes.
+Tags are named `<plugin>--v<version>`, which with a single plugin means one tag per
+release. `claude plugin tag memento --push` creates it and publishes
+`memento/CHANGELOG.md`'s newest section as the release notes.
 
 Releases follow the org-wide procedure in
 [promptctl/.github's RELEASING.md](https://github.com/promptctl/.github/blob/master/RELEASING.md).
