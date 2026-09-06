@@ -1,5 +1,10 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag auto-bottle --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.2.0 - 2026-09-06
+
+- feat(auto-bottle): settings live in memento.conf, per user, per project and per session
+- feat(auto-bottle): a signed context_ceiling adjusts the layer beneath it
+
 ## v0.1.2 - 2026-09-02
 
 - fix(message-in-a-bottle): clear the input box before writing into it
