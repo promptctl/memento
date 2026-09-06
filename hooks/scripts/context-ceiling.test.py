@@ -501,7 +501,7 @@ check("underscores between digits group a number rather than breaking it",
 # The session id becomes a path exactly once, so that is where its shape is settled. An
 # absolute id would discard the sessions directory outright; a relative one would climb out
 # of it. Either reads a config no layer of this design points at.
-for escape in ("/tmp", "../..", "a/b"):
+for escape in ("/tmp", "../..", "a/b", "..", "./..", "..//", ".", "/"):
     code, out, err = run([user, assistant(OVER)], ceiling=None, session=escape,
                          user_conf="context_ceiling = 300000\n")
     check(f"a session id of {escape!r} is refused rather than read as a directory",

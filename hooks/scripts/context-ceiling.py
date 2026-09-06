@@ -216,13 +216,20 @@ def session_config(session_id):
     so the one place it becomes a path is the one place its shape is settled. `Path.__truediv__`
     discards the left operand entirely when the right is absolute, and follows `..` when it is
     not, so an id that is not a bare name reads a config from somewhere no layer of this design
-    reaches - silently, and as though a session had set it."""
-    path = SESSION_CONFIGS / str(session_id) / CONFIG_NAME
-    if path.parent.parent != SESSION_CONFIGS:
-        sys.exit(f"memento config: session id {session_id!r} names {path.parent}, which is not "
+    reaches - silently, and as though a session had set it.
+
+    The containment is asked of the resolved directory rather than of the id's spelling, because
+    the spellings that leave the tree do not form a list: `..`, `./..` and `..//` all name the
+    config home, where the user's own file sits, and reading it here would apply one file as two
+    layers - the divergence project_settings passes over the user config to avoid. Resolving
+    first collapses every spelling to the one directory it means, so there is one thing to
+    compare and no enumeration to get wrong."""
+    directory = (SESSION_CONFIGS / str(session_id)).resolve()
+    if directory.parent != SESSION_CONFIGS.resolve():
+        sys.exit(f"memento config: session id {session_id!r} names {directory}, which is not "
                  f"a session directory under {SESSION_CONFIGS}. Memento cannot tell which "
                  f"session's settings it was meant to read.")
-    return path
+    return directory / CONFIG_NAME
 
 def resolve_ceiling(hook):
     """The ceiling in force, folded from the least specific layer to the most.
