@@ -261,10 +261,13 @@ check("an unrecognised tool is denied by default", denied(out), str(out))
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
                 tool_name="Skill", tool_input={"skill": "memento:message-in-a-bottle"})
 check("the handoff skill is permitted", out is None, str(out))
+# The retired namespace is a denial, not a synonym. auto-bottle exposed this same skill file
+# under its own name until 0.4.0; nothing ships it now, so the old name is new work like any
+# other unrecognised skill - and this case fails if a second name is ever readmitted.
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
                 tool_name="Skill", tool_input={"skill": "auto-bottle:message-in-a-bottle"})
-check("the handoff skill is permitted under the namespace of the plugin shipping this hook",
-      out is None, str(out))
+check("the close-out's retired namespace is denied, not accepted as a second name",
+      denied(out), str(out))
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
                 tool_name="Skill", tool_input={"skill": "laws:code"})
 check("another skill is denied", denied(out), str(out))

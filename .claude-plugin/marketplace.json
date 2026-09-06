@@ -8,12 +8,7 @@
     {
       "name": "memento",
       "source": "./memento",
-      "description": "Pull the next lit ticket (next), address PR review findings with judgment (address-pr-reviews), and write the handoff a future session wakes up with (message-in-a-bottle)."
-    },
-    {
-      "name": "auto-bottle",
-      "source": "./auto-bottle",
-      "description": "The context ceiling, enforced: a Stop hook that refuses to let a session past the token maximum end its turn until it has written the handoff."
+      "description": "Pull the next lit ticket (next), address PR review findings with judgment (address-pr-reviews), write the handoff a future session wakes up with (message-in-a-bottle), and enforce the context ceiling that makes writing it mandatory."
     }
   ]
 }
