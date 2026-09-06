@@ -458,6 +458,14 @@ check("an unparseable override fails loudly",
 code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceilling = 350000\n")
 check("a misspelled key fails loudly rather than reading as a setting nobody made",
       code == 1 and "ceilling" in err and "ceiling" in err, f"{code} {err}")
+# The key this setting used to be spelled with is a rejection, not a synonym. Every other
+# case here writes the current spelling, so nothing else in the suite would notice an alias
+# readmitted for compatibility. The new key is a substring of the retired one, so the
+# message is asked for both: the key refused, and the key that is legal.
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 350000\n")
+check("the retired key is refused rather than read as a synonym",
+      code == 1 and "context_ceiling" in err and "It reads: ceiling" in err and "line 1" in err,
+      f"{code} {err}")
 code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceiling 350000\n")
 check("a line with no `=` fails loudly",
       code == 1 and "key = value" in err, f"{code} {err}")
