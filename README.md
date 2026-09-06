@@ -111,12 +111,12 @@ setting is one more key rather than one more file, one more lookup and one more
 precedence chain. The home-rooted layers follow `XDG_CONFIG_HOME` where it is set, and
 `MEMENTO_CONFIG_HOME` moves them outright.
 
-Each file is `key = value` lines, `#` starts a comment, and `context_ceiling` is the only
-key so far:
+Each file is `key = value` lines, `#` starts a comment, and `ceiling` is the only key
+so far:
 
 ```
 # this repo runs long
-context_ceiling = 350_000
+ceiling = 350_000
 ```
 
 It takes a count, a signed adjustment, or one of `off`, `none`, `never`, `disabled` in
@@ -125,8 +125,23 @@ whatever the layers beneath it resolved to, which is what lets one session delay
 handoff without touching — or knowing — the number the project pinned:
 
 ```
-context_ceiling = +100_000
+ceiling = +100_000
 ```
+
+A session can create that layer for itself. The `<session-id>` in its path comes from
+`CLAUDE_CODE_SESSION_ID`, so one command gives the session running right now more room:
+
+```
+dir="${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID"
+mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
+```
+
+Because the value is signed it lands on top of what the project pinned rather than
+replacing it — a project at 250,000 resolves to 350,000 — and it takes effect on the very
+next hook invocation, with nothing to restart, reload or signal. A session raises its
+ceiling before it breaches it, not after: past the ceiling the `PreToolUse` gate denies
+that command along with every other Bash call that is not `git` or the close-out
+launcher.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
@@ -193,9 +208,9 @@ The plugin carries its version in `memento/.claude-plugin/plugin.json`. The mark
 entry deliberately carries **no** version field, so there is no second declaration that
 could disagree with the manifest.
 
-Tags are named `<plugin>--v<version>` — `memento--v0.4.0` for the current release — which
-with a single plugin means one tag per release. `claude plugin tag memento --push`
-creates it and publishes `memento/CHANGELOG.md`'s newest section as the release notes.
+Tags are named `<plugin>--v<version>`, which with a single plugin means one tag per
+release. `claude plugin tag memento --push` creates it and publishes
+`memento/CHANGELOG.md`'s newest section as the release notes.
 
 Releases follow the org-wide procedure in
 [promptctl/.github's RELEASING.md](https://github.com/promptctl/.github/blob/master/RELEASING.md).

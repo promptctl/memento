@@ -39,7 +39,11 @@ CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "prompt
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
 PROJECT_CONFIG_DIR = ".promptctl"
-LEGAL_KEYS = frozenset(("context_ceiling",))
+# One setting, so its name has one home: what a person writes, what the file parse admits and
+# what the fold reads are the same string. Spelled out at each of those, a rename reaching two
+# of the three leaves a written ceiling legal and unread. [LAW:one-source-of-truth]
+CEILING_KEY = "ceiling"
+LEGAL_KEYS = frozenset((CEILING_KEY,))
 DISABLING_WORDS = ("off", "none", "never", "disabled")
 # The one shape a written ceiling may take besides a disabling word, so what the parse accepts
 # is declared here rather than inferred from a strip, a slice and a predicate that each admit a
@@ -186,7 +190,7 @@ def environment_settings():
     routinely - where a person who wrote a key into a file and left the value off has made a
     mistake, which is why only the written spelling is an error."""
     written = os.environ.get("MEMENTO_CONTEXT_CEILING", "").strip()
-    return {"context_ceiling": Written("MEMENTO_CONTEXT_CEILING", written)} if written else {}
+    return {CEILING_KEY: Written("MEMENTO_CONTEXT_CEILING", written)} if written else {}
 
 def parse_ceiling(written):
     """One written ceiling, as the move it makes on the ceiling beneath it.
@@ -244,7 +248,7 @@ def resolve_ceiling(hook):
     session = session_config(hook["session_id"])
     layers = (settings_in(USER_CONFIG), project_settings(anchor),
               settings_in(session), environment_settings())
-    written = [layer["context_ceiling"] for layer in layers if "context_ceiling" in layer]
+    written = [layer[CEILING_KEY] for layer in layers if CEILING_KEY in layer]
     ceiling = DEFAULT_CEILING
     for setting in written:
         ceiling = parse_ceiling(setting)(ceiling)

@@ -367,62 +367,62 @@ def blocked_at(out, ceiling):
     return bool(out) and out.get("decision") == "block" and f"{ceiling:,}" in out.get("reason", "")
 
 
-_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="context_ceiling = 50000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="ceiling = 50000\n")
 check("the user config is honoured when the environment is silent", blocked_at(out, 50_000), str(out))
-_, out, _ = run([user, assistant(60_000)], ceiling="", user_conf="context_ceiling = 50_000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling="", user_conf="ceiling = 50_000\n")
 check("an exported-empty override is silence, not a value, and falls through to the file",
       blocked_at(out, 50_000), str(out))
-code, out, _ = run([user, assistant(60_000)], ceiling=200_000, user_conf="context_ceiling = 50000\n")
+code, out, _ = run([user, assistant(60_000)], ceiling=200_000, user_conf="ceiling = 50000\n")
 check("the environment outranks every file", code == 0 and out is None, f"{code} {out}")
 # The session config is the closest file to the environment, so it is the one that says the
 # environment really is last rather than merely ahead of the furthest layer.
-code, out, _ = run([user, assistant(60_000)], ceiling=200_000, session_conf="context_ceiling = 50000\n")
+code, out, _ = run([user, assistant(60_000)], ceiling=200_000, session_conf="ceiling = 50000\n")
 check("the environment outranks the session config too", code == 0 and out is None, f"{code} {out}")
 
-_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 50000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="ceiling = 50000\n")
 check("a project config is honoured", blocked_at(out, 50_000), str(out))
-_, out, _ = run([user, assistant(60_000)], ceiling=None, session_conf="context_ceiling = 50000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling=None, session_conf="ceiling = 50000\n")
 check("a session config is honoured", blocked_at(out, 50_000), str(out))
 # Through XDG rather than the override, so the path people actually write to is the one under
 # test rather than a path only the suite ever uses.
 _, out, _ = run([user, assistant(60_000)], ceiling=None, xdg=scratch_dir(),
-                user_conf="context_ceiling = 50000\n")
+                user_conf="ceiling = 50000\n")
 check("the user config is read from $XDG_CONFIG_HOME/promptctl", blocked_at(out, 50_000), str(out))
 
-_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="context_ceiling = 20000\n",
-                project_conf="context_ceiling = 50000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="ceiling = 20000\n",
+                project_conf="ceiling = 50000\n")
 check("the project outranks the user config", blocked_at(out, 50_000), str(out))
-_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 20000\n",
-                session_conf="context_ceiling = 50000\n")
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="ceiling = 20000\n",
+                session_conf="ceiling = 50000\n")
 check("the session outranks the project config", blocked_at(out, 50_000), str(out))
 
 # The whole point of the exercise: one session delays its own handoff without editing, or
 # even knowing, the number the project pinned.
-_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="context_ceiling = 250000\n",
-                session_conf="context_ceiling = +100_000\n")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="ceiling = 250000\n",
+                session_conf="ceiling = +100_000\n")
 check("a session adjustment moves the ceiling the project pinned", blocked_at(out, 350_000), str(out))
-_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="context_ceiling = 250000\n",
-                session_conf="context_ceiling = -50000\n")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="ceiling = 250000\n",
+                session_conf="ceiling = -50000\n")
 check("an adjustment can lower the ceiling too", blocked_at(out, 200_000), str(out))
-_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = +30000\n",
-                project_conf="context_ceiling = +20000\n")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="ceiling = +30000\n",
+                project_conf="ceiling = +20000\n")
 check("adjustments at two layers both apply, in order", blocked_at(out, 300_000), str(out))
-code, out, _ = run([user, assistant(5_000_000)], ceiling=None, user_conf="context_ceiling = off\n",
-                   session_conf="context_ceiling = +10000\n")
+code, out, _ = run([user, assistant(5_000_000)], ceiling=None, user_conf="ceiling = off\n",
+                   session_conf="ceiling = +10000\n")
 check("adjusting a ceiling that is switched off leaves it off", code == 0 and out is None, f"{code} {out}")
-_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = off\n",
-                session_conf="context_ceiling = 300000\n")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="ceiling = off\n",
+                session_conf="ceiling = 300000\n")
 check("a later absolute value overrules an earlier off", blocked_at(out, 300_000), str(out))
 
 for word in ("off", "NONE", "never", "disabled"):
     code, out, _ = run([user, assistant(5_000_000)], ceiling=None,
-                       user_conf=f"context_ceiling = {word}\n")
+                       user_conf=f"ceiling = {word}\n")
     check(f"the gate can be switched off by writing {word!r}",
           code == 0 and out is None, f"{code} {out}")
 
 # Found by walking, so a subdirectory, a package, or a worktree inherits the repo above it.
 root = scratch_dir()
-write_conf(os.path.join(root, ".promptctl", CONFIG_NAME), "context_ceiling = 50000\n")
+write_conf(os.path.join(root, ".promptctl", CONFIG_NAME), "ceiling = 50000\n")
 deep = os.path.join(root, "packages", "worker")
 os.makedirs(deep)
 _, out, _ = run([user, assistant(60_000)], ceiling=None, project=deep)
@@ -434,7 +434,7 @@ _, out, _ = run([user, assistant(60_000)], ceiling=None, project=elsewhere,
                 extra_env={"CLAUDE_PROJECT_DIR": root})
 check("CLAUDE_PROJECT_DIR anchors the project config, not the payload's cwd",
       blocked_at(out, 50_000), str(out))
-code, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 50000\n",
+code, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="ceiling = 50000\n",
                    extra_env={"CLAUDE_PROJECT_DIR": elsewhere})
 check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
       code == 0 and out is None, f"{code} {out}")
@@ -443,13 +443,13 @@ check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
 shared = scratch_dir()
 code, out, _ = run([user, assistant(400_000)], ceiling=None, project=shared,
                    config_home=os.path.join(shared, ".promptctl"),
-                   user_conf="context_ceiling = +10000\n")
+                   user_conf="ceiling = +10000\n")
 check("the user config is not applied a second time as the project config",
       blocked_at(out, 260_000), str(out))
 
 # --- a setting nobody can misspell into silence -------------------------------------------
 
-code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 350k\n")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceiling = 350k\n")
 check("a ceiling that does not parse fails loudly, naming the file and the line",
       code == 1 and "350k" in err and "line 1" in err and CONFIG_NAME in err, f"{code} {err}")
 code, out, err = run([user], ceiling="lots")
@@ -457,19 +457,27 @@ check("an unparseable override fails loudly",
       code == 1 and "lots" in err and "MEMENTO_CONTEXT_CEILING" in err, f"{code} {err}")
 code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceilling = 350000\n")
 check("a misspelled key fails loudly rather than reading as a setting nobody made",
-      code == 1 and "ceilling" in err and "context_ceiling" in err, f"{code} {err}")
-code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling 350000\n")
+      code == 1 and "ceilling" in err and "ceiling" in err, f"{code} {err}")
+# The key this setting used to be spelled with is a rejection, not a synonym. Every other
+# case here writes the current spelling, so nothing else in the suite would notice an alias
+# readmitted for compatibility. The new key is a substring of the retired one, so the
+# message is asked for both: the key refused, and the key that is legal.
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 350000\n")
+check("the retired key is refused rather than read as a synonym",
+      code == 1 and "context_ceiling" in err and "It reads: ceiling" in err and "line 1" in err,
+      f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceiling 350000\n")
 check("a line with no `=` fails loudly",
       code == 1 and "key = value" in err, f"{code} {err}")
-code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling =\n")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceiling =\n")
 check("a key written with no value fails loudly, unlike an exported-empty variable",
       code == 1 and "key = value" in err, f"{code} {err}")
 code, out, err = run([user, assistant(OVER)], ceiling=None,
-                     user_conf="context_ceiling = 300000\ncontext_ceiling = 400000\n")
+                     user_conf="ceiling = 300000\nceiling = 400000\n")
 check("one key set twice in one file fails loudly",
       code == 1 and "twice" in err and "line 2" in err, f"{code} {err}")
-code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 10000\n",
-                     session_conf="context_ceiling = -50000\n")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceiling = 10000\n",
+                     session_conf="ceiling = -50000\n")
 check("adjustments that resolve below zero fail loudly, naming both layers",
       code == 1 and "never negative" in err and err.count(CONFIG_NAME) == 2, f"{code} {err}")
 
@@ -478,7 +486,7 @@ check("adjustments that resolve below zero fail loudly, naming both layers",
 # by way of a misspelling, which is the one outcome this section exists to prevent.
 for typo in ("o_f_f", "n_one", "dis_abled"):
     code, out, err = run([user, assistant(5_000_000)], ceiling=None,
-                         user_conf=f"context_ceiling = {typo}\n")
+                         user_conf=f"ceiling = {typo}\n")
     check(f"{typo!r} is a typo rather than a way to switch the gate off",
           code == 1 and typo in err, f"{code} {err}")
 
@@ -486,7 +494,7 @@ for typo in ("o_f_f", "n_one", "dis_abled"):
 # traceback took its place. The shape the parse accepts and the one it converts are now one.
 for exotic in ("\u00b2", "\u2075"):
     code, out, err = run([user, assistant(OVER)], ceiling=None,
-                         user_conf=f"context_ceiling = {exotic}\n")
+                         user_conf=f"ceiling = {exotic}\n")
     check(f"a digit-like character {exotic!r} that is not a number fails loudly, not by traceback",
           code == 1 and "should hold a number" in err and "Traceback" not in err, f"{code} {err}")
 
@@ -494,10 +502,10 @@ for exotic in ("\u00b2", "\u2075"):
 # what they would write in code are the same set - no more, and no less.
 for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
     code, out, err = run([user, assistant(OVER)], ceiling=None,
-                         user_conf=f"context_ceiling = {malformed}\n")
+                         user_conf=f"ceiling = {malformed}\n")
     check(f"{malformed!r} is not a number of tokens", code == 1 and "should hold a number" in err,
           f"{code} {err}")
-_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = 3_5_0000\n")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="ceiling = 3_5_0000\n")
 check("underscores between digits group a number rather than breaking it",
       blocked_at(out, 350_000), str(out))
 
@@ -506,13 +514,13 @@ check("underscores between digits group a number rather than breaking it",
 # of it. Either reads a config no layer of this design points at.
 for escape in ("/tmp", "../..", "a/b", "..", "./..", "..//", ".", "/"):
     code, out, err = run([user, assistant(OVER)], ceiling=None, session=escape,
-                         user_conf="context_ceiling = 300000\n")
+                         user_conf="ceiling = 300000\n")
     check(f"a session id of {escape!r} is refused rather than read as a directory",
           code == 1 and "session directory" in err, f"{code} {err}")
 
 _, out, _ = run([user, assistant(60_000)], ceiling=None,
                 user_conf="# the handoff comes late on this machine\n\n"
-                          "context_ceiling = 50000  # measured, not guessed\n")
+                          "ceiling = 50000  # measured, not guessed\n")
 check("comments and blank lines are not settings", blocked_at(out, 50_000), str(out))
 
 # The shipped default, bracketed rather than named: a trivial session passes and one larger
