@@ -129,9 +129,10 @@ The project layer is found by walking up, so a subdirectory or a worktree inheri
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
 the ceiling cannot change because something ran `cd`. Anything else — a typo, a unit
 suffix, a misspelled key, a key set twice in one file, an adjustment resolving below
-zero — stops the hook with an error naming the file and the line, rather than quietly
-falling back to the default, on the grounds that a ceiling you believe you moved and did
-not is worse than no ceiling. Every decision the hook makes is appended to
+zero — stops the hook with an error naming where the setting came from: the file and the
+line for a config file, the variable for `MEMENTO_CONTEXT_CEILING`. It never falls back
+quietly to the default, on the grounds that a ceiling you believe you moved and did not
+is worse than no ceiling. Every decision the hook makes is appended to
 `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
 you can tell an allow apart from a hook that never ran.
 
