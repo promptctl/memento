@@ -19,6 +19,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import string
@@ -40,6 +41,13 @@ SESSION_CONFIGS = CONFIG_HOME / "sessions"
 PROJECT_CONFIG_DIR = ".promptctl"
 LEGAL_KEYS = frozenset(("context_ceiling",))
 DISABLING_WORDS = ("off", "none", "never", "disabled")
+# The one shape a written ceiling may take besides a disabling word, so what the parse accepts
+# is declared here rather than inferred from a strip, a slice and a predicate that each admit a
+# little more than the next. [0-9] rather than \d because `str.isdigit` was true of characters
+# `int` then refused - the guard and the conversion disagreed, and the traceback was the tell.
+# Underscores group digits exactly as Python's own literals do: between digits, never at an end.
+# [LAW:types-are-the-program]
+CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
 # One setting as one layer wrote it, carrying where a person goes to change it. The source is
 # built where it is known rather than reconstructed later, so nothing has to hold a line
 # number the environment does not have. [LAW:one-source-of-truth]
@@ -159,9 +167,10 @@ def project_settings(anchor):
 
     Walking rather than checking one directory is what lets a worktree, a subdirectory, or a
     nested package inherit the repo that contains it. The user's own config is passed over
-    instead of being found twice: a project directory at $HOME would otherwise apply one file
-    as two layers, and one fact with two homes is the divergence [LAW:one-source-of-truth]
-    exists to forbid."""
+    instead of being found twice: a config home that is itself a `.promptctl` directory - what
+    MEMENTO_CONFIG_HOME pointed at one gives you - puts the user's file on the walk, where it
+    would apply a second time as a project, and one fact with two homes is the divergence
+    [LAW:one-source-of-truth] exists to forbid."""
     start = Path(anchor).resolve()
     user = USER_CONFIG.resolve()
     for directory in (start, *start.parents):
@@ -187,19 +196,33 @@ def parse_ceiling(written):
     fold then applies them in order with nothing left to dispatch on, which is what lets a
     project pin a number and a session move it by a delta without either knowing the other
     exists. [LAW:dataflow-not-control-flow]"""
-    cleaned = written.text.replace("_", "")
-    if cleaned.lower() in DISABLING_WORDS:
+    if written.text.lower() in DISABLING_WORDS:
         return lambda beneath: math.inf
-    sign, digits = (cleaned[:1], cleaned[1:]) if cleaned[:1] in ("+", "-") else ("", cleaned)
-    if not digits.isdigit():
+    shape = CEILING_RE.match(written.text)
+    if not shape:
         sys.exit(f"memento config: {written.source} should hold a number of tokens, a signed "
                  f"adjustment like +100_000, or one of {'/'.join(DISABLING_WORDS)}, but reads "
                  f"{written.text!r}. Fix it or remove it.")
-    magnitude = int(digits)
-    if not sign:
+    magnitude = int(shape.group("digits").replace("_", ""))
+    if not shape.group("sign"):
         return lambda beneath: magnitude
-    moved = magnitude if sign == "+" else -magnitude
+    moved = magnitude if shape.group("sign") == "+" else -magnitude
     return lambda beneath: beneath + moved
+
+def session_config(session_id):
+    """The session layer's path, for a session id that names one directory and nothing else.
+
+    [LAW:parse-dont-validate] a session id arrives in the payload and leaves here as a path,
+    so the one place it becomes a path is the one place its shape is settled. `Path.__truediv__`
+    discards the left operand entirely when the right is absolute, and follows `..` when it is
+    not, so an id that is not a bare name reads a config from somewhere no layer of this design
+    reaches - silently, and as though a session had set it."""
+    path = SESSION_CONFIGS / str(session_id) / CONFIG_NAME
+    if path.parent.parent != SESSION_CONFIGS:
+        sys.exit(f"memento config: session id {session_id!r} names {path.parent}, which is not "
+                 f"a session directory under {SESSION_CONFIGS}. Memento cannot tell which "
+                 f"session's settings it was meant to read.")
+    return path
 
 def resolve_ceiling(hook):
     """The ceiling in force, folded from the least specific layer to the most.
@@ -211,7 +234,7 @@ def resolve_ceiling(hook):
     something ran `cd` would be a ceiling nobody set."""
     cwd = hook["cwd"]
     anchor = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
-    session = SESSION_CONFIGS / str(hook["session_id"]) / CONFIG_NAME
+    session = session_config(hook["session_id"])
     layers = (settings_in(USER_CONFIG), project_settings(anchor),
               settings_in(session), environment_settings())
     written = [layer["context_ceiling"] for layer in layers if "context_ceiling" in layer]

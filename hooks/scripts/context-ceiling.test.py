@@ -77,7 +77,8 @@ user = {"type": "user", "isSidechain": False, "message": {"content": "hi"}}
 
 def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active=False,
         ceiling=TEST_CEILING, hook=HOOK, user_conf=None, project_conf=None, session_conf=None,
-        project=None, config_home=None, xdg=None, log_seed="", extra_env=None):
+        project=None, config_home=None, xdg=None, log_seed="", extra_env=None,
+        session=SESSION):
     """Invoke the hook as Claude Code does. Returns (exit code, parsed stdout, stderr).
 
     ceiling=None leaves MEMENTO_CONTEXT_CEILING unset, which is how a case reaches the files
@@ -94,7 +95,7 @@ def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active
     if user_conf is not None:
         write_conf(os.path.join(home, CONFIG_NAME), user_conf)
     if session_conf is not None:
-        write_conf(os.path.join(home, "sessions", SESSION, CONFIG_NAME), session_conf)
+        write_conf(os.path.join(home, "sessions", session, CONFIG_NAME), session_conf)
     if project_conf is not None:
         write_conf(os.path.join(project, ".promptctl", CONFIG_NAME), project_conf)
     env = {k: v for k, v in os.environ.items()
@@ -109,7 +110,7 @@ def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active
     if ceiling is not None:
         env["MEMENTO_CONTEXT_CEILING"] = str(ceiling)
     env.update(extra_env or {})
-    payload = {"session_id": SESSION, "hook_event_name": event, "cwd": project,
+    payload = {"session_id": session, "hook_event_name": event, "cwd": project,
                "transcript_path": handle.name, "stop_hook_active": stop_hook_active}
     if tool_name is not None:
         payload["tool_name"] = tool_name
@@ -468,6 +469,43 @@ code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_c
                      session_conf="context_ceiling = -50000\n")
 check("adjustments that resolve below zero fail loudly, naming both layers",
       code == 1 and "never negative" in err and err.count(CONFIG_NAME) == 2, f"{code} {err}")
+
+# A disabling word is matched on what was written, not on what is left after the digit
+# separators come out - `o_f_f` is a typo, and reading it as `off` would take the gate down
+# by way of a misspelling, which is the one outcome this section exists to prevent.
+for typo in ("o_f_f", "n_one", "dis_abled"):
+    code, out, err = run([user, assistant(5_000_000)], ceiling=None,
+                         user_conf=f"context_ceiling = {typo}\n")
+    check(f"{typo!r} is a typo rather than a way to switch the gate off",
+          code == 1 and typo in err, f"{code} {err}")
+
+# `str.isdigit` was true of these and `int` was not, so the crafted message was skipped and a
+# traceback took its place. The shape the parse accepts and the one it converts are now one.
+for exotic in ("\u00b2", "\u2075"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None,
+                         user_conf=f"context_ceiling = {exotic}\n")
+    check(f"a digit-like character {exotic!r} that is not a number fails loudly, not by traceback",
+          code == 1 and "should hold a number" in err and "Traceback" not in err, f"{code} {err}")
+
+# Underscores group digits as Python's own literals do, so what a person writes in a config and
+# what they would write in code are the same set - no more, and no less.
+for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None,
+                         user_conf=f"context_ceiling = {malformed}\n")
+    check(f"{malformed!r} is not a number of tokens", code == 1 and "should hold a number" in err,
+          f"{code} {err}")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = 3_5_0000\n")
+check("underscores between digits group a number rather than breaking it",
+      blocked_at(out, 350_000), str(out))
+
+# The session id becomes a path exactly once, so that is where its shape is settled. An
+# absolute id would discard the sessions directory outright; a relative one would climb out
+# of it. Either reads a config no layer of this design points at.
+for escape in ("/tmp", "../..", "a/b"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None, session=escape,
+                         user_conf="context_ceiling = 300000\n")
+    check(f"a session id of {escape!r} is refused rather than read as a directory",
+          code == 1 and "session directory" in err, f"{code} {err}")
 
 _, out, _ = run([user, assistant(60_000)], ceiling=None,
                 user_conf="# the handoff comes late on this machine\n\n"
