@@ -128,12 +128,12 @@ handoff without touching — or knowing — the number the project pinned:
 ceiling = +100_000
 ```
 
-A session can create that layer for itself. It lives at
-`~/.config/promptctl/sessions/<session-id>/memento.conf`, and the id is in
+A session can create that layer for itself. The `<session-id>` in its path comes from
 `CLAUDE_CODE_SESSION_ID`, so one command gives the session running right now more room:
 
 ```
-mkdir -p ~/.config/promptctl/sessions/$CLAUDE_CODE_SESSION_ID && echo 'ceiling = +100_000' > ~/.config/promptctl/sessions/$CLAUDE_CODE_SESSION_ID/memento.conf
+dir="${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID"
+mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
 ```
 
 Because the value is signed it lands on top of what the project pinned rather than
