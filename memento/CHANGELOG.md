@@ -1,5 +1,10 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.5.0 - 2026-09-06
+
+- feat!: the one setting a `memento.conf` carries is spelled `ceiling`, and `context_ceiling` is not an alias for it. A config file that still sets the old key fails the way any unknown key does, naming the file and the line it read, so the rename surfaces as an error rather than as a ceiling that quietly reverted to the default. The `MEMENTO_CONTEXT_CEILING` environment variable keeps its name, and the default is still 250,000 tokens.
+- docs: the README gives the recipe for a session that wants more headroom than the project allows — the session-layer path, the `CLAUDE_CODE_SESSION_ID` one-liner that writes it, and the signed value that adds to the project's ceiling instead of replacing it. Every piece of it was already in that section, spread across three paragraphs the reader had to combine.
+
 ## v0.4.0 - 2026-09-06
 
 - feat!: `auto-bottle` is gone and memento is the only plugin. It shipped one skill file under a second namespace and symlinked the hook directory out of the repo root, so one skill answered to two names and every release meant two tags. Install `memento` and the ceiling hook comes with it; anyone who installed `auto-bottle` should uninstall it.
