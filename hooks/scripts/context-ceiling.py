@@ -14,10 +14,12 @@ unexpected raises, and a traceback with exit 1 is Claude Code's non-blocking err
 session continues and the breakage is visible.
 """
 
+import collections
 import fcntl
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import string
@@ -26,9 +28,30 @@ from datetime import datetime
 from pathlib import Path
 
 DEFAULT_CEILING = 250_000
-CEILING_FILE = Path(os.environ.get("MEMENTO_CEILING_FILE")
-                    or Path.home() / ".claude" / "memento" / "context-ceiling")
+# One filename at every layer, so a second setting is a new key rather than a new file, a new
+# lookup and a new precedence chain. Naming the file after its one setting put the thing that
+# varies in a filename, where only more filenames can express it. [LAW:composability]
+CONFIG_NAME = "memento.conf"
+# The promptctl config home, which is where the XDG convention says a config home is. A repo
+# carries its own as a dot-directory instead, because a checkout has no XDG anything.
+XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl")
+USER_CONFIG = CONFIG_HOME / CONFIG_NAME
+SESSION_CONFIGS = CONFIG_HOME / "sessions"
+PROJECT_CONFIG_DIR = ".promptctl"
+LEGAL_KEYS = frozenset(("context_ceiling",))
 DISABLING_WORDS = ("off", "none", "never", "disabled")
+# The one shape a written ceiling may take besides a disabling word, so what the parse accepts
+# is declared here rather than inferred from a strip, a slice and a predicate that each admit a
+# little more than the next. [0-9] rather than \d because `str.isdigit` was true of characters
+# `int` then refused - the guard and the conversion disagreed, and the traceback was the tell.
+# Underscores group digits exactly as Python's own literals do: between digits, never at an end.
+# [LAW:types-are-the-program]
+CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
+# One setting as one layer wrote it, carrying where a person goes to change it. The source is
+# built where it is known rather than reconstructed later, so nothing has to hold a line
+# number the environment does not have. [LAW:one-source-of-truth]
+Written = collections.namedtuple("Written", "source text")
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
 LOG_CAP = 2_000_000
@@ -112,25 +135,123 @@ def statements(command):
             raise ValueError(f"shell-active character {char!r} in {command!r}")
     return parts
 
-def written_at(path):
-    return path.read_text() if path.exists() else ""
+def settings_in(path):
+    """The settings one config file sets, as {key: Written}.
 
-def resolve_ceiling():
-    """The ceiling in force: the environment, else the file, else the default.
-    [LAW:no-silent-failure] a typo must not read as the default - a ceiling its author believes
-    they moved and did not is worse than none."""
-    for source, written in (("MEMENTO_CONTEXT_CEILING", os.environ.get("MEMENTO_CONTEXT_CEILING", "")),
-                            (CEILING_FILE, written_at(CEILING_FILE))):
-        text = written.strip().replace("_", "")
-        if not text:
+    [LAW:no-silent-failure] every line that is not a legal setting exits here rather than being
+    passed over. A misspelled key that reads as a no-op is precisely the ceiling its author
+    believes they set and did not, which is the failure the value parse below already refuses,
+    and a key set twice in one file is one fact with two homes."""
+    found = {}
+    if not path.exists():
+        return found
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
             continue
-        if text.lower() in DISABLING_WORDS:
-            return math.inf
-        if text.isdigit():
-            return int(text)
-        sys.exit(f"memento context ceiling: {source} should hold a number of tokens or one "
-                 f"of {'/'.join(DISABLING_WORDS)}, but reads {text!r}. Fix it or remove it.")
-    return DEFAULT_CEILING
+        key, assigned, text = (part.strip() for part in stripped.partition("="))
+        if not assigned or not text:
+            sys.exit(f"memento config: {path} line {number} should read `key = value`, "
+                     f"but reads {line.strip()!r}. Fix it or remove it.")
+        if key not in LEGAL_KEYS:
+            sys.exit(f"memento config: {path} line {number} sets {key!r}, which memento has "
+                     f"no such setting for. It reads: {', '.join(sorted(LEGAL_KEYS))}.")
+        if key in found:
+            sys.exit(f"memento config: {path} sets {key!r} twice, at {found[key].source} and "
+                     f"line {number}. Keep the one you meant.")
+        found[key] = Written(f"{path} line {number}", text)
+    return found
+
+def project_settings(anchor):
+    """The settings of the nearest .promptctl/memento.conf at or above the project directory.
+
+    Walking rather than checking one directory is what lets a worktree, a subdirectory, or a
+    nested package inherit the repo that contains it. The user's own config is passed over
+    instead of being found twice: a config home that is itself a `.promptctl` directory - what
+    MEMENTO_CONFIG_HOME pointed at one gives you - puts the user's file on the walk, where it
+    would apply a second time as a project, and one fact with two homes is the divergence
+    [LAW:one-source-of-truth] exists to forbid."""
+    start = Path(anchor).resolve()
+    user = USER_CONFIG.resolve()
+    for directory in (start, *start.parents):
+        candidate = directory / PROJECT_CONFIG_DIR / CONFIG_NAME
+        if candidate.exists() and candidate.resolve() != user:
+            return settings_in(candidate)
+    return {}
+
+def environment_settings():
+    """The one setting the environment can carry, shaped like a file's so it folds with them.
+
+    An exported-empty variable is silence rather than a value, because shells export empty
+    routinely - where a person who wrote a key into a file and left the value off has made a
+    mistake, which is why only the written spelling is an error."""
+    written = os.environ.get("MEMENTO_CONTEXT_CEILING", "").strip()
+    return {"context_ceiling": Written("MEMENTO_CONTEXT_CEILING", written)} if written else {}
+
+def parse_ceiling(written):
+    """One written ceiling, as the move it makes on the ceiling beneath it.
+
+    [LAW:parse-dont-validate] the three things a person can write - a count, a signed
+    adjustment, a disabling word - leave here as one thing: a function of the layer below. The
+    fold then applies them in order with nothing left to dispatch on, which is what lets a
+    project pin a number and a session move it by a delta without either knowing the other
+    exists. [LAW:dataflow-not-control-flow]"""
+    if written.text.lower() in DISABLING_WORDS:
+        return lambda beneath: math.inf
+    shape = CEILING_RE.match(written.text)
+    if not shape:
+        sys.exit(f"memento config: {written.source} should hold a number of tokens, a signed "
+                 f"adjustment like +100_000, or one of {'/'.join(DISABLING_WORDS)}, but reads "
+                 f"{written.text!r}. Fix it or remove it.")
+    magnitude = int(shape.group("digits").replace("_", ""))
+    if not shape.group("sign"):
+        return lambda beneath: magnitude
+    moved = magnitude if shape.group("sign") == "+" else -magnitude
+    return lambda beneath: beneath + moved
+
+def session_config(session_id):
+    """The session layer's path, for a session id that names one directory and nothing else.
+
+    [LAW:parse-dont-validate] a session id arrives in the payload and leaves here as a path,
+    so the one place it becomes a path is the one place its shape is settled. `Path.__truediv__`
+    discards the left operand entirely when the right is absolute, and follows `..` when it is
+    not, so an id that is not a bare name reads a config from somewhere no layer of this design
+    reaches - silently, and as though a session had set it.
+
+    The containment is asked of the resolved directory rather than of the id's spelling, because
+    the spellings that leave the tree do not form a list: `..`, `./..` and `..//` all name the
+    config home, where the user's own file sits, and reading it here would apply one file as two
+    layers - the divergence project_settings passes over the user config to avoid. Resolving
+    first collapses every spelling to the one directory it means, so there is one thing to
+    compare and no enumeration to get wrong."""
+    directory = (SESSION_CONFIGS / str(session_id)).resolve()
+    if directory.parent != SESSION_CONFIGS.resolve():
+        sys.exit(f"memento config: session id {session_id!r} names {directory}, which is not "
+                 f"a session directory under {SESSION_CONFIGS}. Memento cannot tell which "
+                 f"session's settings it was meant to read.")
+    return directory / CONFIG_NAME
+
+def resolve_ceiling(hook):
+    """The ceiling in force, folded from the least specific layer to the most.
+
+    [LAW:single-enforcer] the one place the order between the four layers is decided, so it
+    exists once rather than at each reader. The environment wins because it is an explicit
+    instruction to this process, and the project is anchored at the directory the session
+    belongs to rather than wherever a Bash call last left it - a ceiling that moved because
+    something ran `cd` would be a ceiling nobody set."""
+    cwd = hook["cwd"]
+    anchor = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
+    session = session_config(hook["session_id"])
+    layers = (settings_in(USER_CONFIG), project_settings(anchor),
+              settings_in(session), environment_settings())
+    written = [layer["context_ceiling"] for layer in layers if "context_ceiling" in layer]
+    ceiling = DEFAULT_CEILING
+    for setting in written:
+        ceiling = parse_ceiling(setting)(ceiling)
+    if ceiling < 0:
+        sys.exit(f"memento config: {', then '.join(one.source for one in written)} resolve to "
+                 f"a ceiling of {ceiling:,} tokens, and a count of tokens is never negative.")
+    return ceiling
 
 def records_newest_first(transcript_path):
     """This session's records, reading only as far back as the caller consumes. Sidechains are
@@ -251,13 +372,14 @@ def launched(tool_name, tool_input):
     except ValueError:
         return reaching_for_launcher(command)
 
-def log(hook, tokens, verdict):
+def log(hook, tokens, ceiling, verdict):
     """[LAW:no-silent-failure] a hook that allows emits nothing, and so does one that never ran;
     the log is the only place that difference exists. Its own failure is reported but not fatal
-    - raising would take the gate down with the instrumentation."""
+    - raising would take the gate down with the instrumentation. The ceiling is logged because
+    it is now assembled from four layers, so the line has to say which number won."""
     line = (f"{datetime.now().isoformat(timespec='seconds')} "
             f"session={str(hook.get('session_id'))[:8]} event={hook.get('hook_event_name')} "
-            f"tokens={tokens} ceiling={CEILING} tool={hook.get('tool_name', '-')} "
+            f"tokens={tokens} ceiling={ceiling} tool={hook.get('tool_name', '-')} "
             f"-> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -271,43 +393,46 @@ def log(hook, tokens, verdict):
     except OSError as failure:
         print(f"memento context ceiling: cannot write {LOG_FILE}: {failure}", file=sys.stderr)
 
-def stop(hook, tokens):
+def stop(hook, tokens, ceiling):
     """Blocked once, never twice: a second block spends more context on the problem that IS too
     much context. The give-up message leaves whether the close-out ran conditional, because the
     compliant path is exactly when stop_hook_active is true."""
     if closed_out(hook["transcript_path"]):
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
-                                               f"tokens, past the {CEILING:,} ceiling, so "
+                                               f"tokens, past the {ceiling:,} ceiling, so "
                                                f"the stop proceeds."}
     if hook.get("stop_hook_active"):
         return "spent", {"systemMessage": f"memento: context ceiling breached (~{tokens:,} > "
-                                          f"{CEILING:,}) and this session has spent its one "
+                                          f"{ceiling:,}) and this session has spent its one "
                                           f"forced close-out attempt, so the stop proceeds. "
                                           f"If the close-out did not run, the next session "
                                           f"starts with nothing."}
-    return "block", {"decision": "block", "reason": reason(INSTRUCTION, tokens)}
+    return "block", {"decision": "block", "reason": reason(INSTRUCTION, tokens, ceiling)}
 
-def pretool(hook, tokens):
+def pretool(hook, tokens, ceiling):
     """The close-out is the only work left, so it is the only work permitted."""
     label = classify(hook["tool_name"], hook.get("tool_input") or {})
     template = REFUSALS.get(label)
     return label, template and {"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": "deny",
-        "permissionDecisionReason": reason(template, tokens)}}
+        "permissionDecisionReason": reason(template, tokens, ceiling)}}
 
-def reason(template, tokens):
-    return template.format(tokens=tokens, ceiling=CEILING,
+def reason(template, tokens, ceiling):
+    return template.format(tokens=tokens, ceiling=ceiling,
                            git="/".join(sorted(PERMITTED_GIT)),
                            launcher=shlex.quote(LAUNCHER))
 
-CEILING = resolve_ceiling()
 EVENTS = {"Stop": stop, "PreToolUse": pretool}
 
+# The ceiling is read from the payload's session and project, so it is resolved here rather
+# than at import: what it depends on does not exist until stdin has been read. The transcript
+# is measured first so a payload missing it is named by the field it is missing.
 hook = json.load(sys.stdin)
 event = EVENTS[hook["hook_event_name"]]
 tokens = context_tokens(hook["transcript_path"])
+ceiling = resolve_ceiling(hook)
 
-label, verdict = ("allow-under", None) if tokens < CEILING else event(hook, tokens)
-log(hook, tokens, label)
+label, verdict = ("allow-under", None) if tokens < ceiling else event(hook, tokens, ceiling)
+log(hook, tokens, ceiling, label)
 if verdict:
     print(json.dumps(verdict))

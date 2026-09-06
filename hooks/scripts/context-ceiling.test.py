@@ -36,7 +36,16 @@ LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
 # not a second copy of that number.
 TEST_CEILING = 100_000
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
+SESSION = "s-1"
+CONFIG_NAME = "memento.conf"
 failures = []
+
+
+def write_conf(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(text)
+    return path
 
 
 def check(name, condition, detail=""):
@@ -67,25 +76,41 @@ user = {"type": "user", "isSidechain": False, "message": {"content": "hi"}}
 
 
 def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active=False,
-        ceiling=TEST_CEILING, hook=HOOK, ceiling_file=None, log_seed="", extra_env=None):
+        ceiling=TEST_CEILING, hook=HOOK, user_conf=None, project_conf=None, session_conf=None,
+        project=None, config_home=None, xdg=None, log_seed="", extra_env=None,
+        session=SESSION):
     """Invoke the hook as Claude Code does. Returns (exit code, parsed stdout, stderr).
 
-    ceiling=None leaves MEMENTO_CONTEXT_CEILING unset, which is how a case reaches the file
-    or the shipped default."""
+    ceiling=None leaves MEMENTO_CONTEXT_CEILING unset, which is how a case reaches the files
+    or the shipped default. Every config layer is rooted in scratch and every ambient one is
+    stripped: a developer's own ceiling, project or CLAUDE_PROJECT_DIR must not decide a test."""
     handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     handle.write("".join(json.dumps(r) + "\n" for r in records))
     handle.close()
     log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
     log.write(log_seed)
     log.close()
-    env = {k: v for k, v in os.environ.items() if k != "MEMENTO_CONTEXT_CEILING"}
+    home = config_home or (os.path.join(xdg, "promptctl") if xdg else scratch_dir())
+    project = project or scratch_dir()
+    if user_conf is not None:
+        write_conf(os.path.join(home, CONFIG_NAME), user_conf)
+    if session_conf is not None:
+        write_conf(os.path.join(home, "sessions", session, CONFIG_NAME), session_conf)
+    if project_conf is not None:
+        write_conf(os.path.join(project, ".promptctl", CONFIG_NAME), project_conf)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MEMENTO_CONTEXT_CEILING", "CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
     env["MEMENTO_CEILING_LOG"] = log.name
-    # Never the real ~/.claude file: a developer's own ceiling must not decide a test.
-    env["MEMENTO_CEILING_FILE"] = ceiling_file or os.path.join(scratch_dir(), "absent")
+    # xdg drives the shipped path construction rather than overriding it, which is the only
+    # way to exercise where the config really lives without reading the developer's own.
+    if xdg is None:
+        env["MEMENTO_CONFIG_HOME"] = home
+    else:
+        env["XDG_CONFIG_HOME"] = xdg
     if ceiling is not None:
         env["MEMENTO_CONTEXT_CEILING"] = str(ceiling)
     env.update(extra_env or {})
-    payload = {"session_id": "s-1", "hook_event_name": event,
+    payload = {"session_id": session, "hook_event_name": event, "cwd": project,
                "transcript_path": handle.name, "stop_hook_active": stop_hook_active}
     if tool_name is not None:
         payload["tool_name"] = tool_name
@@ -335,32 +360,157 @@ check("unparseable new work gets the denial, not the rewrite message",
 
 # --- the ceiling is configurable while sessions run --------------------------------------
 
-written = tempfile.NamedTemporaryFile("w", suffix=".ceiling", delete=False)
-written.write("50000\n")
-written.close()
-_, out, _ = run([user, assistant(60_000)], ceiling=None, ceiling_file=written.name)
-check("the ceiling file is honoured when the environment is silent",
-      out and out.get("decision") == "block" and "50,000" in out["reason"], str(out))
-_, out, _ = run([user, assistant(60_000)], ceiling="", ceiling_file=written.name)
+def blocked_at(out, ceiling):
+    return bool(out) and out.get("decision") == "block" and f"{ceiling:,}" in out.get("reason", "")
+
+
+_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="context_ceiling = 50000\n")
+check("the user config is honoured when the environment is silent", blocked_at(out, 50_000), str(out))
+_, out, _ = run([user, assistant(60_000)], ceiling="", user_conf="context_ceiling = 50_000\n")
 check("an exported-empty override is silence, not a value, and falls through to the file",
-      out and out.get("decision") == "block" and "50,000" in out["reason"], str(out))
-code, out, _ = run([user, assistant(60_000)], ceiling=200_000, ceiling_file=written.name)
-check("the environment outranks the file", code == 0 and out is None, f"{code} {out}")
+      blocked_at(out, 50_000), str(out))
+code, out, _ = run([user, assistant(60_000)], ceiling=200_000, user_conf="context_ceiling = 50000\n")
+check("the environment outranks every file", code == 0 and out is None, f"{code} {out}")
+# The session config is the closest file to the environment, so it is the one that says the
+# environment really is last rather than merely ahead of the furthest layer.
+code, out, _ = run([user, assistant(60_000)], ceiling=200_000, session_conf="context_ceiling = 50000\n")
+check("the environment outranks the session config too", code == 0 and out is None, f"{code} {out}")
+
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 50000\n")
+check("a project config is honoured", blocked_at(out, 50_000), str(out))
+_, out, _ = run([user, assistant(60_000)], ceiling=None, session_conf="context_ceiling = 50000\n")
+check("a session config is honoured", blocked_at(out, 50_000), str(out))
+# Through XDG rather than the override, so the path people actually write to is the one under
+# test rather than a path only the suite ever uses.
+_, out, _ = run([user, assistant(60_000)], ceiling=None, xdg=scratch_dir(),
+                user_conf="context_ceiling = 50000\n")
+check("the user config is read from $XDG_CONFIG_HOME/promptctl", blocked_at(out, 50_000), str(out))
+
+_, out, _ = run([user, assistant(60_000)], ceiling=None, user_conf="context_ceiling = 20000\n",
+                project_conf="context_ceiling = 50000\n")
+check("the project outranks the user config", blocked_at(out, 50_000), str(out))
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 20000\n",
+                session_conf="context_ceiling = 50000\n")
+check("the session outranks the project config", blocked_at(out, 50_000), str(out))
+
+# The whole point of the exercise: one session delays its own handoff without editing, or
+# even knowing, the number the project pinned.
+_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="context_ceiling = 250000\n",
+                session_conf="context_ceiling = +100_000\n")
+check("a session adjustment moves the ceiling the project pinned", blocked_at(out, 350_000), str(out))
+_, out, _ = run([user, assistant(400_000)], ceiling=None, project_conf="context_ceiling = 250000\n",
+                session_conf="context_ceiling = -50000\n")
+check("an adjustment can lower the ceiling too", blocked_at(out, 200_000), str(out))
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = +30000\n",
+                project_conf="context_ceiling = +20000\n")
+check("adjustments at two layers both apply, in order", blocked_at(out, 300_000), str(out))
+code, out, _ = run([user, assistant(5_000_000)], ceiling=None, user_conf="context_ceiling = off\n",
+                   session_conf="context_ceiling = +10000\n")
+check("adjusting a ceiling that is switched off leaves it off", code == 0 and out is None, f"{code} {out}")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = off\n",
+                session_conf="context_ceiling = 300000\n")
+check("a later absolute value overrules an earlier off", blocked_at(out, 300_000), str(out))
 
 for word in ("off", "NONE", "never", "disabled"):
-    open(written.name, "w").write(word + "\n")
-    code, out, _ = run([user, assistant(5_000_000)], ceiling=None, ceiling_file=written.name)
+    code, out, _ = run([user, assistant(5_000_000)], ceiling=None,
+                       user_conf=f"context_ceiling = {word}\n")
     check(f"the gate can be switched off by writing {word!r}",
           code == 0 and out is None, f"{code} {out}")
 
-open(written.name, "w").write("350k\n")
-code, out, err = run([user, assistant(OVER)], ceiling=None, ceiling_file=written.name)
-check("a ceiling that does not parse fails loudly and names where to fix it",
-      code == 1 and "350k" in err and written.name in err, f"{code} {err}")
-os.unlink(written.name)
+# Found by walking, so a subdirectory, a package, or a worktree inherits the repo above it.
+root = scratch_dir()
+write_conf(os.path.join(root, ".promptctl", CONFIG_NAME), "context_ceiling = 50000\n")
+deep = os.path.join(root, "packages", "worker")
+os.makedirs(deep)
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project=deep)
+check("a project config is found from a subdirectory of the project", blocked_at(out, 50_000), str(out))
 
+# The project is the session's, not wherever a Bash call last left the shell.
+elsewhere = scratch_dir()
+_, out, _ = run([user, assistant(60_000)], ceiling=None, project=elsewhere,
+                extra_env={"CLAUDE_PROJECT_DIR": root})
+check("CLAUDE_PROJECT_DIR anchors the project config, not the payload's cwd",
+      blocked_at(out, 50_000), str(out))
+code, out, _ = run([user, assistant(60_000)], ceiling=None, project_conf="context_ceiling = 50000\n",
+                   extra_env={"CLAUDE_PROJECT_DIR": elsewhere})
+check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
+      code == 0 and out is None, f"{code} {out}")
+
+# A project directory holding the user config would otherwise apply one file as two layers.
+shared = scratch_dir()
+code, out, _ = run([user, assistant(400_000)], ceiling=None, project=shared,
+                   config_home=os.path.join(shared, ".promptctl"),
+                   user_conf="context_ceiling = +10000\n")
+check("the user config is not applied a second time as the project config",
+      blocked_at(out, 260_000), str(out))
+
+# --- a setting nobody can misspell into silence -------------------------------------------
+
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 350k\n")
+check("a ceiling that does not parse fails loudly, naming the file and the line",
+      code == 1 and "350k" in err and "line 1" in err and CONFIG_NAME in err, f"{code} {err}")
 code, out, err = run([user], ceiling="lots")
-check("an unparseable override fails loudly", code == 1 and "lots" in err, f"{code} {err}")
+check("an unparseable override fails loudly",
+      code == 1 and "lots" in err and "MEMENTO_CONTEXT_CEILING" in err, f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="ceilling = 350000\n")
+check("a misspelled key fails loudly rather than reading as a setting nobody made",
+      code == 1 and "ceilling" in err and "context_ceiling" in err, f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling 350000\n")
+check("a line with no `=` fails loudly",
+      code == 1 and "key = value" in err, f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling =\n")
+check("a key written with no value fails loudly, unlike an exported-empty variable",
+      code == 1 and "key = value" in err, f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None,
+                     user_conf="context_ceiling = 300000\ncontext_ceiling = 400000\n")
+check("one key set twice in one file fails loudly",
+      code == 1 and "twice" in err and "line 2" in err, f"{code} {err}")
+code, out, err = run([user, assistant(OVER)], ceiling=None, user_conf="context_ceiling = 10000\n",
+                     session_conf="context_ceiling = -50000\n")
+check("adjustments that resolve below zero fail loudly, naming both layers",
+      code == 1 and "never negative" in err and err.count(CONFIG_NAME) == 2, f"{code} {err}")
+
+# A disabling word is matched on what was written, not on what is left after the digit
+# separators come out - `o_f_f` is a typo, and reading it as `off` would take the gate down
+# by way of a misspelling, which is the one outcome this section exists to prevent.
+for typo in ("o_f_f", "n_one", "dis_abled"):
+    code, out, err = run([user, assistant(5_000_000)], ceiling=None,
+                         user_conf=f"context_ceiling = {typo}\n")
+    check(f"{typo!r} is a typo rather than a way to switch the gate off",
+          code == 1 and typo in err, f"{code} {err}")
+
+# `str.isdigit` was true of these and `int` was not, so the crafted message was skipped and a
+# traceback took its place. The shape the parse accepts and the one it converts are now one.
+for exotic in ("\u00b2", "\u2075"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None,
+                         user_conf=f"context_ceiling = {exotic}\n")
+    check(f"a digit-like character {exotic!r} that is not a number fails loudly, not by traceback",
+          code == 1 and "should hold a number" in err and "Traceback" not in err, f"{code} {err}")
+
+# Underscores group digits as Python's own literals do, so what a person writes in a config and
+# what they would write in code are the same set - no more, and no less.
+for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None,
+                         user_conf=f"context_ceiling = {malformed}\n")
+    check(f"{malformed!r} is not a number of tokens", code == 1 and "should hold a number" in err,
+          f"{code} {err}")
+_, out, _ = run([user, assistant(400_000)], ceiling=None, user_conf="context_ceiling = 3_5_0000\n")
+check("underscores between digits group a number rather than breaking it",
+      blocked_at(out, 350_000), str(out))
+
+# The session id becomes a path exactly once, so that is where its shape is settled. An
+# absolute id would discard the sessions directory outright; a relative one would climb out
+# of it. Either reads a config no layer of this design points at.
+for escape in ("/tmp", "../..", "a/b", "..", "./..", "..//", ".", "/"):
+    code, out, err = run([user, assistant(OVER)], ceiling=None, session=escape,
+                         user_conf="context_ceiling = 300000\n")
+    check(f"a session id of {escape!r} is refused rather than read as a directory",
+          code == 1 and "session directory" in err, f"{code} {err}")
+
+_, out, _ = run([user, assistant(60_000)], ceiling=None,
+                user_conf="# the handoff comes late on this machine\n\n"
+                          "context_ceiling = 50000  # measured, not guessed\n")
+check("comments and blank lines are not settings", blocked_at(out, 50_000), str(out))
 
 # The shipped default, bracketed rather than named: a trivial session passes and one larger
 # than any context window is caught, whatever the number happens to be.
@@ -433,8 +583,9 @@ check("the log is truncated once it passes its cap",
 
 # --- wiring --------------------------------------------------------------------------------
 
-isolated = {k: v for k, v in os.environ.items() if k != "MEMENTO_CONTEXT_CEILING"}
-isolated["MEMENTO_CEILING_FILE"] = os.path.join(scratch_dir(), "absent")
+isolated = {k: v for k, v in os.environ.items()
+            if k not in ("MEMENTO_CONTEXT_CEILING", "CLAUDE_PROJECT_DIR")}
+isolated["MEMENTO_CONFIG_HOME"] = scratch_dir()
 isolated["MEMENTO_CEILING_LOG"] = os.path.join(scratch_dir(), "log")
 done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_output=True,
                       env=isolated)
@@ -444,6 +595,14 @@ done = subprocess.run([sys.executable, HOOK], input='{"hook_event_name": "Stop"}
                       capture_output=True, env=isolated)
 check("a payload with no transcript_path fails loudly",
       done.returncode == 1 and "transcript_path" in done.stderr, str(done)[:200])
+# The project config is resolved from it, so a payload without it is a hook that would
+# silently read no project config at all.
+empty_transcript = write_conf(os.path.join(scratch_dir(), "t.jsonl"), "")
+done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=isolated,
+                      input=json.dumps({"hook_event_name": "Stop", "session_id": SESSION,
+                                        "transcript_path": empty_transcript}))
+check("a payload with no cwd fails loudly",
+      done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
 
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
 # only exit from the block fails to execute.

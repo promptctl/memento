@@ -99,13 +99,40 @@ token usage (all four fields — input, output, cache creation, cache read — b
 is what the next request carries) and compares it to the ceiling. Under the ceiling, the
 hook says nothing.
 
-The ceiling is 250,000 tokens by default. `MEMENTO_CONTEXT_CEILING` overrides that;
-failing that, the hook reads `~/.claude/memento/context-ceiling` (put the file elsewhere
-with `MEMENTO_CEILING_FILE`). Either source may hold `off`, `none`, `never`, or
-`disabled` in place of a number, which turns the ceiling off entirely. Anything else — a
-typo, a unit suffix — stops the hook with an error rather than quietly falling back to
-the default, on the grounds that a ceiling you believe you moved and did not is worse
-than no ceiling. Every decision the hook makes is appended to
+The ceiling is 250,000 tokens by default, and four layers can move it. From the least
+specific to the most: `~/.config/promptctl/memento.conf`, then the nearest
+`.promptctl/memento.conf` at or above the project directory, then
+`~/.config/promptctl/sessions/<session-id>/memento.conf`, then the
+`MEMENTO_CONTEXT_CEILING` environment variable. Same filename everywhere, so a second
+setting is one more key rather than one more file, one more lookup and one more
+precedence chain. The home-rooted layers follow `XDG_CONFIG_HOME` where it is set, and
+`MEMENTO_CONFIG_HOME` moves them outright.
+
+Each file is `key = value` lines, `#` starts a comment, and `context_ceiling` is the only
+key so far:
+
+```
+# this repo runs long
+context_ceiling = 350_000
+```
+
+It takes a count, a signed adjustment, or one of `off`, `none`, `never`, `disabled` in
+place of a number, which turns the ceiling off entirely. An adjustment applies to
+whatever the layers beneath it resolved to, which is what lets one session delay its own
+handoff without touching — or knowing — the number the project pinned:
+
+```
+context_ceiling = +100_000
+```
+
+The project layer is found by walking up, so a subdirectory or a worktree inherits the
+repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
+the ceiling cannot change because something ran `cd`. Anything else — a typo, a unit
+suffix, a misspelled key, a key set twice in one file, an adjustment resolving below
+zero — stops the hook with an error naming where the setting came from: the file and the
+line for a config file, the variable for `MEMENTO_CONTEXT_CEILING`. It never falls back
+quietly to the default, on the grounds that a ceiling you believe you moved and did not
+is worse than no ceiling. Every decision the hook makes is appended to
 `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
 you can tell an allow apart from a hook that never ran.
 
