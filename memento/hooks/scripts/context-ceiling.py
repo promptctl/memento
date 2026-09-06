@@ -57,11 +57,11 @@ LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
 LOG_CAP = 2_000_000
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
-# One skill file, exposed by two plugins, so it is invocable under either namespace and
-# both names denote the same close-out. This hook ships in auto-bottle, which always
-# carries the skill; memento carries it too when installed. Naming only one would
-# default-deny the close-out under the other. [LAW:one-source-of-truth]
-CLOSEOUT_SKILLS = frozenset(("auto-bottle:message-in-a-bottle", "memento:message-in-a-bottle"))
+# The hook and the skill ship in one plugin, so the close-out has one name. It was a set of
+# two while a second plugin exposed the same skill file under its own namespace: one skill
+# with two names, which is the divergence [LAW:one-source-of-truth] forbids, and the set was
+# what that divergence cost the reader here.
+CLOSEOUT_SKILL = "memento:message-in-a-bottle"
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
 TAIL_CHUNK = 256 * 1024
@@ -83,11 +83,11 @@ EXPANDS_IN_DOUBLE_QUOTES = frozenset("$`\\")
 
 INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
     {launcher} '<handoff message>'
-Load Skill(auto-bottle:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Quote it with single quotes and nothing else - no $(...), no heredoc, no double quotes - writing an apostrophe as '\\''. Newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
+Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Quote it with single quotes and nothing else - no $(...), no heredoc, no double quotes - writing an apostrophe as '\\''. Newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
 
 DENIAL = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum, so new work is refused until it closes out. This tool call was NOT run. `git {git}` are still permitted: get anything outstanding committed, then run the close-out:
     {launcher} '<handoff message>'
-Load Skill(auto-bottle:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with. Do not retry this call, and do not ask the user whether to finalize."""
+Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with. Do not retry this call, and do not ask the user whether to finalize."""
 
 MISQUOTED = """CONTEXT CEILING: this IS the close-out, and it was NOT run - because of how the command is written, not because closing out is refused. Rewrite it and run it again.
 The handoff must be ONE single-quoted argument. No $(...), no backticks, no heredoc, no double quotes: the gate cannot tell what those would run, so it refuses them. Newlines inside the single quotes are fine, so a long multi-paragraph message needs nothing special. Write an apostrophe as '\\'' - end the quote, backslash-quote, reopen. Run exactly this shape:
@@ -349,7 +349,7 @@ def classify(tool_name, tool_input):
     """What this call is above the ceiling. Default-deny, so a tool nobody thought about here
     surfaces as a blocked close-out rather than a session working past the ceiling."""
     if tool_name == "Skill":
-        return CLOSEOUT if tool_input.get("skill") in CLOSEOUT_SKILLS else NEW_WORK
+        return CLOSEOUT if tool_input.get("skill") == CLOSEOUT_SKILL else NEW_WORK
     if tool_name != "Bash":
         return NEW_WORK
     command = tool_input.get("command") or ""

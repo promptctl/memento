@@ -262,7 +262,7 @@ _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
                 tool_name="Skill", tool_input={"skill": "memento:message-in-a-bottle"})
 check("the handoff skill is permitted", out is None, str(out))
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="Skill", tool_input={"skill": "auto-bottle:message-in-a-bottle"})
+                tool_name="Skill", tool_input={"skill": "memento:message-in-a-bottle"})
 check("the handoff skill is permitted under the namespace of the plugin shipping this hook",
       out is None, str(out))
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
