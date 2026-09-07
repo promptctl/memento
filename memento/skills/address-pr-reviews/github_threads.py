@@ -33,6 +33,22 @@ def head_sha(owner: str, repo: str, pr_num: int) -> str:
     return gh("api", f"repos/{owner}/{repo}/pulls/{pr_num}", "--jq", ".head.sha")
 
 
+def paginated(endpoint: str, jq: str) -> list[dict]:
+    """Every object `jq` emits over every page of a REST list endpoint.
+
+    `--paginate` walks the whole list, so completeness is structural rather
+    than a count checked afterwards. With `--jq`, gh applies the filter per
+    page and concatenates the results, so a filter emitting one object per
+    line yields JSONL across the whole set — the one shape that survives page
+    boundaries. (A filter wrapping each page in `[...]` would emit one array
+    *per page* and not parse as a single document; `--slurp` cannot be
+    combined with `--jq`.) [LAW:one-source-of-truth] that gh/jq fact lives here
+    once, for every reader of a paginated list.
+    """
+    out = gh("api", "--paginate", endpoint, "--jq", jq)
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
 _THREADS_QUERY = (
     "query($owner:String!,$repo:String!,$num:Int!,$cursor:String){"
     "  repository(owner:$owner,name:$repo){"
@@ -245,24 +261,13 @@ def bot_reviews(pr_url: str) -> list[dict]:
     """Every review the automated reviewer has posted on the PR, oldest first —
     `{review_id, author, commit_id, state, body}` each.
 
-    `--paginate` walks every page of the reviews endpoint. A PR that survives
-    several review rounds accumulates a review per round per re-run and crosses
-    100 easily; a single-page read would silently omit the newest review, which
-    is the one the reviewed-verdict reasons about, or the blocking one the
-    dismiss set must clear. Completeness is structural here rather than a count
-    this function has to check afterwards.
-
-    With `--jq`, gh applies the filter per page and concatenates the results, so
-    a filter emitting one object per line yields JSONL across the whole set —
-    the one shape that survives page boundaries. (A filter wrapping each page in
-    `[...]` would emit one array *per page* and not parse as a single document.)
+    A PR that survives several review rounds accumulates a review per round per
+    re-run and crosses 100 easily; a single-page read would silently omit the
+    newest review, which is the one the reviewed-verdict reasons about, or the
+    blocking one the dismiss set must clear.
     """
     owner, repo, pr_num = parse_pr(pr_url)
-    out = gh(
-        "api", "--paginate", f"repos/{owner}/{repo}/pulls/{pr_num}/reviews",
-        "--jq", _BOT_REVIEWS_JQ,
-    )
-    return [json.loads(line) for line in out.splitlines() if line.strip()]
+    return paginated(f"repos/{owner}/{repo}/pulls/{pr_num}/reviews", _BOT_REVIEWS_JQ)
 
 
 def change_requests(pr_url: str) -> dict:

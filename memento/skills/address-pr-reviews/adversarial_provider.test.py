@@ -41,8 +41,10 @@ class FakeGh:
         args = argv[1:]
         if args[1] == "repos/o/r/pulls/7":
             return self.head
-        if args[1].startswith("repos/o/r/pulls/7/reviews"):
-            return json.dumps(self.reviews)
+        if args[1] == "--paginate" and args[2].startswith("repos/o/r/pulls/7/reviews"):
+            # What `gh api --paginate --jq '.[] | {...}'` emits: every page's
+            # objects in order, one per line.
+            return "\n".join(json.dumps(r) for r in self.reviews)
         raise AssertionError(f"unexpected gh call: {args}")
 
 
@@ -61,6 +63,13 @@ check("wait: a marker review for the head proves it reviewed",
       got == {"status": "completed", "conclusion": "success", "sha": HEAD,
               "url": f"https://r/{HEAD}", "reviewed": True, "not_reviewed_reason": None},
       f"got {got!r}")
+
+# The marker review is the newest, so on a PR past one page of reviews it is the
+# one a single page would never show.
+gt.subprocess = FakeGh(HEAD, [marker_review(OLD)] * 150 + [marker_review(HEAD)])
+got = ap.wait(PR)
+check("wait: a marker review past the first page of reviews is still found",
+      got["reviewed"] is True and got["url"] == f"https://r/{HEAD}", f"got {got!r}")
 
 gt.subprocess = FakeGh(HEAD, [marker_review(OLD)])
 try:
