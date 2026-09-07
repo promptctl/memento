@@ -259,16 +259,12 @@ def _build_prompt(owner: str, repo: str, pr_num: int, sha: str, diff: str) -> st
 # ---------------------------------------------------------------------------
 
 def _our_review_for(owner: str, repo: str, pr_num: int, sha: str) -> dict | None:
-    # Every page, one object per line: `gh api --paginate` emits each page's
-    # jq output in turn, and --slurp cannot be combined with --jq. A PR that has
-    # been through many review rounds carries well over one page of reviews,
-    # and the marker review is the newest, so a single page would miss it.
-    out = github_threads.gh(
-        "api", "--paginate",
+    # The marker review is the newest, so on a PR past one page of reviews it is
+    # exactly the one a single page would never show.
+    reviews = github_threads.paginated(
         f"repos/{owner}/{repo}/pulls/{pr_num}/reviews?per_page=100",
-        "--jq", ".[] | {body, html_url, state}",
+        ".[] | {body, html_url, state}",
     )
-    reviews = [json.loads(line) for line in out.splitlines() if line.strip()]
     for review in reviews:
         m = MARKER_RE.search(review.get("body") or "")
         if m and m.group(1) == sha:
