@@ -8,7 +8,7 @@
     {
       "name": "memento",
       "source": "./memento",
-      "description": "Pull the next lit ticket (next), address PR review findings with judgment (address-pr-reviews), write the handoff a future session wakes up with (message-in-a-bottle), and enforce the context ceiling that makes writing it mandatory."
+      "description": "Pull the next lit ticket (next), address PR review findings with judgment (address-pr-reviews), write the handoff a future session wakes up with (message-in-a-bottle), enforce the context ceiling that makes writing it mandatory, and move or lift that ceiling for one session (ceiling)."
     }
   ]
 }
