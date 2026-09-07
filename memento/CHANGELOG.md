@@ -1,5 +1,9 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.5.1 - 2026-09-06
+
+- fix(address-pr-reviews): the adversarial provider reads every page of a PR's reviews before answering whether its marker review is there. It refused any PR past 100 reviews, which is exactly the PR that has been through enough rounds to need it. `github_threads.paginated` is now the one reader of a paginated `gh api --jq` stream, shared with `bot_reviews`, so the per-page JSONL fact both depend on is stated once.
+
 ## v0.5.0 - 2026-09-06
 
 - feat!: the one setting a `memento.conf` carries is spelled `ceiling`, and `context_ceiling` is not an alias for it. A config file that still sets the old key fails the way any unknown key does, naming the file and the line it read, so the rename surfaces as an error rather than as a ceiling that quietly reverted to the default. The `MEMENTO_CONTEXT_CEILING` environment variable keeps its name, and the default is still 250,000 tokens.
