@@ -1,5 +1,10 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## Unreleased
+
+- feat!: the `MEMENTO_CONTEXT_CEILING` environment variable is gone. Three layers set the ceiling, and every one of them is a file: user, project, session. A ceiling in force is now always something written down at a path you can open, rather than something a process was started with and nothing on disk records. A session that wants its own number writes the session layer, which is what that layer is for.
+- feat!: `off` is the one word that turns the ceiling off. `none`, `never` and `disabled` were three more spellings of it, so a reader of a config file had four things to recognise where the writer only ever needed one.
+
 ## v0.5.1 - 2026-09-06
 
 - fix(address-pr-reviews): the adversarial provider reads every page of a PR's reviews before answering whether its marker review is there. It refused any PR past 100 reviews, which is exactly the PR that has been through enough rounds to need it. `github_threads.paginated` is now the one reader of a paginated `gh api --jq` stream, shared with `bot_reviews`, so the per-page JSONL fact both depend on is stated once.

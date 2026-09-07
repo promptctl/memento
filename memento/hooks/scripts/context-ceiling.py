@@ -44,7 +44,7 @@ PROJECT_CONFIG_DIR = ".promptctl"
 # of the three leaves a written ceiling legal and unread. [LAW:one-source-of-truth]
 CEILING_KEY = "ceiling"
 LEGAL_KEYS = frozenset((CEILING_KEY,))
-DISABLING_WORDS = ("off", "none", "never", "disabled")
+DISABLING_WORD = "off"
 # The one shape a written ceiling may take besides a disabling word, so what the parse accepts
 # is declared here rather than inferred from a strip, a slice and a predicate that each admit a
 # little more than the next. [0-9] rather than \d because `str.isdigit` was true of characters
@@ -52,9 +52,8 @@ DISABLING_WORDS = ("off", "none", "never", "disabled")
 # Underscores group digits exactly as Python's own literals do: between digits, never at an end.
 # [LAW:types-are-the-program]
 CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
-# One setting as one layer wrote it, carrying where a person goes to change it. The source is
-# built where it is known rather than reconstructed later, so nothing has to hold a line
-# number the environment does not have. [LAW:one-source-of-truth]
+# One setting as one layer wrote it, carrying the file and line a person goes to change it.
+# Built where that is known rather than reconstructed later. [LAW:one-source-of-truth]
 Written = collections.namedtuple("Written", "source text")
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
@@ -183,15 +182,6 @@ def project_settings(anchor):
             return settings_in(candidate)
     return {}
 
-def environment_settings():
-    """The one setting the environment can carry, shaped like a file's so it folds with them.
-
-    An exported-empty variable is silence rather than a value, because shells export empty
-    routinely - where a person who wrote a key into a file and left the value off has made a
-    mistake, which is why only the written spelling is an error."""
-    written = os.environ.get("MEMENTO_CONTEXT_CEILING", "").strip()
-    return {CEILING_KEY: Written("MEMENTO_CONTEXT_CEILING", written)} if written else {}
-
 def parse_ceiling(written):
     """One written ceiling, as the move it makes on the ceiling beneath it.
 
@@ -200,12 +190,12 @@ def parse_ceiling(written):
     fold then applies them in order with nothing left to dispatch on, which is what lets a
     project pin a number and a session move it by a delta without either knowing the other
     exists. [LAW:dataflow-not-control-flow]"""
-    if written.text.lower() in DISABLING_WORDS:
+    if written.text.lower() == DISABLING_WORD:
         return lambda beneath: math.inf
     shape = CEILING_RE.match(written.text)
     if not shape:
         sys.exit(f"memento config: {written.source} should hold a number of tokens, a signed "
-                 f"adjustment like +100_000, or one of {'/'.join(DISABLING_WORDS)}, but reads "
+                 f"adjustment like +100_000, or {DISABLING_WORD}, but reads "
                  f"{written.text!r}. Fix it or remove it.")
     magnitude = int(shape.group("digits").replace("_", ""))
     if not shape.group("sign"):
@@ -238,16 +228,15 @@ def session_config(session_id):
 def resolve_ceiling(hook):
     """The ceiling in force, folded from the least specific layer to the most.
 
-    [LAW:single-enforcer] the one place the order between the four layers is decided, so it
-    exists once rather than at each reader. The environment wins because it is an explicit
-    instruction to this process, and the project is anchored at the directory the session
-    belongs to rather than wherever a Bash call last left it - a ceiling that moved because
-    something ran `cd` would be a ceiling nobody set."""
+    [LAW:single-enforcer] the one place the order between the three layers is decided, so it
+    exists once rather than at each reader. Every layer is a file a person edits, so a ceiling
+    is always something written down somewhere findable. The project is anchored at the
+    directory the session belongs to rather than wherever a Bash call last left it - a ceiling
+    that moved because something ran `cd` would be a ceiling nobody set."""
     cwd = hook["cwd"]
     anchor = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
     session = session_config(hook["session_id"])
-    layers = (settings_in(USER_CONFIG), project_settings(anchor),
-              settings_in(session), environment_settings())
+    layers = (settings_in(USER_CONFIG), project_settings(anchor), settings_in(session))
     written = [layer[CEILING_KEY] for layer in layers if CEILING_KEY in layer]
     ceiling = DEFAULT_CEILING
     for setting in written:
