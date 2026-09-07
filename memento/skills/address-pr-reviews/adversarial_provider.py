@@ -259,19 +259,12 @@ def _build_prompt(owner: str, repo: str, pr_num: int, sha: str, diff: str) -> st
 # ---------------------------------------------------------------------------
 
 def _our_review_for(owner: str, repo: str, pr_num: int, sha: str) -> dict | None:
-    out = github_threads.gh(
-        "api", f"repos/{owner}/{repo}/pulls/{pr_num}/reviews?per_page=100",
-        "--jq", "[.[] | {body, html_url, state}]",
+    # The marker review is the newest, so on a PR past one page of reviews it is
+    # exactly the one a single page would never show.
+    reviews = github_threads.paginated(
+        f"repos/{owner}/{repo}/pulls/{pr_num}/reviews?per_page=100",
+        ".[] | {body, html_url, state}",
     )
-    reviews = json.loads(out) if out else []
-    # [LAW:no-silent-failure] reviews come oldest-first; past the page cap the
-    # marker review may exist unseen, which would break idempotency (duplicate
-    # review) or stall wait() — halt rather than answer from a partial set.
-    if len(reviews) >= 100:
-        raise RuntimeError(
-            "PR has 100+ posted reviews — pagination is not implemented and "
-            "the SHA-marker idempotency check is incomplete."
-        )
     for review in reviews:
         m = MARKER_RE.search(review.get("body") or "")
         if m and m.group(1) == sha:
