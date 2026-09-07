@@ -5,85 +5,66 @@ description: Move or lift the context ceiling for the session running right now 
 
 # Move this session's ceiling
 
-The ceiling reads four config layers on every hook invocation, and the session layer is
-the most specific one a session can write for itself. Writing it changes the ceiling in
-force on the very next tool call — nothing to restart, reload or signal.
+The session layer is the most specific config layer, and the one a session can write
+for itself. Writing it changes the ceiling in force on the very next tool call —
+nothing to restart, reload or signal.
 
-The file is one line, at a path derived from `CLAUDE_CODE_SESSION_ID`:
-
-```
-${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID/memento.conf
-```
-
-## Do it in two steps. Both of them.
-
-**Step 1 — write it.** Substitute one value from the table below for `off`:
+**Step 1 — write it.** Substitute one value from the table for `off`:
 
 ```bash
 dir="${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID"
 mkdir -p "$dir" && printf 'ceiling = %s\n' 'off' > "$dir/memento.conf"
 ```
 
-**Step 2 — verify it took.** The hook logs the ceiling it resolved on every call, so the
-next tool call after the write is the proof. Run this as its own call:
+**Step 2 — verify it took.** The hook logs the ceiling it resolved on every call, so
+the next call after the write is the proof. Run it as its own call:
 
 ```bash
 grep "session=${CLAUDE_CODE_SESSION_ID:0:8}" ~/.claude/memento/context-ceiling.log | tail -1
 ```
 
-It must show `ceiling=inf` for `off`, or the number you asked for. That line is the
-acceptance criterion — the live hook's own account of what it resolved.
-
-| Value | Effect |
+| Value | Resolves to |
 |---|---|
-| `off` (also `none`, `never`, `disabled`) | No ceiling at all for this session. Resolves to `ceiling=inf`. |
-| `+100_000` | Adds to whatever the layers beneath resolved to, so a project pinned at 250,000 becomes 350,000. Signed, so it does not need to know that number. |
-| `-50_000` | Subtracts the same way. |
-| `400_000` | Pins this session to exactly that count, ignoring the layers beneath. |
+| `off` | `ceiling=inf` — no ceiling for this session |
+| `+100_000` | 100k above whatever the layers beneath resolved to, without needing to know that number |
+| `400_000` | exactly that, ignoring the layers beneath |
 
-To hand the session back to the normal ceiling, delete the file:
+Hand the session back to the normal ceiling by deleting the file:
 
 ```bash
 rm -f "${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID/memento.conf"
 ```
 
-## Step 2 is not optional, and here is what it catches
+## Why step 2 is not optional
 
-The key was named `context_ceiling` in memento 0.4.0 and earlier, and `ceiling` from
-0.5.0 on. Writing the name this session's hook does not accept does **not** leave the old
-ceiling in place — it stops the hook with an error before it resolves anything, and
-Claude Code treats that as a non-blocking error, so the gate silently stops running for
-every session on this machine.
+The key was `context_ceiling` before memento 0.5.0 and `ceiling` after. Writing the
+name this session's hook does not accept does not leave the old ceiling standing — it
+stops the hook with an error, which Claude Code treats as non-blocking, so the gate
+silently stops running for every session on this machine.
 
-So the failure mode of guessing wrong is not "my ceiling didn't move." It is "the ceiling
-is now off everywhere and nothing said so." Step 2 distinguishes those two outcomes and
-nothing else does.
-
-If step 2 shows no new line, or the ceiling is unchanged, read the error the hook
-printed — it names the key it does accept, in the form `It reads: ceiling.` — rewrite the
-file with that key, and verify again.
-
-Do NOT report the ceiling as moved on the strength of the write succeeding. A `printf`
-into a file that the hook then refuses to parse exits 0 and looks exactly like success:
+The `printf` exits 0 either way. So the failure mode of guessing wrong is not "my
+ceiling didn't move", it is "the ceiling is off everywhere and nothing said so", and
+step 2 is the only thing that tells those apart:
 
     WRONG: "Wrote ceiling = off to the session config. The ceiling is disabled."
-    RIGHT: "ceiling=inf on the last hook call (log line 02:14:07). Disabled and confirmed."
+    RIGHT: "ceiling=inf on the last hook call (02:14:07). Disabled and confirmed."
+
+If the log line is unchanged, read the error the hook printed — it names the key it
+accepts, as `It reads: ceiling.` — rewrite with that key and verify again.
 
 ## If the session is already past the ceiling
 
-Above the ceiling the `PreToolUse` gate denies every Bash call that is not `git` or the
-close-out launcher, and every Skill call that is not the close-out — including this one.
-A session that has already breached cannot raise its own ceiling. That is by design: the
-escape hatch is for a session that sees the wall coming, not one already against it.
+The gate denies every Bash call that is not `git` or the close-out launcher, and every
+Skill call that is not the close-out — including this one. A breached session cannot
+raise its own ceiling; the escape hatch is for a session that sees the wall coming.
 
-When that happens, say so and give the user the command to run in their own shell, with
-the session id already filled in — they can run it with a `!` prefix in the prompt or in
-any other terminal, and it takes effect on this session's next tool call:
+Say so, and give the user the command to run in their own shell with the session id
+filled in. It lands on this session's next tool call:
 
 ```bash
 dir="${XDG_CONFIG_HOME:-$HOME/.config}/promptctl/sessions/<this-session-id>"
 mkdir -p "$dir" && printf 'ceiling = off\n' > "$dir/memento.conf"
 ```
 
-Do not spend denied tool calls discovering this a second time. One denial above the
-ceiling is the answer, and each retry burns the context the ceiling is complaining about.
+One denial above the ceiling is the answer. Retrying burns the context the ceiling is
+complaining about.
