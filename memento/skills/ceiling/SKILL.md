@@ -37,8 +37,8 @@ rm -f "${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessi
 
 ## Why step 2 is not optional
 
-The key was `context_ceiling` before memento 0.5.0 and `ceiling` after. Writing the
-name this session's hook does not accept does not leave the old ceiling standing — it
+`ceiling` is the only key this hook accepts — it was `context_ceiling` before memento
+0.5.0. Writing a key it does not accept does not leave the old ceiling standing: it
 stops the hook with an error, which Claude Code treats as non-blocking, so the gate
 silently stops running for every session on this machine.
 
