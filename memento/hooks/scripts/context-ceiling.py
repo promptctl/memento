@@ -2,16 +2,13 @@
 """The context ceiling: a session past the hard token maximum may not start new work until it
 has run the message-in-a-bottle close-out.
 
-Two events, because one is not enough. Stop has teeth in a session that stops; an autonomous
-session never stops, and that is exactly the session the ceiling exists to catch, so
-[LAW:no-ambient-temporal-coupling] it is enforced on PreToolUse too, where a loop cannot avoid
-it. Denial withholds tools, never the exit, so it cannot wedge a session - which is why
-PreToolUse needs no spent-attempt valve and keeps no state.
+Two events, because Stop has teeth only in a session that stops, and an autonomous session
+never stops - which is exactly the session this exists to catch, so it is enforced on
+PreToolUse too, where a loop cannot avoid it. Denial withholds tools and never the exit, so it
+cannot wedge a session, and PreToolUse therefore keeps no state.
 
 This bounds a session that would talk itself into continuing, not one trying to escape: git is
-permitted by name, so an executable planted under that name is out of scope. Anything
-unexpected raises, and a traceback with exit 1 is Claude Code's non-blocking error, so the
-session continues and the breakage is visible.
+permitted by name, so an executable planted under that name is out of scope.
 """
 
 import collections
@@ -29,41 +26,26 @@ from pathlib import Path
 
 DEFAULT_CEILING = 250_000
 # One filename at every layer, so a second setting is a new key rather than a new file, a new
-# lookup and a new precedence chain. Naming the file after its one setting put the thing that
-# varies in a filename, where only more filenames can express it. [LAW:composability]
+# lookup and a new precedence chain. [LAW:composability]
 CONFIG_NAME = "memento.conf"
-# The promptctl config home, which is where the XDG convention says a config home is. A repo
-# carries its own as a dot-directory instead, because a checkout has no XDG anything.
+# A repo carries its own config as a dot-directory, because a checkout has no XDG anything.
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl")
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
 PROJECT_CONFIG_DIR = ".promptctl"
-# One setting, so its name has one home: what a person writes, what the file parse admits and
-# what the fold reads are the same string. Spelled out at each of those, a rename reaching two
-# of the three leaves a written ceiling legal and unread. [LAW:one-source-of-truth]
 CEILING_KEY = "ceiling"
-LEGAL_KEYS = frozenset((CEILING_KEY,))
 DISABLING_WORD = "off"
-# The one shape a written ceiling may take besides a disabling word, so what the parse accepts
-# is declared here rather than inferred from a strip, a slice and a predicate that each admit a
-# little more than the next. [0-9] rather than \d because `str.isdigit` was true of characters
-# `int` then refused - the guard and the conversion disagreed, and the traceback was the tell.
-# Underscores group digits exactly as Python's own literals do: between digits, never at an end.
-# [LAW:types-are-the-program]
+# [0-9] rather than \d: `str.isdigit` was true of characters `int` then refused, so the guard
+# and the conversion disagreed. Underscores group digits as Python's own literals do.
 CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
-# One setting as one layer wrote it, carrying the file and line a person goes to change it.
-# Built where that is known rather than reconstructed later. [LAW:one-source-of-truth]
+# A ceiling as one layer wrote it, carrying the file and line a person goes to change it.
 Written = collections.namedtuple("Written", "source text")
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
 LOG_CAP = 2_000_000
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
-# The hook and the skill ship in one plugin, so the close-out has one name. It was a set of
-# two while a second plugin exposed the same skill file under its own namespace: one skill
-# with two names, which is the divergence [LAW:one-source-of-truth] forbids, and the set was
-# what that divergence cost the reader here.
 CLOSEOUT_SKILL = "memento:message-in-a-bottle"
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
@@ -138,17 +120,12 @@ def statements(command):
             raise ValueError(f"shell-active character {char!r} in {command!r}")
     return parts
 
-def settings_in(path):
-    """The settings one config file sets, as {key: Written}.
-
-    [LAW:no-silent-failure] every line that is not a legal setting exits here rather than being
-    passed over. A misspelled key that reads as a no-op is precisely the ceiling its author
-    believes they set and did not, which is the failure the value parse below already refuses,
-    and a key set twice in one file is one fact with two homes."""
-    found = {}
-    if not path.exists():
-        return found
-    for number, line in enumerate(path.read_text().splitlines(), 1):
+def ceiling_in(path):
+    """The ceiling one config file sets, or None. [LAW:no-silent-failure] a line that is not one
+    exits here: a key that reads as a no-op is precisely the ceiling its author believes they
+    set and did not."""
+    found = None
+    for number, line in enumerate(path.read_text().splitlines() if path.exists() else [], 1):
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
@@ -156,40 +133,31 @@ def settings_in(path):
         if not assigned or not text:
             sys.exit(f"memento config: {path} line {number} should read `key = value`, "
                      f"but reads {line.strip()!r}. Fix it or remove it.")
-        if key not in LEGAL_KEYS:
+        if key != CEILING_KEY:
             sys.exit(f"memento config: {path} line {number} sets {key!r}, which memento has "
-                     f"no such setting for. It reads: {', '.join(sorted(LEGAL_KEYS))}.")
-        if key in found:
-            sys.exit(f"memento config: {path} sets {key!r} twice, at {found[key].source} and "
+                     f"no such setting for. It reads: {CEILING_KEY}.")
+        if found:
+            sys.exit(f"memento config: {path} sets {key!r} twice, at {found.source} and "
                      f"line {number}. Keep the one you meant.")
-        found[key] = Written(f"{path} line {number}", text)
+        found = Written(f"{path} line {number}", text)
     return found
 
-def project_settings(anchor):
-    """The settings of the nearest .promptctl/memento.conf at or above the project directory.
-
-    Walking rather than checking one directory is what lets a worktree, a subdirectory, or a
-    nested package inherit the repo that contains it. The user's own config is passed over
-    instead of being found twice: a config home that is itself a `.promptctl` directory - what
-    MEMENTO_CONFIG_HOME pointed at one gives you - puts the user's file on the walk, where it
-    would apply a second time as a project, and one fact with two homes is the divergence
+def project_ceiling(anchor):
+    """The ceiling set by the nearest .promptctl/memento.conf at or above the project directory,
+    so a subdirectory or a worktree inherits the repo above it. The user's own file is passed
+    over where the walk finds it, because applying one file as two layers is the divergence
     [LAW:one-source-of-truth] exists to forbid."""
     start = Path(anchor).resolve()
-    user = USER_CONFIG.resolve()
     for directory in (start, *start.parents):
         candidate = directory / PROJECT_CONFIG_DIR / CONFIG_NAME
-        if candidate.exists() and candidate.resolve() != user:
-            return settings_in(candidate)
-    return {}
+        if candidate.exists() and candidate.resolve() != USER_CONFIG.resolve():
+            return ceiling_in(candidate)
+    return None
 
 def parse_ceiling(written):
-    """One written ceiling, as the move it makes on the ceiling beneath it.
-
-    [LAW:parse-dont-validate] the three things a person can write - a count, a signed
-    adjustment, a disabling word - leave here as one thing: a function of the layer below. The
-    fold then applies them in order with nothing left to dispatch on, which is what lets a
-    project pin a number and a session move it by a delta without either knowing the other
-    exists. [LAW:dataflow-not-control-flow]"""
+    """One written ceiling, as the move it makes on the ceiling beneath it. The three things a
+    person can write - a count, an adjustment, `off` - leave here as one thing, so the fold
+    applies them in order with nothing left to dispatch on. [LAW:dataflow-not-control-flow]"""
     if written.text.lower() == DISABLING_WORD:
         return lambda beneath: math.inf
     shape = CEILING_RE.match(written.text)
@@ -206,18 +174,11 @@ def parse_ceiling(written):
 def session_config(session_id):
     """The session layer's path, for a session id that names one directory and nothing else.
 
-    [LAW:parse-dont-validate] a session id arrives in the payload and leaves here as a path,
-    so the one place it becomes a path is the one place its shape is settled. `Path.__truediv__`
-    discards the left operand entirely when the right is absolute, and follows `..` when it is
-    not, so an id that is not a bare name reads a config from somewhere no layer of this design
-    reaches - silently, and as though a session had set it.
-
-    The containment is asked of the resolved directory rather than of the id's spelling, because
-    the spellings that leave the tree do not form a list: `..`, `./..` and `..//` all name the
-    config home, where the user's own file sits, and reading it here would apply one file as two
-    layers - the divergence project_settings passes over the user config to avoid. Resolving
-    first collapses every spelling to the one directory it means, so there is one thing to
-    compare and no enumeration to get wrong."""
+    [LAW:parse-dont-validate] an id that is not a bare name reads a config from outside the tree
+    - `Path.__truediv__` discards the left operand when the right is absolute, and follows `..`
+    when it is not. Containment is asked of the resolved directory rather than of the spelling,
+    because `..`, `./..` and `..//` all name the same place and such spellings do not form a
+    list."""
     directory = (SESSION_CONFIGS / str(session_id)).resolve()
     if directory.parent != SESSION_CONFIGS.resolve():
         sys.exit(f"memento config: session id {session_id!r} names {directory}, which is not "
@@ -228,16 +189,13 @@ def session_config(session_id):
 def resolve_ceiling(hook):
     """The ceiling in force, folded from the least specific layer to the most.
 
-    [LAW:single-enforcer] the one place the order between the three layers is decided, so it
-    exists once rather than at each reader. Every layer is a file a person edits, so a ceiling
-    is always something written down somewhere findable. The project is anchored at the
-    directory the session belongs to rather than wherever a Bash call last left it - a ceiling
-    that moved because something ran `cd` would be a ceiling nobody set."""
-    cwd = hook["cwd"]
-    anchor = os.environ.get("CLAUDE_PROJECT_DIR") or cwd
-    session = session_config(hook["session_id"])
-    layers = (settings_in(USER_CONFIG), project_settings(anchor), settings_in(session))
-    written = [layer[CEILING_KEY] for layer in layers if CEILING_KEY in layer]
+    [LAW:single-enforcer] the one place the order between the layers is decided. The project is
+    anchored at the directory the session belongs to rather than wherever a Bash call last left
+    it - a ceiling that moved because something ran `cd` would be a ceiling nobody set."""
+    anchor = os.environ.get("CLAUDE_PROJECT_DIR") or hook["cwd"]
+    layers = (ceiling_in(USER_CONFIG), project_ceiling(anchor),
+              ceiling_in(session_config(hook["session_id"])))
+    written = [one for one in layers if one]
     ceiling = DEFAULT_CEILING
     for setting in written:
         ceiling = parse_ceiling(setting)(ceiling)
@@ -327,16 +285,19 @@ def permitted(statement):
         return is_permitted_git(statement)
     return is_launcher(statement)
 
-def reaching_for_launcher(command):
-    """Whether an unparseable command was trying to leave - the launcher, not one of its worker
-    modes, so this shares is_launcher's check rather than re-deriving a looser one. shlex's
-    tolerance is right here and wrong in `statements`: permission is already decided, and when
-    the quoting is what broke, whitespace is what is left to split on."""
+def runs_launcher(command):
+    """Whether this command runs the launcher - not one of its worker modes. A quoting
+    `statements` rejects is not evidence nothing ran, so the fallback splits on whitespace:
+    permission is already decided by then, and when the quoting is what broke, whitespace is
+    what is left to split on."""
     try:
-        words = shlex.split(command)
+        return any(map(is_launcher, statements(command)))
     except ValueError:
-        words = command.split()
-    return bool(words) and is_launcher(words)
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        return bool(words) and is_launcher(words)
 
 def classify(tool_name, tool_input):
     """What this call is above the ceiling. Default-deny, so a tool nobody thought about here
@@ -349,27 +310,17 @@ def classify(tool_name, tool_input):
     try:
         parts = statements(command)
     except ValueError:
-        return MISQUOTED_CLOSEOUT if reaching_for_launcher(command) else NEW_WORK
+        return MISQUOTED_CLOSEOUT if runs_launcher(command) else NEW_WORK
     return CLOSEOUT if parts and all(permitted(part) for part in parts) else NEW_WORK
 
 def launched(tool_name, tool_input):
-    """A quoting statements() rejects is not evidence nothing ran: finalize-session's own
-    contract allows quotes, backticks and $ outside the ceiling's own single-quote-only
-    instruction, so a real success there falls back to the same lenient check reaching_for_
-    launcher uses, rather than reading unparseable as unrun."""
-    if tool_name != "Bash":
-        return False
-    command = tool_input.get("command") or ""
-    try:
-        return any(map(is_launcher, statements(command)))
-    except ValueError:
-        return reaching_for_launcher(command)
+    return tool_name == "Bash" and runs_launcher(tool_input.get("command") or "")
 
 def log(hook, tokens, ceiling, verdict):
     """[LAW:no-silent-failure] a hook that allows emits nothing, and so does one that never ran;
     the log is the only place that difference exists. Its own failure is reported but not fatal
     - raising would take the gate down with the instrumentation. The ceiling is logged because
-    it is now assembled from four layers, so the line has to say which number won."""
+    it is folded from layers, so the line has to say which number won."""
     line = (f"{datetime.now().isoformat(timespec='seconds')} "
             f"session={str(hook.get('session_id'))[:8]} event={hook.get('hook_event_name')} "
             f"tokens={tokens} ceiling={ceiling} tool={hook.get('tool_name', '-')} "
@@ -388,8 +339,7 @@ def log(hook, tokens, ceiling, verdict):
 
 def stop(hook, tokens, ceiling):
     """Blocked once, never twice: a second block spends more context on the problem that IS too
-    much context. The give-up message leaves whether the close-out ran conditional, because the
-    compliant path is exactly when stop_hook_active is true."""
+    much context."""
     if closed_out(hook["transcript_path"]):
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
                                                f"tokens, past the {ceiling:,} ceiling, so "
