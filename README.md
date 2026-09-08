@@ -97,12 +97,19 @@ close-out, `ceiling` included.
 ## The context ceiling
 
 What makes the close-out fire without being asked is
-`memento/hooks/scripts/context-ceiling.py`, registered on both `Stop` and `PreToolUse`.
+`memento/hooks/scripts/context-ceiling.py`, registered on `Stop`.
 
-On either event the hook reads the transcript for the most recent assistant message's
-token usage (all four fields — input, output, cache creation, cache read — because that
-is what the next request carries) and compares it to the ceiling. Under the ceiling, the
-hook says nothing.
+At a stop the hook reads the transcript for the most recent assistant message's token
+usage (all four fields — input, output, cache creation, cache read — because that is what
+the next request carries) and compares it to the ceiling. Under the ceiling, the hook says
+nothing.
+
+`Stop` is the one event where that count is true. It describes the live context only at
+the moment a turn ends: a session reset in place keeps its session id and its transcript
+file, so mid-turn the newest record can still belong to a context that was already thrown
+away. A payload for any other event stops the hook with an error naming the event rather
+than measuring anyway. The cost of running on one event is that a session working through
+a very long tool loop is not caught until that turn ends.
 
 The ceiling is 250,000 tokens by default, and three layers can move it. From the least
 specific to the most: `~/.config/promptctl/memento.conf`, then the nearest
@@ -140,10 +147,8 @@ mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
 
 Because the value is signed it lands on top of what the project pinned rather than
 replacing it — a project at 250,000 resolves to 350,000 — and it takes effect on the very
-next hook invocation, with nothing to restart, reload or signal. A session raises its
-ceiling before it breaches it, not after: past the ceiling the `PreToolUse` gate denies
-that command along with every other Bash call that is not `git` or the close-out
-launcher.
+next hook invocation, with nothing to restart, reload or signal, including from a session
+that is already over the ceiling.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
@@ -155,33 +160,16 @@ is worse than no ceiling. Every decision the hook makes is appended to
 `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
 you can tell an allow apart from a hook that never ran.
 
-Over the ceiling on `Stop`, the hook returns `{"decision": "block"}`. Claude Code refuses
-the stop and hands the hook's `reason` back to the agent as its next instruction: commit
-or push everything outstanding first, then run the `finalize-session` launcher with a
-handoff message.
+Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
+and hands the hook's `reason` back to the agent as its next instruction: commit or push
+everything outstanding first, then run the `finalize-session` launcher with a handoff
+message and `--reset compact`. The launcher always writes the handoff to disk; the flag is
+what makes recording it also reset the session.
 
 It forces this **once per session**. If the session stops again, the hook sees
 `stop_hook_active` and lets the stop proceed, printing a visible system message saying
 the one forced attempt was spent. A second block would spend more context on the problem
 that *is* too much context.
-
-`Stop` alone is not enough, because it only has teeth in a session that stops — and an
-autonomous session never stops, which is exactly the session the ceiling exists to
-catch. So `PreToolUse` enforces the same ceiling inside the tool loop, where it cannot
-be avoided. Above the ceiling it is default-deny: the tool call is not run, and the
-agent gets the close-out instruction back as the denial reason. Only three things
-are permitted through:
-
-- the `memento:message-in-a-bottle` skill, which is the close-out itself;
-- a Bash call to the `finalize-session` launcher, matched by resolved path rather than by
-  name, so something else wearing that name is still not the close-out;
-- `git status`, `diff`, `log`, `show`, `rev-parse`, `add`, `commit`, and `push`, which is
-  enough to see the tree and get outstanding work committed before the handoff.
-
-A Bash command the hook cannot parse is denied too; if it was reaching for the launcher,
-the denial says so and explains how to requote it. Denial withholds tools and never the
-exit, so it cannot wedge a session — which is why `PreToolUse` needs no spent-attempt
-valve and keeps no state.
 
 ## Repo layout
 

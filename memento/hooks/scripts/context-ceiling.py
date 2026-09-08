@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""The context ceiling: a session past the hard token maximum may not start new work until it
-has run the message-in-a-bottle close-out.
+"""The context ceiling: a session past the hard token maximum is told, once, to close out.
 
-Two events, because Stop has teeth only in a session that stops, and an autonomous session
-never stops - which is exactly the session this exists to catch, so it is enforced on
-PreToolUse too, where a loop cannot avoid it. Denial withholds tools and never the exit, so it
-cannot wedge a session, and PreToolUse therefore keeps no state - which holds only because the
-exit is permitted here. A worktree-isolated session cannot run the launcher where it stands:
-the platform refuses a non-git command it cannot prove stays inside the worktree. With the exit
-denied as new work, the close-out this hook mandates and the only step that reaches it were
-jointly unsatisfiable, and a session ended having written no handoff at all.
+One clock, one checkpoint. The count is the newest assistant record's usage, and that
+record describes the live context only at the moment a turn ends. The tmux transport
+resets a session in place, so the transcript file and the session id outlive the context
+they describe: mid-turn, before the new turn has produced a record of its own, the newest
+one still belongs to the context that was just thrown away. Stop is the one event where
+that cannot happen, so Stop is the only event this runs on.
 
-This bounds a session that would talk itself into continuing, not one trying to escape: git is
-permitted by name, so an executable planted under that name is out of scope.
+This was also enforced on PreToolUse, to catch a session that runs a long tool loop and
+never stops. It read the same number one tool call too early. A session that closed out at
+479,224 tokens read 479,224 again on its first call after the reset, had its opening Skill
+call denied, and died before doing any work - and the launcher, scraping this log for the
+same number, would have sent it round again. Measuring where the number is false cost more
+than the sessions the second event was there to catch, and every gate that hung off it -
+a shell-grammar parser, a git allowlist, a worktree escape hatch - went with it.
 """
 
 import collections
@@ -22,8 +24,6 @@ import math
 import os
 import re
 import shlex
-import shutil
-import string
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,93 +50,17 @@ LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
 LOG_CAP = 2_000_000
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
-CLOSEOUT_SKILL = "memento:message-in-a-bottle"
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
 TAIL_CHUNK = 256 * 1024
-
-# Enough to see the tree and get outstanding work committed and pushed - arguments unread, so
-# `push --force` is knowingly permitted: git's argument surface is unbounded, and a gate that
-# blocks the commit is worse than one that permits a force-push.
-PERMITTED_GIT = frozenset(("status", "diff", "log", "show", "rev-parse", "add", "commit", "push"))
-# These three inherit git's --output=<path>: an arbitrary file write disguised as a read.
-WRITES_ON_REQUEST = frozenset(("diff", "log", "show"))
-# `-c` is excluded: `git -c alias.x='!sh -c ...' x` defines an alias that runs anything.
-GLOBAL_GIT_OPERANDS = {"-C": 1, "--no-pager": 0}
-# The step that reaches the close-out, and so not new work: inside a worktree the launcher is
-# refused by the platform, and a session that cannot leave cannot close out at all. Permitting
-# the (tool, action) pair rather than the tool name leaves `remove` unrepresentable here - it
-# deletes the worktree and, with discard_changes, the uncommitted work the handoff exists to
-# preserve, which is the one loss this hook is here to prevent. [LAW:types-are-the-program]
-PERMITTED_EXIT = {"ExitWorktree": "keep"}
-# Recognised by the launcher only as its first argument; a pid to kill and a binary to run.
+# Recognised by the launcher only as its first argument: the launcher re-entering itself to
+# do the delivery, which is not a close-out. Nothing spawns these through the Bash tool, but
+# crediting one would let a stop proceed with no handoff written at all.
 WORKER_MODES = frozenset(("--worker", "--iterm-worker", "--detached-worker"))
-LEFT_ALONE_BY_THE_SHELL = frozenset(string.ascii_letters + string.digits + "_@%+=:,./-")
-ENDS_WORD = frozenset(" \t")
-ENDS_STATEMENT = frozenset("&|;\n")
-EXPANDS_IN_DOUBLE_QUOTES = frozenset("$`\\")
-
-# [LAW:one-source-of-truth] the escape is written once and interpolated, not restated per
-# template. Absent from MISQUOTED on purpose: that session already reached the launcher.
-EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
-             'action "keep" first - it is permitted - and close out from the directory it '
-             'returns you to.')
 
 INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
-    {launcher} '<handoff message>'
-{exit_hint}
-Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Quote it with single quotes and nothing else - no $(...), no heredoc, no double quotes - writing an apostrophe as '\\''. Newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
-
-DENIAL = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum, so new work is refused until it closes out. This tool call was NOT run. `git {git}` are still permitted: get anything outstanding committed, then run the close-out:
-    {launcher} '<handoff message>'
-{exit_hint}
-Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with. Do not retry this call, and do not ask the user whether to finalize."""
-
-MISQUOTED = """CONTEXT CEILING: this IS the close-out, and it was NOT run - because of how the command is written, not because closing out is refused. Rewrite it and run it again.
-The handoff must be ONE single-quoted argument. No $(...), no backticks, no heredoc, no double quotes: the gate cannot tell what those would run, so it refuses them. Newlines inside the single quotes are fine, so a long multi-paragraph message needs nothing special. Write an apostrophe as '\\'' - end the quote, backslash-quote, reopen. Run exactly this shape:
-    {launcher} '<handoff message>'"""
-
-CLOSEOUT, MISQUOTED_CLOSEOUT, NEW_WORK = "allow-closeout", "deny-misquoted", "deny"
-REFUSALS = {NEW_WORK: DENIAL, MISQUOTED_CLOSEOUT: MISQUOTED}
-
-def same_file(one, other):
-    """A bare name is resolved the way the shell resolves it; the identity check still runs
-    afterwards, so an impostor found on PATH is still not the launcher."""
-    found = shutil.which(one) if os.path.basename(one) == one else one
-    return bool(found) and os.path.realpath(found) == os.path.realpath(other)
-
-def statements(command):
-    """The commands this string runs - or ValueError, meaning what it runs is unclear.
-    [LAW:parse-dont-validate] every character is default-reject, because a blocklist over shell
-    grammar can never be finished. The appended terminator flushes the last word and statement
-    through the loop's own separator arm, so the flush is written once."""
-    parts, words, word = [], [], []
-    terminated, index = command + "\n", 0
-    while index < len(terminated):
-        char, index = terminated[index], index + 1
-        if char in "'\"":
-            close = terminated.find(char, index)
-            if close < 0:
-                raise ValueError(f"unterminated {char} quote")
-            span, index = terminated[index:close], close + 1
-            if char == '"' and EXPANDS_IN_DOUBLE_QUOTES & set(span):
-                raise ValueError(f"expansion inside double quotes: {span!r}")
-            word.append(span)
-        elif char == "\\" and terminated[index:index + 1] == "'":
-            word.append("'")  # the middle of `'it'\''s'`, and handoffs are full of them
-            index += 1
-        elif char in LEFT_ALONE_BY_THE_SHELL:
-            word.append(char)
-        elif char in ENDS_WORD or char in ENDS_STATEMENT:
-            if word:
-                words.append("".join(word))
-                word = []
-            if char in ENDS_STATEMENT and words:
-                parts.append(words)
-                words = []
-        else:
-            raise ValueError(f"shell-active character {char!r} in {command!r}")
-    return parts
+    {launcher} --reset compact '<handoff message>'
+`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
 
 def ceiling_in(path):
     """The ceiling one config file sets, or None. [LAW:no-silent-failure] a line that is not one
@@ -257,11 +181,19 @@ def starts_a_turn(record):
     return record.get("type") == "user" and not any(
         isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks)
 
+def launched(tool_name, tool_input):
+    """Whether this call ran the close-out. A substring is enough: nothing is permitted on the
+    strength of this answer, it only decides whether a stop already under way is blocked once.
+    The launcher's own path is what the instruction above hands out, so it is what comes back."""
+    command = tool_input.get("command") or ""
+    return (tool_name == "Bash" and LAUNCHER in command
+            and not any(mode in command for mode in WORKER_MODES))
+
 def closed_out(transcript_path):
     """Whether the launcher ran successfully in the turn now ending - bounded at the turn,
     because crediting an older one would wave through every later breach in a transcript the
-    tmux transport compacts in place. [FRAMING:representation] a denied call is written into the
-    transcript exactly like one that ran, so only the result says it happened."""
+    tmux transport resets in place. [FRAMING:representation] a call that errored is written
+    into the transcript exactly like one that ran, so only the result says it happened."""
     errored = set()
     for record in records_newest_first(transcript_path):
         if starts_a_turn(record):
@@ -277,65 +209,6 @@ def closed_out(transcript_path):
                 return True
     return False
 
-def is_launcher(statement):
-    """The launcher is matched by identity, because it is one file and anything else wearing
-    that name is not the close-out. Everything past a worker mode is a message it reads
-    verbatim, so only the first argument is worth looking at."""
-    program, *arguments = statement
-    return same_file(program, LAUNCHER) and (not arguments or arguments[0] not in WORKER_MODES)
-
-def is_permitted_git(statement):
-    """git is matched by role, because it is many files. Which subcommand runs is found past any
-    global options; what it is then asked to do is not read, with one exception: diff/log/show
-    inherit git's --output=<path>, an arbitrary-file-write hiding inside a subcommand classified
-    as read-only."""
-    index = 1
-    while index < len(statement) and statement[index] in GLOBAL_GIT_OPERANDS:
-        index += 1 + GLOBAL_GIT_OPERANDS[statement[index]]
-    if index >= len(statement) or statement[index] not in PERMITTED_GIT:
-        return False
-    if statement[index] in WRITES_ON_REQUEST:
-        return not any(arg.startswith(("-o", "--output")) for arg in statement[index + 1:])
-    return True
-
-def permitted(statement):
-    if os.path.basename(statement[0]) == "git":
-        return is_permitted_git(statement)
-    return is_launcher(statement)
-
-def runs_launcher(command):
-    """Whether this command runs the launcher - not one of its worker modes. A quoting
-    `statements` rejects is not evidence nothing ran, so the fallback splits on whitespace:
-    permission is already decided by then, and when the quoting is what broke, whitespace is
-    what is left to split on."""
-    try:
-        return any(map(is_launcher, statements(command)))
-    except ValueError:
-        try:
-            words = shlex.split(command)
-        except ValueError:
-            words = command.split()
-        return bool(words) and is_launcher(words)
-
-def classify(tool_name, tool_input):
-    """What this call is above the ceiling. Default-deny, so a tool nobody thought about here
-    surfaces as a blocked close-out rather than a session working past the ceiling."""
-    if tool_name == "Skill":
-        return CLOSEOUT if tool_input.get("skill") == CLOSEOUT_SKILL else NEW_WORK
-    if tool_name in PERMITTED_EXIT:
-        return CLOSEOUT if tool_input.get("action") == PERMITTED_EXIT[tool_name] else NEW_WORK
-    if tool_name != "Bash":
-        return NEW_WORK
-    command = tool_input.get("command") or ""
-    try:
-        parts = statements(command)
-    except ValueError:
-        return MISQUOTED_CLOSEOUT if runs_launcher(command) else NEW_WORK
-    return CLOSEOUT if parts and all(permitted(part) for part in parts) else NEW_WORK
-
-def launched(tool_name, tool_input):
-    return tool_name == "Bash" and runs_launcher(tool_input.get("command") or "")
-
 def log(hook, tokens, ceiling, verdict):
     """[LAW:no-silent-failure] a hook that allows emits nothing, and so does one that never ran;
     the log is the only place that difference exists. Its own failure is reported but not fatal
@@ -347,7 +220,6 @@ def log(hook, tokens, ceiling, verdict):
             f"-> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Concurrent writers are ordinary on PreToolUse: cap, truncate and append under one lock.
         with LOG_FILE.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             if os.fstat(handle.fileno()).st_size > LOG_CAP:
@@ -370,32 +242,22 @@ def stop(hook, tokens, ceiling):
                                           f"forced close-out attempt, so the stop proceeds. "
                                           f"If the close-out did not run, the next session "
                                           f"starts with nothing."}
-    return "block", {"decision": "block", "reason": reason(INSTRUCTION, tokens, ceiling)}
-
-def pretool(hook, tokens, ceiling):
-    """The close-out is the only work left, so it is the only work permitted."""
-    label = classify(hook["tool_name"], hook.get("tool_input") or {})
-    template = REFUSALS.get(label)
-    return label, template and {"hookSpecificOutput": {
-        "hookEventName": "PreToolUse", "permissionDecision": "deny",
-        "permissionDecisionReason": reason(template, tokens, ceiling)}}
-
-def reason(template, tokens, ceiling):
-    return template.format(tokens=tokens, ceiling=ceiling, exit_hint=EXIT_HINT,
-                           git="/".join(sorted(PERMITTED_GIT)),
-                           launcher=shlex.quote(LAUNCHER))
-
-EVENTS = {"Stop": stop, "PreToolUse": pretool}
+    return "block", {"decision": "block", "reason": INSTRUCTION.format(
+        tokens=tokens, ceiling=ceiling, launcher=shlex.quote(LAUNCHER))}
 
 # The ceiling is read from the payload's session and project, so it is resolved here rather
 # than at import: what it depends on does not exist until stdin has been read. The transcript
 # is measured first so a payload missing it is named by the field it is missing.
 hook = json.load(sys.stdin)
-event = EVENTS[hook["hook_event_name"]]
+# [LAW:no-silent-failure] any other event is hooks.json having drifted from this file, and the
+# number this reads is only true at a stop - so it says so rather than measuring anyway.
+if hook["hook_event_name"] != "Stop":
+    sys.exit(f"memento context ceiling: registered on Stop, called on "
+             f"{hook['hook_event_name']}. Fix hooks.json.")
 tokens = context_tokens(hook["transcript_path"])
 ceiling = resolve_ceiling(hook)
 
-label, verdict = ("allow-under", None) if tokens < ceiling else event(hook, tokens, ceiling)
+label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
 log(hook, tokens, ceiling, label)
 if verdict:
     print(json.dumps(verdict))

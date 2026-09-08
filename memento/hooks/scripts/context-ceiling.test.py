@@ -126,15 +126,6 @@ def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active
     return done.returncode, out, done.stderr
 
 
-def bash(command, records=None, **kw):
-    """A PreToolUse decision on one Bash command above the ceiling."""
-    return run(records or [user, assistant(OVER)], event="PreToolUse",
-               tool_name="Bash", tool_input={"command": command}, **kw)
-
-
-def denied(out):
-    return (out or {}).get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
-
 
 # --- Stop -------------------------------------------------------------------------------
 
@@ -202,184 +193,6 @@ code, out, _ = run([user, assistant(OVER),
                     user, assistant(OVER)])
 check("a close-out from an earlier turn does not excuse a later breach",
       out and out.get("decision") == "block", str(out))
-
-# --- PreToolUse: what the close-out is allowed to do -------------------------------------
-
-code, out, _ = run([user, assistant(UNDER)], event="PreToolUse",
-                   tool_name="Bash", tool_input={"command": "rm -rf /"})
-check("under the ceiling, PreToolUse permits anything", code == 0 and out is None, f"{code} {out}")
-
-_, out, _ = bash(f"{LAUNCHER} 'a message with an apostrophe: it'\\''s fine'")
-check("the launcher itself is permitted", out is None, str(out))
-_, out, _ = bash("git status")
-check("git status is permitted", out is None, str(out))
-_, out, _ = bash("git add -A && git commit -m 'wip' && git push")
-check("the read-and-commit half of git is permitted, chained", out is None, str(out))
-_, out, _ = bash("/usr/bin/git status")
-check("a fully-qualified git is permitted", out is None, str(out))
-
-_, out, _ = bash("git reset --hard")
-check("the destructive half of git is denied", denied(out), str(out))
-# Recorded, not hidden: arguments are not inspected, so the destructive forms of a
-# permitted subcommand are permitted. Every rule tried against git's argument surface
-# refused more real close-out work than it prevented.
-for destructive in ("git push --force", "git push origin +main:main",
-                    "git push origin :topic", "git commit --amend -m rewritten"):
-    _, out, _ = bash(destructive)
-    check(f"{destructive!r} is permitted, by decision", out is None, str(out))
-for write in ("git diff --output=/tmp/pwned", "git diff -o/tmp/pwned",
-             "git log --output=/tmp/pwned", "git show --output=/tmp/pwned"):
-    _, out, _ = bash(write)
-    check(f"{write!r} is denied: --output writes outside the repo", denied(out), str(out))
-_, out, _ = bash("git diff --output-indicator-new=X")
-check("an unrelated --output-* flag is denied too - over-refusal here is free", denied(out), str(out))
-_, out, _ = bash("git commit -am 'staged and messaged'")
-check("bundled short flags are permitted", out is None, str(out))
-_, out, _ = bash("git commit -m '-1 experiment'")
-check("a commit message beginning with a dash is permitted", out is None, str(out))
-_, out, _ = bash("git -C /somewhere/else status")
-check("a global option before the subcommand is permitted", out is None, str(out))
-_, out, _ = bash("git --no-pager log")
-check("--no-pager is permitted", out is None, str(out))
-# The subcommand is read by position, so a denied one cannot be laundered by mentioning a
-# permitted word among its arguments.
-_, out, _ = bash("git branch -D status")
-check("a denied subcommand is not laundered by a permitted word", denied(out), str(out))
-_, out, _ = bash("git -c core.pager=less status")
-check("git -c is denied: it can define an alias that runs anything", denied(out), str(out))
-_, out, _ = bash("git branch -D topic")
-check("git branch is denied", denied(out), str(out))
-_, out, _ = bash("cat notes.md")
-check("new work is denied", denied(out), str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="Read", tool_input={"file_path": "/etc/hosts"})
-check("reads are denied - a tool that grows context cannot respect a context limit",
-      denied(out), str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="SomeToolInventedTomorrow", tool_input={})
-check("an unrecognised tool is denied by default", denied(out), str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="Skill", tool_input={"skill": "memento:message-in-a-bottle"})
-check("the handoff skill is permitted", out is None, str(out))
-# The retired namespace is a denial, not a synonym. auto-bottle exposed this same skill file
-# under its own name until 0.4.0; nothing ships it now, so the old name is new work like any
-# other unrecognised skill - and this case fails if a second name is ever readmitted.
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="Skill", tool_input={"skill": "auto-bottle:message-in-a-bottle"})
-check("the close-out's retired namespace is denied, not accepted as a second name",
-      denied(out), str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="Skill", tool_input={"skill": "laws:code"})
-check("another skill is denied", denied(out), str(out))
-
-# A worktree-isolated session cannot run the launcher where it stands - the platform refuses a
-# non-git command it cannot prove stays inside - so the step that reaches the close-out is not
-# new work. `remove` stays denied: it deletes the worktree and, with discard_changes, exactly
-# the uncommitted work the handoff is there to preserve.
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="ExitWorktree", tool_input={"action": "keep"})
-check("leaving a worktree is permitted - it is the step that reaches the close-out",
-      out is None, str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="ExitWorktree", tool_input={"action": "remove"})
-check("removing the worktree is denied - it destroys what the handoff preserves",
-      denied(out), str(out))
-_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
-                tool_name="ExitWorktree", tool_input={})
-check("an exit with no action is denied, so the permitted thing is the pair not the tool",
-      denied(out), str(out))
-_, out, _ = bash("cat notes.md")
-check("the refusal names the exit, so a worktree session need not discover it",
-      "ExitWorktree" in str(out), str(out))
-_, out, _ = bash("")
-check("an empty command is denied with no case of its own", denied(out), str(out))
-
-reason = (out or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-check("the denial names the permitted git subcommands from the set that decides them",
-      "commit" in reason and "push" in reason and "reset" not in reason, reason)
-
-# --- PreToolUse: the parser refuses what it cannot prove is plain -------------------------
-
-_, out, _ = bash("git status |& rm -rf x")
-check("an operator outside the enumerated set does not smuggle a second command",
-      denied(out), str(out))
-_, out, _ = bash("git status\nrm -rf x")
-check("a bare newline does not smuggle a second command", denied(out), str(out))
-_, out, _ = bash("git status\ngit diff")
-check("a bare newline separates statements rather than refusing them", out is None, str(out))
-_, out, _ = bash(f'{LAUNCHER} "$(rm -rf x)"')
-check("command substitution inside double quotes is refused", denied(out), str(out))
-_, out, _ = bash(f"{LAUNCHER} `rm -rf x`")
-check("backticks are refused", denied(out), str(out))
-_, out, _ = bash(f"echo hi; {LAUNCHER} 'bye'")
-check("a permitted segment does not launder an unpermitted one", denied(out), str(out))
-_, out, _ = bash(f"cat {LAUNCHER}")
-check("merely mentioning the launcher is not running it", denied(out), str(out))
-decoy = os.path.join(scratch_dir(), "finalize-session")
-open(decoy, "w").close()
-os.chmod(decoy, 0o755)
-_, out, _ = bash(f"{decoy} 'bye'")
-check("an impostor named finalize-session is not the close-out", denied(out), str(out))
-_, out, _ = run([user, assistant(OVER), tool_use("Bash", {"command": f"{decoy} 'bye'"}),
-                 tool_result()])
-check("an impostor close-out does not satisfy the stop either",
-      out and out.get("decision") == "block", str(out))
-# On the record: git is matched by name because many real files are git, so a planted one
-# passes. This gate bounds a session that would talk itself into continuing, not one
-# trying to escape - and planting the file needs a tool call, itself denied up here.
-planted_git = os.path.join(scratch_dir(), "git")
-open(planted_git, "w").close()
-os.chmod(planted_git, 0o755)
-_, out, _ = bash(f"{planted_git} status")
-check("an executable named git is permitted, by name and by decision", out is None, str(out))
-
-# The launcher's internal worker entry points take a pid to kill and a binary to run, and
-# need no setup at all - one Bash call to the real file reaches them.
-for internal in ("--worker tmux clear /tmp/m /tmp/g",
-                 "--iterm-worker uuid 4242 /tmp/m /tmp/g flags",
-                 "--detached-worker s /tmp . /tmp/m /tmp/g f 1 /bin/sh id"):
-    _, out, _ = bash(f"{LAUNCHER} {internal}")
-    check(f"the launcher's {internal.split()[0]} entry point is denied", denied(out), str(out))
-_, out, _ = run([user, assistant(OVER),
-                 tool_use("Bash", {"command": f"{LAUNCHER} --detached-worker s /tmp . /tmp/m /tmp/g f 1 /bin/sh id"}),
-                 tool_result()])
-check("an internal worker call is not credited as the close-out",
-      out and out.get("decision") == "block", str(out))
-# [LAW:one-source-of-truth] every worker flag the launcher itself dispatches on, read from
-# its own `case "${1:-}"` block rather than re-asserted here - a future 4th entry point is
-# denied by this loop with no line of this file to update, instead of silently reachable.
-dispatch = open(LAUNCHER).read().split('case "${1:-}"', 1)[1].split("esac", 1)[0]
-for flag in re.findall(r'^\s*(--[\w-]+)\)', dispatch, re.MULTILINE):
-    _, out, _ = bash(f"{LAUNCHER} {flag}")
-    check(f"the launcher's {flag} entry point is denied", denied(out), str(out))
-_, out, _ = bash(f"{LAUNCHER} --goal 'keep going' /next")
-check("the documented --goal shape is permitted", out is None, str(out))
-_, out, _ = bash(f"{LAUNCHER} --reset clear 'a handoff'")
-check("the documented --reset shape is permitted", out is None, str(out))
-
-# F5: the shell would find a bare name on PATH, so the gate resolves it the same way before
-# checking identity.
-launcher_dir = os.path.dirname(LAUNCHER)
-_, out, _ = bash("finalize-session 'bye'", extra_env={"PATH": launcher_dir + os.pathsep
-                                                      + os.environ.get("PATH", "")})
-check("the launcher invoked by bare name on PATH is permitted", out is None, str(out))
-code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": "finalize-session 'bye'"}), tool_result()],
-                   extra_env={"PATH": launcher_dir + os.pathsep + os.environ.get("PATH", "")})
-check("a bare-name close-out is credited at the stop",
-      code == 0 and out and "decision" not in out
-      and "the close-out ran" in out.get("systemMessage", ""), str(out))
-_, out, _ = bash("finalize-session 'bye'", extra_env={"PATH": os.path.dirname(decoy)})
-check("a bare name resolving to an impostor is still not the launcher", denied(out), str(out))
-
-_, out, _ = bash(f"{LAUNCHER} \"$(cat <<'EOF'\nbye\nEOF\n)\"")
-reason = (out or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-check("a misquoted close-out gets the rewrite message, not the denial",
-      denied(out) and "this IS the close-out" in reason, reason[:160])
-_, out, _ = bash("cat $(ls)")
-reason = (out or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-check("unparseable new work gets the denial, not the rewrite message",
-      denied(out) and "this IS the close-out" not in reason, reason[:160])
 
 # --- the ceiling is configurable while sessions run --------------------------------------
 
@@ -586,12 +399,6 @@ run([user, assistant(UNDER)])
 check("an allowed call is logged too", "allow-under" in run.log, run.log)
 run([user, assistant(OVER)])
 check("a block is logged", "-> block" in run.log, run.log)
-bash("cat notes.md")
-check("a denial is logged with the tool that was refused",
-      "-> deny" in run.log and "tool=Bash" in run.log, run.log)
-bash(f"{LAUNCHER} \"$(echo hi)\"")
-check("a misquoted close-out is logged apart from a plain denial",
-      "-> deny-misquoted" in run.log, run.log)
 run([user, assistant(UNDER)], log_seed="old\n" * 600_000)
 check("the log is truncated once it passes its cap",
       "[truncated at" in run.log and len(run.log) < 2_000_000, str(len(run.log)))
@@ -635,12 +442,13 @@ finally:
 
 check("the launcher the hook points at exists", os.access(LAUNCHER, os.X_OK), LAUNCHER)
 registered = json.load(open(os.path.join(os.path.dirname(HERE), "hooks.json")))["hooks"]
-check("the hook is registered on both events, and only those",
-      sorted(registered) == ["PreToolUse", "Stop"], str(sorted(registered)))
-for event in ("Stop", "PreToolUse"):
-    command = registered[event][0]["hooks"][0]["command"]
-    check(f"the {event} registration runs this script, from the plugin root",
-          os.path.basename(HOOK) in command and "${CLAUDE_PLUGIN_ROOT}" in command, command)
+# The count is only true of the live context at a stop: a session reset in place keeps its
+# transcript, so on any earlier event the newest record can describe a context already gone.
+check("the hook is registered on Stop alone",
+      sorted(registered) == ["Stop"], str(sorted(registered)))
+command = registered["Stop"][0]["hooks"][0]["command"]
+check("the Stop registration runs this script, from the plugin root",
+      os.path.basename(HOOK) in command and "${CLAUDE_PLUGIN_ROOT}" in command, command)
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
 
 print(f"\n{len(failures)} failed")

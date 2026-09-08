@@ -75,62 +75,6 @@ HANDOFF_SUFFIX=$(cat <<'SUFFIX'
 SUFFIX
 )
 
-# The message's first 3 sentences, one per line. Stops early so a long message
-# doesn't slow the common case. (tmux only.)
-_first_three_sentences() {
-  local text="$1" result="" count=0 i char
-  for ((i=0; i<${#text}; i++)); do
-    char="${text:$i:1}"
-    result+="$char"
-    if [[ "$char" == "." || "$char" == "!" || "$char" == "?" ]]; then
-      printf '%s\n' "$result"
-      result=""
-      ((count++)) || true
-      [[ $count -ge 3 ]] && return 0
-    fi
-  done
-  printf '%s\n' "$result"
-}
-
-# Whether the message asks for a compacted handoff — true only on an AFFIRMATIVE
-# mention of /compact in the first 3 sentences.
-#
-# [LAW:parse-dont-validate] The reset mode is a binary the author chose, but prose
-# cannot carry a binary faithfully: to a matcher, a mention and an invocation look
-# identical. `--reset` is the parsed form and wins outright; this inference serves
-# messages that pass no flag, and it is deliberately biased toward `clear`.
-#
-# The bias is not caution for its own sake — the two errors cost wildly different
-# amounts. A wrong `clear` costs the next agent one summary it has to rebuild. A
-# wrong `compact` carries the previous session's context across a boundary that may
-# exist precisely to stop it. On 2026-08-16 a handoff reading "Do NOT use /compact
-# ... a blank slate is required" compacted, because a word-boundary match cannot
-# see a negation — so the more emphatically an author forbade compaction, the
-# surer it was to happen, and the misfire announced itself only in a line the
-# skill's own turn-ending rule forbids the author to stay and read. Under
-# ambiguity, take the harmless error.
-_wants_compact() {
-  local sentence
-  while IFS= read -r sentence; do
-    # Sentences arrive with their terminator attached, so the trailing class must
-    # admit punctuation as well as whitespace and end-of-line.
-    [[ "$sentence" =~ (^|[[:space:]])/compact([[:space:]]|[.,:;!?]|$) ]] || continue
-    # A negated mention is ambiguous, not a request: skip this sentence and let a
-    # later affirmative one — or the `clear` default — decide. Character classes
-    # rather than ${var,,} keep this working on bash 3.2, which is what
-    # /usr/bin/bash still is on macOS.
-    [[ "$sentence" =~ (^|[^A-Za-z])([Nn][Oo][Tt]|[Nn][Ee][Vv][Ee][Rr]|[Aa][Vv][Oo][Ii][Dd]|[Ww][Ii][Tt][Hh][Oo][Uu][Tt]|[Ss][Kk][Ii][Pp])([^A-Za-z]|$) ]] && continue
-    [[ "$sentence" == *"n't"* || "$sentence" == *"N'T"* ]] && continue
-    return 0
-  done < <(_first_three_sentences "$1")
-  return 1
-}
-
-# The inferred reset mode as a word, so the caller can treat it as a plain default.
-_infer_reset() {
-  if _wants_compact "$1"; then printf 'compact'; else printf 'clear'; fi
-}
-
 # Empty the input box before writing into it. The box is shared mutable state -
 # a stray keystroke, a half-typed prompt, a previous delivery - and whatever is
 # already sitting there FUSES with whatever arrives next: `/clear` typed onto a
@@ -469,11 +413,11 @@ case "$MODE" in
     # selects that default; it never yields an empty handoff, so no guard follows.
     AGENT_MESSAGE="${*:-/next}"
 
-    # [LAW:dataflow-not-control-flow] reset mode is one value with two sources —
-    # the explicit flag when the author passed one, the message's own text
-    # otherwise — resolved by a default, not by a branch in the control flow.
+    # [LAW:dataflow-not-control-flow] reset mode is one value with one source: the
+    # flag, or empty. Nothing here measures the session — the ceiling hook is the
+    # only clock, and `--reset` is how it says the session is out of room.
     # [LAW:one-source-of-truth] the only place RESET is assigned. (tmux only.)
-    RESET="${RESET_ARG:-$(_infer_reset "$AGENT_MESSAGE")}"
+    RESET="$RESET_ARG"
 
     # [LAW:dataflow-not-control-flow] the message flows through a file as a value,
     # bypassing every shell-quoting hazard between argv → worker → transport. No
@@ -500,6 +444,19 @@ case "$MODE" in
     # empty when none was carried. Workers read it and re-issue /goal only when it
     # is non-empty; nothing branches on a separate "has goal" flag.
     printf '%s' "$GOAL" > "$GOALFILE"
+
+    # [LAW:decomposition] recording the handoff and resetting the session are two
+    # jobs with opposite triggers. Recording is cheap and always safe, so it has
+    # already happened. Resetting throws away a live session's context, so it
+    # happens only when asked - by the ceiling hook, which is the one thing that
+    # measures, or by an author who wants a fresh session for its own sake.
+    if [[ -z "$RESET" ]]; then
+      rm -f -- "$GOALFILE"
+      trap - EXIT
+      echo "handoff recorded → $MSGFILE"
+      echo "no reset: this session keeps its context, so carry on with the work. Pass --reset clear|compact when you want the session reset."
+      exit 0
+    fi
 
     # Resolve own path for both ./script and PATH-lookup invocations.
     if [[ "$0" == */* ]]; then

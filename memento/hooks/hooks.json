@@ -1,17 +1,7 @@
 {
-  "description": "The context ceiling, enforced on two events because one of them is not enough. Stop refuses to let a session past the hard token maximum end its turn until it has run the message-in-a-bottle close-out - but an autonomous session never ends a turn, so PreToolUse enforces the same ceiling where a tool loop cannot avoid it, narrowing the permitted set to the close-out itself.",
+  "description": "The context ceiling, enforced at the one event where the number is true. The count comes from the transcript's newest assistant record, which describes the live context only at the moment a turn ends - a session reset in place keeps its transcript, so mid-turn that record can belong to a context that no longer exists. Stop refuses to let a session past the hard token maximum end its turn until it has run the message-in-a-bottle close-out.",
   "hooks": {
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/context-ceiling.py\""
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
       {
         "hooks": [
           {

@@ -324,7 +324,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
-        message="handoff", handoff_dir=None):
+        message="handoff", handoff_dir=None, reset="clear"):
     """Launch finalize-session under a real `nest` chain and return its dry-run report."""
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
@@ -369,7 +369,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
-        done = subprocess.run([NEST_BIN, str(depth), LAUNCHER, message],
+        argv = [NEST_BIN, str(depth), LAUNCHER] + (["--reset", reset] if reset else []) + [message]
+        done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
         # The chain's top pid, read before the workdir goes away. It names both the
         # pane fixtures' ROOTPID and the planted claude - they are one process - so
@@ -663,55 +664,6 @@ done = run(depth=2, panes=f"%77 {STRANGER.pid} 0\n%99 ROOTPID 0", tmux_pane=":."
 check("a $TMUX_PANE that resolves to someone else's live pane is refused",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# --- the reset mode inferred from the message ------------------------------
-# The only inference in the script: with no --reset flag, the handoff's own prose
-# decides /clear vs /compact. It is deliberately biased toward clear because the
-# two errors cost different amounts, and it already has a production incident in
-# its own comments - on 2026-08-16 a message reading "Do NOT use /compact" compacted,
-# because a word-boundary match cannot see a negation, so the more emphatically an
-# author forbade compaction the surer it was to happen. Nothing in the repo pinned
-# that, which left the negation list and the mention pattern free to regress in
-# silence.
-#
-# These read the launcher's own dry-run report rather than calling the shell
-# function, so the whole path - argv, sentence split, negation screen, default -
-# is what is under test. [LAW:behavior-not-structure]
-
-
-def chose_reset(done):
-    """The reset mode the launcher settled on, per its dry-run report."""
-    for line in done.stdout.splitlines():
-        if line.startswith("[dry-run] transport=tmux "):
-            for field in line.split():
-                if field.startswith("reset=/"):
-                    return field.split("/", 1)[1]
-    return f"<no reset: rc={done.returncode} out={done.stdout!r} err={done.stderr!r}>"
-
-
-done = run(message="Pick up where I left off. Use /compact so the context survives.")
-check("an affirmative /compact mention infers compact", chose_reset(done) == "compact",
-      chose_reset(done))
-
-# The incident itself. A message that forbids compaction must not compact - and
-# under a matcher blind to negation, this is the case that inverts.
-done = run(message="Do NOT use /compact here, a blank slate is required.")
-check("a negated /compact mention infers clear, not compact", chose_reset(done) == "clear",
-      chose_reset(done))
-
-# Negation screens the SENTENCE, not the message: skipping one ambiguous sentence
-# must still leave a later affirmative one able to decide. Without this case, a
-# regression that gave up at the first negated mention - refusing compact for the
-# rest of the message - would read exactly like the fix above.
-done = run(message="Do NOT use /compact blindly. Use /compact for this handoff.")
-check("a negated sentence does not veto a later affirmative one",
-      chose_reset(done) == "compact", chose_reset(done))
-
-# The default, and the reason the bias points where it does: no mention at all is
-# not an absence of evidence to guess around, it is the answer.
-done = run(message="Pick up the next ticket and keep going.")
-check("a message that never mentions compaction infers clear",
-      chose_reset(done) == "clear", chose_reset(done))
-
 # --- the detached worker: what it retires, and in what order ----------------
 # Everything above drives the LAUNCHER in dry-run, so the promise the detached
 # transport makes at the other end - after the handoff, exactly one live agent -
@@ -980,6 +932,31 @@ finally:
 
 STRANGER.terminate()
 STRANGER.wait()
+# --- the reset is spent only when it was asked for --------------------------------------
+# Recording the handoff and resetting the session are separate jobs. Welded together, every
+# "the unit is done" judgment upstream threw away a session that still had most of its
+# context. The launcher no longer measures anything to decide: the ceiling hook is the one
+# clock, and `--reset` is how it says a session is out of room. [LAW:one-source-of-truth]
+
+done = run(reset=None)
+check("with no --reset the handoff is recorded and the session keeps its context",
+      "handoff recorded" in done.stdout and "no reset" in done.stdout
+      and "transport=" not in done.stdout, done.stdout[:200])
+check("and it names the flag that would have reset it",
+      "--reset" in done.stdout, done.stdout[:200])
+
+done = run(reset="clear")
+check("an explicit --reset resets, which is what the hook passes at the ceiling",
+      "transport=" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
+
+handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
+run(reset=None, handoff_dir=handoffs, message="carry this forward")
+written = [os.path.join(handoffs, n) for n in os.listdir(handoffs)]
+check("the handoff is on disk even when nothing was reset", len(written) == 1, str(written))
+check("and carries the message, so the record is the same either way",
+      written and "carry this forward" in open(written[0]).read(), str(written))
+
 shutil.rmtree(FIXTURES, ignore_errors=True)
+
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)
