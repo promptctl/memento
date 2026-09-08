@@ -5,7 +5,11 @@ has run the message-in-a-bottle close-out.
 Two events, because Stop has teeth only in a session that stops, and an autonomous session
 never stops - which is exactly the session this exists to catch, so it is enforced on
 PreToolUse too, where a loop cannot avoid it. Denial withholds tools and never the exit, so it
-cannot wedge a session, and PreToolUse therefore keeps no state.
+cannot wedge a session, and PreToolUse therefore keeps no state - which holds only because the
+exit is permitted here. A worktree-isolated session cannot run the launcher where it stands:
+the platform refuses a non-git command it cannot prove stays inside the worktree. With the exit
+denied as new work, the close-out this hook mandates and the only step that reaches it were
+jointly unsatisfiable, and a session ended having written no handoff at all.
 
 This bounds a session that would talk itself into continuing, not one trying to escape: git is
 permitted by name, so an executable planted under that name is out of scope.
@@ -59,6 +63,12 @@ PERMITTED_GIT = frozenset(("status", "diff", "log", "show", "rev-parse", "add", 
 WRITES_ON_REQUEST = frozenset(("diff", "log", "show"))
 # `-c` is excluded: `git -c alias.x='!sh -c ...' x` defines an alias that runs anything.
 GLOBAL_GIT_OPERANDS = {"-C": 1, "--no-pager": 0}
+# The step that reaches the close-out, and so not new work: inside a worktree the launcher is
+# refused by the platform, and a session that cannot leave cannot close out at all. Permitting
+# the (tool, action) pair rather than the tool name leaves `remove` unrepresentable here - it
+# deletes the worktree and, with discard_changes, the uncommitted work the handoff exists to
+# preserve, which is the one loss this hook is here to prevent. [LAW:types-are-the-program]
+PERMITTED_EXIT = {"ExitWorktree": "keep"}
 # Recognised by the launcher only as its first argument; a pid to kill and a binary to run.
 WORKER_MODES = frozenset(("--worker", "--iterm-worker", "--detached-worker"))
 LEFT_ALONE_BY_THE_SHELL = frozenset(string.ascii_letters + string.digits + "_@%+=:,./-")
@@ -66,12 +76,20 @@ ENDS_WORD = frozenset(" \t")
 ENDS_STATEMENT = frozenset("&|;\n")
 EXPANDS_IN_DOUBLE_QUOTES = frozenset("$`\\")
 
+# [LAW:one-source-of-truth] the escape is written once and interpolated, not restated per
+# template. Absent from MISQUOTED on purpose: that session already reached the launcher.
+EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
+             'action "keep" first - it is permitted - and close out from the directory it '
+             'returns you to.')
+
 INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
     {launcher} '<handoff message>'
+{exit_hint}
 Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Quote it with single quotes and nothing else - no $(...), no heredoc, no double quotes - writing an apostrophe as '\\''. Newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
 
 DENIAL = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum, so new work is refused until it closes out. This tool call was NOT run. `git {git}` are still permitted: get anything outstanding committed, then run the close-out:
     {launcher} '<handoff message>'
+{exit_hint}
 Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with. Do not retry this call, and do not ask the user whether to finalize."""
 
 MISQUOTED = """CONTEXT CEILING: this IS the close-out, and it was NOT run - because of how the command is written, not because closing out is refused. Rewrite it and run it again.
@@ -304,6 +322,8 @@ def classify(tool_name, tool_input):
     surfaces as a blocked close-out rather than a session working past the ceiling."""
     if tool_name == "Skill":
         return CLOSEOUT if tool_input.get("skill") == CLOSEOUT_SKILL else NEW_WORK
+    if tool_name in PERMITTED_EXIT:
+        return CLOSEOUT if tool_input.get("action") == PERMITTED_EXIT[tool_name] else NEW_WORK
     if tool_name != "Bash":
         return NEW_WORK
     command = tool_input.get("command") or ""
@@ -361,7 +381,7 @@ def pretool(hook, tokens, ceiling):
         "permissionDecisionReason": reason(template, tokens, ceiling)}}
 
 def reason(template, tokens, ceiling):
-    return template.format(tokens=tokens, ceiling=ceiling,
+    return template.format(tokens=tokens, ceiling=ceiling, exit_hint=EXIT_HINT,
                            git="/".join(sorted(PERMITTED_GIT)),
                            launcher=shlex.quote(LAUNCHER))
 
