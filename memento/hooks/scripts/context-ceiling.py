@@ -11,8 +11,7 @@ that cannot happen, so Stop is the only event this runs on.
 This was also enforced on PreToolUse, to catch a session that runs a long tool loop and
 never stops. It read the same number one tool call too early. A session that closed out at
 479,224 tokens read 479,224 again on its first call after the reset, had its opening Skill
-call denied, and died before doing any work - and the launcher, scraping this log for the
-same number, would have sent it round again. Measuring where the number is false cost more
+call denied, and died before doing any work. Measuring where the number is false cost more
 than the sessions the second event was there to catch, and every gate that hung off it -
 a shell-grammar parser, a git allowlist, a worktree escape hatch - went with it.
 """
@@ -57,9 +56,21 @@ TAIL_CHUNK = 256 * 1024
 # do the delivery, which is not a close-out. Nothing spawns these through the Bash tool, but
 # crediting one would let a stop proceed with no handoff written at all.
 WORKER_MODES = frozenset(("--worker", "--iterm-worker", "--detached-worker"))
+# The flag that makes a close-out a close-out. Without it the launcher records the handoff and
+# the session carries on, so crediting a call that omits it would wave a stop through and leave
+# the context exactly as full as it was. [LAW:one-source-of-truth] the instruction hands this
+# flag out and `launched` demands it back; it is written once and interpolated into both.
+RESET_FLAG = "--reset"
+# Deleting the PreToolUse gate removed this hook's own refusal, not the platform's: a
+# worktree-isolated session still cannot run a non-git command the platform cannot prove stays
+# inside the worktree. Without this line such a session gets an instruction it may be unable to
+# run and no way out - the stranded session this whole gate exists to prevent.
+EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
+             'action "keep" first, and close out from the directory it returns you to.')
 
 INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
     {launcher} --reset compact '<handoff message>'
+{exit_hint}
 `--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
 
 def ceiling_in(path):
@@ -182,11 +193,23 @@ def starts_a_turn(record):
         isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks)
 
 def launched(tool_name, tool_input):
-    """Whether this call ran the close-out. A substring is enough: nothing is permitted on the
-    strength of this answer, it only decides whether a stop already under way is blocked once.
-    The launcher's own path is what the instruction above hands out, so it is what comes back."""
+    """Whether this call ran the close-out - the launcher, named either way an agent reaches it,
+    carrying the flag that actually resets the session.
+
+    Substrings, not a parse. Nothing is permitted on the strength of this answer; it only decides
+    whether a stop already under way is blocked once, and the parser that used to answer it more
+    precisely refused a legitimate `git commit -F -` and cost more than it caught.
+
+    The basename covers the absolute path too, being a substring of it, and covers the bare-name
+    invocation the old PATH resolution used to credit - a session that closes out by name and is
+    not credited stays blocked with no way out, which is the worse of the two errors.
+
+    RESET_FLAG is what separates a close-out from a call that only records a handoff and carries
+    on. Crediting the latter would let a session at the ceiling satisfy this check every turn and
+    never free a token: the failure the block exists to prevent, reached through the block."""
     command = tool_input.get("command") or ""
-    return (tool_name == "Bash" and LAUNCHER in command
+    return (tool_name == "Bash" and os.path.basename(LAUNCHER) in command
+            and RESET_FLAG in command
             and not any(mode in command for mode in WORKER_MODES))
 
 def closed_out(transcript_path):
@@ -243,7 +266,7 @@ def stop(hook, tokens, ceiling):
                                           f"If the close-out did not run, the next session "
                                           f"starts with nothing."}
     return "block", {"decision": "block", "reason": INSTRUCTION.format(
-        tokens=tokens, ceiling=ceiling, launcher=shlex.quote(LAUNCHER))}
+        tokens=tokens, ceiling=ceiling, launcher=shlex.quote(LAUNCHER), exit_hint=EXIT_HINT)}
 
 # The ceiling is read from the payload's session and project, so it is resolved here rather
 # than at import: what it depends on does not exist until stdin has been read. The transcript

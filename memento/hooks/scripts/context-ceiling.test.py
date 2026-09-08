@@ -76,7 +76,7 @@ def tool_result(call_id="t-1", is_error=False):
 user = {"type": "user", "isSidechain": False, "message": {"content": "hi"}}
 
 
-def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active=False,
+def run(records, event="Stop", stop_hook_active=False,
         hook=HOOK, user_conf=USER_CEILING, project_conf=None, session_conf=None,
         project=None, config_home=None, xdg=None, log_seed="", extra_env=None,
         session=SESSION):
@@ -112,9 +112,6 @@ def run(records, event="Stop", tool_name=None, tool_input=None, stop_hook_active
     env.update(extra_env or {})
     payload = {"session_id": session, "hook_event_name": event, "cwd": project,
                "transcript_path": handle.name, "stop_hook_active": stop_hook_active}
-    if tool_name is not None:
-        payload["tool_name"] = tool_name
-        payload["tool_input"] = tool_input or {}
     try:
         done = subprocess.run([sys.executable, hook], text=True, capture_output=True,
                               env=env, input=json.dumps(payload))
@@ -137,6 +134,14 @@ check("over the ceiling, the stop is blocked", out and out.get("decision") == "b
 check("the reason names the launcher, the count and the ceiling",
       out and LAUNCHER in out["reason"] and f"{OVER:,}" in out["reason"]
       and f"{TEST_CEILING:,}" in out["reason"], str(out))
+# --reset is the whole coupling to finalize-session's contract: the command this hands over is
+# the one launched() credits back, and a handoff without it resets nothing.
+check("the reason hands over the flag that actually resets the session",
+      out and "--reset compact" in out["reason"], str(out))
+# A worktree-isolated session may be refused the command above by the platform, which deleting
+# this hook's own gate did nothing to change.
+check("the reason tells a worktree session how to reach a directory it can run from",
+      out and "ExitWorktree" in out["reason"], str(out))
 
 code, out, _ = run([user, assistant(OVER)], stop_hook_active=True)
 check("a stop already blocked once is not blocked again",
@@ -148,13 +153,13 @@ check("giving up does not claim the close-out failed",
       and "was NOT closed out" not in out.get("systemMessage", ""), str(out))
 
 ran_closeout = [user, assistant(OVER),
-                tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}), tool_result()]
+                tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}), tool_result()]
 code, out, _ = run(ran_closeout)
 check("a stop right after the close-out ran is allowed",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
+                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}),
                     tool_result(is_error=True)])
 check("a close-out that was refused does not count as having run",
       out and out.get("decision") == "block", str(out))
@@ -162,10 +167,25 @@ code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command": "git status"}), tool_result()])
 check("a permitted call that is not the launcher does not count as the close-out",
       out and out.get("decision") == "block", str(out))
+# Without --reset the launcher records a handoff and the session carries on with its context
+# untouched. Crediting that would let a session at the ceiling satisfy this check every turn
+# and never free a token - the failure the block exists to prevent, reached through the block.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}), tool_result()])
+check("a launcher call without --reset is not credited as the close-out",
+      out and out.get("decision") == "block", str(out))
+# The instruction hands out an absolute path, but an agent holding the skill may reach the
+# launcher by name. PATH resolution used to credit that; the basename is what credits it now.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": "finalize-session --reset compact 'bye'"}),
+                    tool_result()])
+check("a bare-name close-out is credited at the stop",
+      code == 0 and out and "decision" not in out
+      and "the close-out ran" in out.get("systemMessage", ""), str(out))
 # finalize-session's own contract allows backticks/$ outside the ceiling's single-quote-only
 # rule; a real, successful close-out invoked that way must still be credited at Stop.
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f'{LAUNCHER} "See `git rev-parse HEAD`"'}),
+                    tool_use("Bash", {"command": f'{LAUNCHER} --reset compact "See `git rev-parse HEAD`"'}),
                     tool_result()])
 check("a close-out statements() cannot parse is still credited if it ran",
       code == 0 and out and "decision" not in out
@@ -174,12 +194,12 @@ check("a close-out statements() cannot parse is still credited if it ran",
 # crediting this would hide that the dangerous internal path ran, not a real close-out.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command":
-                        f'{LAUNCHER} --detached-worker "$(true)" . /tmp/m /tmp/g f 1 /bin/sh id'}),
+                        f'{LAUNCHER} --reset compact --detached-worker "$(true)" . /tmp/m /tmp/g f 1 /bin/sh id'}),
                     tool_result()])
 check("an unparseable worker-mode call is not credited as the close-out",
       out and out.get("decision") == "block", str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}, call_id="a"),
+                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}, call_id="a"),
                     tool_result("a"),
                     tool_use("Bash", {"command": "git push"}, call_id="b"),
                     tool_result("b")])
@@ -189,7 +209,7 @@ check("a confirming git call after the close-out does not undo it",
 # The tmux transport compacts in place, so the transcript keeps growing past a close-out.
 # Crediting that one forever would wave through every later breach in the same file.
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}), tool_result(),
+                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}), tool_result(),
                     user, assistant(OVER)])
 check("a close-out from an earlier turn does not excuse a later breach",
       out and out.get("decision") == "block", str(out))
@@ -362,7 +382,7 @@ check("a trailing subagent record does not mask the session's count",
 code, out, _ = run([user, assistant(UNDER), assistant(900_000, sidechain=True)])
 check("a subagent's context does not count against the session", code == 0 and out is None, str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}, sidechain=True),
+                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}, sidechain=True),
                     tool_result()])
 check("a subagent running the launcher is not this session's close-out",
       out and out.get("decision") == "block", str(out))
@@ -412,6 +432,11 @@ done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_out
                       env=isolated)
 check("a payload with no event fails loudly",
       done.returncode == 1 and "hook_event_name" in done.stderr, str(done)[:200])
+# The count is only true at a stop, so being called anywhere else means hooks.json has drifted
+# from this file. Measuring anyway is how a session gets denied on a number that is not its own.
+code, out, err = run([user, assistant(OVER)], event="PreToolUse")
+check("an event that is not Stop stops the hook rather than measuring",
+      code == 1 and "PreToolUse" in err and "hooks.json" in err, f"{code} {err[:200]}")
 done = subprocess.run([sys.executable, HOOK], input='{"hook_event_name": "Stop"}', text=True,
                       capture_output=True, env=isolated)
 check("a payload with no transcript_path fails loudly",
