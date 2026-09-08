@@ -946,8 +946,16 @@ check("and it names the flag that would have reset it",
       "--reset" in done.stdout, done.stdout[:200])
 
 done = run(reset="clear")
-check("an explicit --reset resets, which is what the hook passes at the ceiling",
+check("an explicit --reset resets rather than recording only",
       "transport=" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
+check("and the mode it was handed is the mode the transport is told to use",
+      "reset=/clear" in done.stdout, done.stdout[:200])
+# The other mode, driven separately because the flag is now the only thing that can select it:
+# the message-text inference that used to choose `compact` is gone. `compact` is also the value
+# the ceiling hook's own instruction hands out, so an untested flag here is an untested hook.
+done = run(reset="compact")
+check("--reset compact, the mode the hook passes at the ceiling, reaches the transport",
+      "reset=/compact" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
 
 handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
 try:

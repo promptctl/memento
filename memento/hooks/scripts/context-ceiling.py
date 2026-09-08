@@ -13,7 +13,10 @@ never stops. It read the same number one tool call too early. A session that clo
 479,224 tokens read 479,224 again on its first call after the reset, had its opening Skill
 call denied, and died before doing any work. Measuring where the number is false cost more
 than the sessions the second event was there to catch, and every gate that hung off it -
-a shell-grammar parser, a git allowlist, a worktree escape hatch - went with it.
+a shell-grammar parser, a git allowlist, the allowance that let ExitWorktree through the
+refusal - went with it. The worktree guidance that allowance existed to serve did not: the
+refusal a worktree session actually meets is the platform's, which no change here reaches,
+so EXIT_HINT below carries it into the instruction this hook hands out at a stop.
 """
 
 import collections
