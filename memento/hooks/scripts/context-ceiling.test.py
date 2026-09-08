@@ -231,6 +231,20 @@ code, out, _ = run([user, assistant(OVER),
                     tool_result(content=SCHEDULED)])
 check("a command that echoes the launcher's line is not the launcher",
       out and out.get("decision") == "block", str(out))
+# Naming the launcher in the same breath does not rescue it. A real invocation cannot carry the
+# report it produces - the log path is made by mktemp while it runs - so the line's presence in
+# the command is what separates printing it from causing it.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command":
+                        f"echo 'Reminder to run finalize-session next time. {SCHEDULED}'"}),
+                    tool_result(content=f"Reminder to run finalize-session next time. {SCHEDULED}")])
+check("a reminder naming the launcher and quoting its line is not a close-out",
+      out and out.get("decision") == "block", str(out))
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": f"printf '%s\\n' '{SCHEDULED}' # {LAUNCHER}"}),
+                    tool_result(content=SCHEDULED)])
+check("printing the line from a command that names the launcher is not a close-out",
+      out and out.get("decision") == "block", str(out))
 # finalize-session's own contract allows backticks/$ in a message, which the deleted parser
 # choked on; a real, successful close-out written that way must still be credited.
 code, out, _ = run([user, assistant(OVER),

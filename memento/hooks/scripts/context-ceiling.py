@@ -210,6 +210,22 @@ def result_text(block):
     return " ".join(part.get("text", "") for part in content or []
                     if isinstance(part, dict))
 
+def launcher_ran(command):
+    """Whether a Bash command invokes the launcher rather than reproducing its report.
+
+    A launcher invocation cannot contain the launcher's report: the log path in that line comes
+    from `mktemp` while the command runs, after the command was written. So a command carrying
+    the rendered line is printing it - `echo`, `printf`, a heredoc - and a command naming the
+    launcher without it is calling it. That is the whole of what the deleted shell-grammar
+    parser was for, without the grammar, and so without its cost - it refused a legitimate
+    `git commit -F -` and stranded the session that wrote it. [LAW:polishing-by-subtraction]
+
+    The residue is a handoff message quoting a rendered line back verbatim, digits and absolute
+    log path intact, which is not credited. That costs one re-blocked stop and the agent runs
+    the close-out again, and this gate takes the harmless error where it has to choose.
+    """
+    return LAUNCHER_NAME in command and not RESET_MARKER.search(command)
+
 def closed_out(transcript_path):
     """Whether the close-out ran in the turn now ending, and actually reset the session.
 
@@ -220,15 +236,18 @@ def closed_out(transcript_path):
     `echo 'run finalize-session --reset compact'` credited a close-out that never ran, and then a
     rendered-line match that `echo 'handoff scheduled → tmux x:1 in 10s (log: /tmp/x)'` satisfied
     just as easily. So a close-out is three facts the transcript states outright: a result
-    matching RESET_MARKER, the `tool_use_id` binding that result to a Bash call, and a command on
-    that call naming the launcher. Loading the skill the instruction names has none of them,
-    reading the launcher's source has the middle one, and echoing the line has the outer two.
+    matching RESET_MARKER, the `tool_use_id` binding that result to a Bash call, and a command
+    that `launcher_ran` reads as an invocation rather than a reproduction. Loading the skill the
+    instruction names has none of them, reading the launcher's source has the second, and every
+    way of printing the line - with or without the launcher's name alongside it - fails the third
+    on the line's own presence in the command.
 
-    Each is still forgeable by a session that sets out to forge it, and nothing here pretends
-    otherwise. What they are together is unreachable by accident, which is the threat: a session
-    that ran out of turns, got confused, or read the contract instead of running it. One that
-    deliberately counterfeits its own close-out has defeated a gate that exists to help it, and
-    no string this hook can read would stop it.
+    What this cannot do is stop a session determined to counterfeit its own close-out: a script
+    file that prints the line is a command with neither the line nor a lie in it. Nothing read
+    out of a transcript the agent writes can close that, and pretending otherwise is what put
+    three weaker checks here before this one. What it does close is every forgery cheap enough
+    to happen without meaning it, which is the actual threat - a session that ran out of turns,
+    got confused, or read the contract instead of running it.
 
     Records are scanned newest-first, so a result arrives before the call it belongs to; that is
     what `reported` is for - it carries the ids of reporting results across to their `tool_use`.
@@ -251,7 +270,7 @@ def closed_out(transcript_path):
                 reported.add(block["tool_use_id"])
             elif (block.get("type") == "tool_use" and block.get("name") == "Bash"
                     and block.get("id") in reported
-                    and LAUNCHER_NAME in (block.get("input") or {}).get("command", "")):
+                    and launcher_ran((block.get("input") or {}).get("command", ""))):
                 return True
     return False
 
