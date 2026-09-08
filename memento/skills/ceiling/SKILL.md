@@ -42,11 +42,12 @@ rm -f "${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessi
 `ceiling` is the only key this hook accepts — it was `context_ceiling` before memento
 0.5.0. Writing a key it does not accept does not leave the old ceiling standing: it
 stops the hook with an error, which Claude Code treats as non-blocking, so the gate
-silently stops running for every session on this machine.
+silently stops running for this session — the file you wrote carries this session's
+own id, and this session is the one whose hook run dies on it.
 
 The `printf` exits 0 either way. So the failure mode of guessing wrong is not "my
-ceiling didn't move", it is "the ceiling is off everywhere and nothing said so", and
-step 2 is the only thing that tells those apart:
+ceiling didn't move", it is "this session has no ceiling any more and nothing said
+so", and step 2 is the only thing that tells those apart:
 
     WRONG: "Wrote ceiling = off to the session config. The ceiling is disabled."
     RIGHT: "ceiling=inf on the last hook call (02:14:07). Disabled and confirmed."

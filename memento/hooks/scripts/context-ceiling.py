@@ -52,15 +52,17 @@ LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "fi
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
 TAIL_CHUNK = 256 * 1024
-# Recognised by the launcher only as its first argument: the launcher re-entering itself to
-# do the delivery, which is not a close-out. Nothing spawns these through the Bash tool, but
-# crediting one would let a stop proceed with no handoff written at all.
-# What the launcher prints when it has scheduled a reset - the only thing that distinguishes a
-# close-out from a call that recorded a handoff and carried on. Printed by the tmux, iTerm2 and
-# detached branches and by nothing else, so it is the launcher saying so rather than this hook
-# guessing. Cross-checked against the launcher's source by the suite, because a rename there
-# would otherwise leave every close-out uncredited and every session stuck at the block.
-RESET_MARKER = "handoff scheduled"
+# The launcher's report of a scheduled reset, rendered - not the words `handoff scheduled`,
+# which are prose about the launcher and appear in the skill the instruction below says to load
+# and in the launcher's own source, so an agent that merely read about the close-out was
+# credited with running it. The digits and the absolute log path are the parts a run fills in:
+# the source carries `${HANDOFF_DELAY_SECONDS}s` and `$LOGFILE`, the prose carries `Ns` and
+# `<tempfile>`, and neither renders. This remains a claim about what the launcher emits rather
+# than proof that it ran - a command reproducing the line is credited - which is why the tool
+# binding in `closed_out` carries the other half. Cross-checked by the suite against a real
+# rendered line, the launcher's source and that prose, because a rename in the launcher would
+# otherwise leave every close-out uncredited and every session stuck at the block.
+RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
 # Deleting the PreToolUse gate removed this hook's own refusal, not the platform's: a
 # worktree-isolated session still cannot run a non-git command the platform cannot prove stays
 # inside the worktree. Without this line such a session gets an instruction it may be unable to
@@ -207,24 +209,34 @@ def closed_out(transcript_path):
     [FRAMING:representation] the command string is a map of what a call was meant to do; the
     result is the territory. Reading the map is what went wrong here twice - first a shell-grammar
     parser precise enough to refuse a legitimate `git commit -F -`, then a substring loose enough
-    that `echo 'run finalize-session --reset compact'` credited a close-out that never ran. Both
-    were guesses about a command. RESET_MARKER is not a guess: the launcher prints it, from the
-    three transport branches that schedule a reset and nowhere else, so a result carrying it is
-    the launcher's own report that it ran, in launcher mode, and reset the session. A call that
-    only records a handoff says `handoff recorded` instead, and is correctly not credited.
+    that `echo 'run finalize-session --reset compact'` credited a close-out that never ran. So a
+    close-out is now two facts the transcript states outright rather than one it implies: a result
+    matching RESET_MARKER, and the `tool_use_id` binding that result to a Bash call. Loading the
+    skill the instruction names satisfies neither, and reading the launcher's source satisfies
+    only the second - each was enough on its own under the plain substring. A call that records a
+    handoff without resetting says `handoff recorded` instead, and is correctly not credited.
+
+    Records are scanned newest-first, so a result arrives before the call it belongs to; that is
+    what `reported` is for - it carries the ids of reporting results across to their `tool_use`.
 
     Bounded at the turn, because crediting an older one would wave through every later breach in
     a transcript the tmux transport resets in place. An errored call is written into the
     transcript exactly like one that ran, so the error flag still decides before the text does.
     """
+    reported = set()
     for record in records_newest_first(transcript_path):
         if starts_a_turn(record):
             return False
         content = record.get("message", {}).get("content")
         for block in reversed(content if isinstance(content, list) else []):
-            if (isinstance(block, dict) and block.get("type") == "tool_result"
-                    and not block.get("is_error")
-                    and RESET_MARKER in result_text(block)):
+            if not isinstance(block, dict):
+                continue
+            if (block.get("type") == "tool_result" and not block.get("is_error")
+                    and block.get("tool_use_id")
+                    and RESET_MARKER.search(result_text(block))):
+                reported.add(block["tool_use_id"])
+            elif (block.get("type") == "tool_use" and block.get("name") == "Bash"
+                    and block.get("id") in reported):
                 return True
     return False
 

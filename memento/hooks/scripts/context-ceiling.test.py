@@ -31,6 +31,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "context-ceiling.py")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
+# The skill the block instruction tells the agent to load before running the close-out. It
+# describes the launcher's report, so its prose reads like that report without being one.
+CONTRACT = os.path.join(os.path.dirname(os.path.dirname(LAUNCHER)), "SKILL.md")
 # [LAW:one-source-of-truth] every case drives the threshold explicitly, so the shipped
 # default lives in the hook alone and retuning it cannot break these. A fixture magnitude,
 # not a second copy of that number.
@@ -205,6 +208,20 @@ code, out, _ = run([user, assistant(OVER),
                         f"{LAUNCHER} 'Next agent: run --reset compact once the audit is done'"}),
                     tool_result(content=RECORDED)])
 check("--reset quoted inside the handoff message is not a close-out",
+      out and out.get("decision") == "block", str(out))
+# The two ways a result lied, and both were reachable by following the block's own instruction:
+# it says to load the close-out contract, and an agent that then wants to know what the launcher
+# does reads its source. Each text says `handoff scheduled` about the launcher without being the
+# launcher, so the words alone credited a close-out that never ran.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Skill", {"skill": "memento:message-in-a-bottle"}),
+                    tool_result(content=open(CONTRACT).read())])
+check("loading the close-out contract is not running the close-out",
+      out and out.get("decision") == "block", str(out))
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": f"cat {LAUNCHER}"}),
+                    tool_result(content=open(LAUNCHER).read())])
+check("reading the launcher's source is not running the launcher",
       out and out.get("decision") == "block", str(out))
 # finalize-session's own contract allows backticks/$ in a message, which the deleted parser
 # choked on; a real, successful close-out written that way must still be credited.
@@ -484,19 +501,35 @@ finally:
     shutil.rmtree(os.path.dirname(spaced_root))
 
 check("the launcher the hook points at exists", os.access(LAUNCHER, os.X_OK), LAUNCHER)
-# [LAW:one-source-of-truth] RESET_MARKER is a fact about the launcher's output living in the
-# hook. Renamed there and nowhere else, every close-out would go uncredited and every session
-# would be stuck at a block it cannot satisfy, silently. So the two are compared here.
-marker = re.search(r'^RESET_MARKER = "(.*)"', open(HOOK).read(), re.M).group(1)
+# [LAW:one-source-of-truth] RESET_MARKER is a fact about the launcher's rendered output living
+# in the hook. The hook cannot be imported - it reads stdin at module level - so the pattern is
+# lifted from its source and run here against the real thing and against the texts that merely
+# describe it. Renamed in the launcher and nowhere else, every close-out would go uncredited and
+# every session would be stuck at a block it cannot satisfy, silently.
+marker = re.compile(re.search(r'^RESET_MARKER = re\.compile\(r"(.*)"\)$',
+                              open(HOOK).read(), re.M).group(1))
+check("the marker the hook credits is what a real close-out prints",
+      bool(marker.search(SCHEDULED)), f"{marker.pattern!r} vs {SCHEDULED!r}")
+# What the pattern keys on has to survive in the launcher, or it stops matching real output and
+# nothing here notices - the source never matched it and never will.
 scheduling = [line for line in open(LAUNCHER) if re.search(r'^\s*echo "handoff scheduled', line)]
-check("the marker the hook credits is what the launcher actually prints",
-      len(scheduling) == 3 and all(marker in line for line in scheduling),
-      f"{marker!r} vs {scheduling}")
+check("the launcher still prints the pieces the marker reads",
+      len(scheduling) == 3 and all("handoff scheduled →" in line
+                                   and " in ${HANDOFF_DELAY_SECONDS}s " in line
+                                   and "(log: $LOGFILE)" in line for line in scheduling),
+      str(scheduling))
+# The two texts that defeated the bare words. Both say `handoff scheduled`; neither renders the
+# delay or the log path, which is the whole reason the marker is a rendered line and not a phrase.
+check("the launcher's own source does not match the marker",
+      not any(marker.search(line) for line in scheduling), str(scheduling))
+prose = [line for line in open(CONTRACT) if "handoff scheduled" in line]
+check("the close-out contract's prose does not match the marker",
+      len(prose) >= 2 and not any(marker.search(line) for line in prose), str(prose))
 # The no-reset path must not carry it, or a recorded handoff would credit a reset that never
 # happened - the failure that made the launcher's report worth reading in the first place.
 recording = [line for line in open(LAUNCHER) if re.search(r'^\s*echo "handoff recorded', line)]
-check("the launcher's record-only report does not carry that marker",
-      len(recording) == 1 and marker not in recording[0], str(recording))
+check("the launcher's record-only report does not match the marker",
+      len(recording) == 1 and not marker.search(recording[0]), str(recording))
 registered = json.load(open(os.path.join(os.path.dirname(HERE), "hooks.json")))["hooks"]
 # The count is only true of the live context at a stop: a session reset in place keeps its
 # transcript, so on any earlier event the newest record can describe a context already gone.

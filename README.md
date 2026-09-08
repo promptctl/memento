@@ -8,7 +8,7 @@ was doing.
 `memento` gives you three skills you invoke by hand: work a PR review to clean, write a
 handoff for the next session, move this session's context ceiling. It also ships one
 hook, which takes the handoff skill and makes it mandatory — past a token ceiling, a
-session cannot end its turn, or call any other tool, until it has written the handoff.
+session cannot end its turn until it has written the handoff.
 
 ## Install
 
@@ -90,12 +90,10 @@ window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without sch
 anything.
 
 **`ceiling`** — moves the context ceiling for the session running right now: off, up by
-an amount, or pinned to a number. It writes the session layer described under *The
-context ceiling* below, which takes effect on the next tool call. Then it reads the
-hook's log to confirm the write took: a key the hook does not accept stops the gate
-without a word, and the log is the only place that shows it. Run it before the session
-breaches the ceiling, because past it the gate denies every Skill call except the
-close-out, `ceiling` included.
+an amount, or pinned to a number. It writes the session config layer described below, so
+the change takes effect the next time the ceiling is checked, which is when the turn
+ends. That timing is also why the skill's last step is a check: the log line proving the
+write took is written as the turn ends, so it is read on the turn after.
 
 ## The context ceiling
 
@@ -152,6 +150,12 @@ Because the value is signed it lands on top of what the project pinned rather th
 replacing it — a project at 250,000 resolves to 350,000 — and it takes effect on the very
 next hook invocation, with nothing to restart, reload or signal, including from a session
 that is already over the ceiling.
+
+The `ceiling` skill runs that command for you and then reads the log on the following
+turn to confirm the write took. The check earns its keep: the write succeeds whatever you
+put in the file, and a key the hook does not accept does not leave the old ceiling
+standing — it stops the hook, which Claude Code treats as non-blocking, so the gate
+quietly stops running for the session that wrote the file.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
