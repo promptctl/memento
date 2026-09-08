@@ -49,6 +49,10 @@ LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
 LOG_CAP = 2_000_000
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
+# Matched rather than the absolute path, because the instruction hands out that path but an
+# agent holding the skill may reach the launcher by name or through a wrapper. The basename is
+# a substring of the path, so naming it covers both.
+LAUNCHER_NAME = os.path.basename(LAUNCHER)
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
 TAIL_CHUNK = 256 * 1024
@@ -57,9 +61,9 @@ TAIL_CHUNK = 256 * 1024
 # and in the launcher's own source, so an agent that merely read about the close-out was
 # credited with running it. The digits and the absolute log path are the parts a run fills in:
 # the source carries `${HANDOFF_DELAY_SECONDS}s` and `$LOGFILE`, the prose carries `Ns` and
-# `<tempfile>`, and neither renders. This remains a claim about what the launcher emits rather
-# than proof that it ran - a command reproducing the line is credited - which is why the tool
-# binding in `closed_out` carries the other half. Cross-checked by the suite against a real
+# `<tempfile>`, and neither renders. This is still only what the launcher emits and not proof
+# that it ran, which is why `closed_out` asks for two more things. Cross-checked by the suite
+# against a real
 # rendered line, the launcher's source and that prose, because a rename in the launcher would
 # otherwise leave every close-out uncredited and every session stuck at the block.
 RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
@@ -206,15 +210,22 @@ def result_text(block):
 def closed_out(transcript_path):
     """Whether the close-out ran in the turn now ending, and actually reset the session.
 
-    [FRAMING:representation] the command string is a map of what a call was meant to do; the
-    result is the territory. Reading the map is what went wrong here twice - first a shell-grammar
-    parser precise enough to refuse a legitimate `git commit -F -`, then a substring loose enough
-    that `echo 'run finalize-session --reset compact'` credited a close-out that never ran. So a
-    close-out is now two facts the transcript states outright rather than one it implies: a result
-    matching RESET_MARKER, and the `tool_use_id` binding that result to a Bash call. Loading the
-    skill the instruction names satisfies neither, and reading the launcher's source satisfies
-    only the second - each was enough on its own under the plain substring. A call that records a
-    handoff without resetting says `handoff recorded` instead, and is correctly not credited.
+    [FRAMING:representation] a Bash call is the one place where the map and the territory have
+    the same author: the agent writes the command AND thereby chooses what comes back, so neither
+    string is evidence on its own. Three attempts here each trusted one of them - a shell-grammar
+    parser precise enough to refuse a legitimate `git commit -F -`, a substring loose enough that
+    `echo 'run finalize-session --reset compact'` credited a close-out that never ran, and then a
+    rendered-line match that `echo 'handoff scheduled → tmux x:1 in 10s (log: /tmp/x)'` satisfied
+    just as easily. So a close-out is three facts the transcript states outright: a result
+    matching RESET_MARKER, the `tool_use_id` binding that result to a Bash call, and a command on
+    that call naming the launcher. Loading the skill the instruction names has none of them,
+    reading the launcher's source has the middle one, and echoing the line has the outer two.
+
+    Each is still forgeable by a session that sets out to forge it, and nothing here pretends
+    otherwise. What they are together is unreachable by accident, which is the threat: a session
+    that ran out of turns, got confused, or read the contract instead of running it. One that
+    deliberately counterfeits its own close-out has defeated a gate that exists to help it, and
+    no string this hook can read would stop it.
 
     Records are scanned newest-first, so a result arrives before the call it belongs to; that is
     what `reported` is for - it carries the ids of reporting results across to their `tool_use`.
@@ -236,7 +247,8 @@ def closed_out(transcript_path):
                     and RESET_MARKER.search(result_text(block))):
                 reported.add(block["tool_use_id"])
             elif (block.get("type") == "tool_use" and block.get("name") == "Bash"
-                    and block.get("id") in reported):
+                    and block.get("id") in reported
+                    and LAUNCHER_NAME in (block.get("input") or {}).get("command", "")):
                 return True
     return False
 

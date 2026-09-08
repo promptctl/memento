@@ -8,7 +8,7 @@ was doing.
 `memento` gives you three skills you invoke by hand: work a PR review to clean, write a
 handoff for the next session, move this session's context ceiling. It also ships one
 hook, which takes the handoff skill and makes it mandatory — past a token ceiling, a
-session cannot end its turn until it has written the handoff.
+session cannot end its turn until it has closed out: written the handoff and reset.
 
 ## Install
 

@@ -223,6 +223,14 @@ code, out, _ = run([user, assistant(OVER),
                     tool_result(content=open(LAUNCHER).read())])
 check("reading the launcher's source is not running the launcher",
       out and out.get("decision") == "block", str(out))
+# Bash is the one tool whose output the agent writes, by choosing the command that prints it, so
+# a rendered line proves nothing on its own. Naming the launcher is what this call cannot do
+# without saying out loud what it is imitating.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": f"echo '{SCHEDULED}'"}),
+                    tool_result(content=SCHEDULED)])
+check("a command that echoes the launcher's line is not the launcher",
+      out and out.get("decision") == "block", str(out))
 # finalize-session's own contract allows backticks/$ in a message, which the deleted parser
 # choked on; a real, successful close-out written that way must still be credited.
 code, out, _ = run([user, assistant(OVER),
