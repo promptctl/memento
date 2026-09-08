@@ -271,6 +271,26 @@ check("the close-out's retired namespace is denied, not accepted as a second nam
 _, out, _ = run([user, assistant(OVER)], event="PreToolUse",
                 tool_name="Skill", tool_input={"skill": "laws:code"})
 check("another skill is denied", denied(out), str(out))
+
+# A worktree-isolated session cannot run the launcher where it stands - the platform refuses a
+# non-git command it cannot prove stays inside - so the step that reaches the close-out is not
+# new work. `remove` stays denied: it deletes the worktree and, with discard_changes, exactly
+# the uncommitted work the handoff is there to preserve.
+_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
+                tool_name="ExitWorktree", tool_input={"action": "keep"})
+check("leaving a worktree is permitted - it is the step that reaches the close-out",
+      out is None, str(out))
+_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
+                tool_name="ExitWorktree", tool_input={"action": "remove"})
+check("removing the worktree is denied - it destroys what the handoff preserves",
+      denied(out), str(out))
+_, out, _ = run([user, assistant(OVER)], event="PreToolUse",
+                tool_name="ExitWorktree", tool_input={})
+check("an exit with no action is denied, so the permitted thing is the pair not the tool",
+      denied(out), str(out))
+_, out, _ = bash("cat notes.md")
+check("the refusal names the exit, so a worktree session need not discover it",
+      "ExitWorktree" in str(out), str(out))
 _, out, _ = bash("")
 check("an empty command is denied with no case of its own", denied(out), str(out))
 
