@@ -4,3 +4,6 @@
 
 # Python bytecode from the address-pr-reviews provider modules and the hook scripts.
 __pycache__/
+
+# Claude Code worktrees are checkouts of this repo, not content of it.
+.claude/worktrees/
