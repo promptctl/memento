@@ -68,23 +68,26 @@ The contract for writing a fourth is in
 **`message-in-a-bottle`** — writes the message a future session wakes up with. You run
 it at the end of a unit of work (PR merged, ticket closed, task delivered) or when the
 context is running out. It calls
-`memento/skills/message-in-a-bottle/bin/finalize-session`, which schedules a delayed
-handoff into your own session: the session resets, and the message you wrote arrives as
-the next agent's opening prompt.
+`memento/skills/message-in-a-bottle/bin/finalize-session`, which records the handoff to
+disk and, with `--reset`, also schedules a delayed handoff into your own session: the
+session resets, and the message you wrote arrives as the next agent's opening prompt.
+Without the flag it prints the path it wrote and leaves the session running, so writing
+the message need not cost you your context.
 
 ```bash
 finalize-session [--goal '<condition>'] [--reset clear|compact] [message...]
 ```
 
-With no message it hands off `/next`. `--reset` decides whether the next session starts
-blank or with a compacted summary — honoured on the tmux transport only, since the
-other two transports launch a fresh process and are blank by construction. `--goal`
-re-issues an active `/goal` condition into the reset session, which otherwise dies
-silently at the handoff and stops an unattended run.
+With no message it hands off `/next`. `clear` starts the next session blank and `compact`
+starts it with a compacted summary — a distinction only the tmux transport can honour,
+since the other two launch a fresh process and are blank by construction.
+`--goal` re-issues an active `/goal` condition into the reset session, which otherwise
+dies silently at the handoff and stops an unattended run.
 
-The launcher picks its transport by capability: reset the tmux pane in place, else kill
-and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
-`FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling anything.
+When it does reset, the launcher picks its transport by capability: reset the tmux pane
+in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
+window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
+anything.
 
 **`ceiling`** — moves the context ceiling for the session running right now: off, up by
 an amount, or pinned to a number. It writes the session layer described under *The

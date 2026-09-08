@@ -950,11 +950,14 @@ check("an explicit --reset resets, which is what the hook passes at the ceiling"
       "transport=" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
 
 handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
-run(reset=None, handoff_dir=handoffs, message="carry this forward")
-written = [os.path.join(handoffs, n) for n in os.listdir(handoffs)]
-check("the handoff is on disk even when nothing was reset", len(written) == 1, str(written))
-check("and carries the message, so the record is the same either way",
-      written and "carry this forward" in open(written[0]).read(), str(written))
+try:
+    run(reset=None, handoff_dir=handoffs, message="carry this forward")
+    written = [os.path.join(handoffs, n) for n in os.listdir(handoffs)]
+    check("the handoff is on disk even when nothing was reset", len(written) == 1, str(written))
+    check("and carries the message, so the record is the same either way",
+          written and "carry this forward" in open(written[0]).read(), str(written))
+finally:
+    shutil.rmtree(handoffs, ignore_errors=True)
 
 shutil.rmtree(FIXTURES, ignore_errors=True)
 

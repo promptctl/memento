@@ -267,7 +267,7 @@ Empty aligned-pool (every examined candidate classified Misaligned, or no candid
 **Step 4 — Run finalize-session** (AlignedAndDefined and AlignedButFuzzy arms):
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session "$(cat <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session --reset compact "$(cat <<'EOF'
 Last session shipped PR #<num> — <one-line description of what merged>.
 <forward-looking notes the next agent should know: in-flight context,
 follow-ups this PR surfaced, things to watch out for>
@@ -282,7 +282,7 @@ EOF
 )"
 ```
 
-[LAW:single-enforcer] if a `/goal` is active in this session, carry it: pass `--goal '<the exact condition>'` as the leading argument, exactly as message-in-a-bottle's contract requires. An un-carried goal silently dies at the close-out — a multi-PR goal (e.g. "every open PR on this branch is merged") would stop at this first PR. Omit `--goal` entirely when no goal is set.
+[LAW:single-enforcer] if a `/goal` is active in this session, carry it: pass `--goal '<the exact condition>'` as the leading argument, ahead of `--reset compact` — both flags precede the message, exactly as message-in-a-bottle's contract requires. An un-carried goal silently dies at the close-out — a multi-PR goal (e.g. "every open PR on this branch is merged") would stop at this first PR. Omit `--goal` entirely when no goal is set.
 
 [LAW:dataflow-not-control-flow] the variability lives in the candidates' classified state, not in whether the agent decided to look or run. The instruction's content (direct vs define-task) and the halt-vs-run decision are both mechanical consequences of classification — the data picks the variant. Well-definedness in particular is a content discriminator, not a run/skip gate.
 

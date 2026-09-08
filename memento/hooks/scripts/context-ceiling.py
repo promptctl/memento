@@ -55,12 +55,12 @@ TAIL_CHUNK = 256 * 1024
 # Recognised by the launcher only as its first argument: the launcher re-entering itself to
 # do the delivery, which is not a close-out. Nothing spawns these through the Bash tool, but
 # crediting one would let a stop proceed with no handoff written at all.
-WORKER_MODES = frozenset(("--worker", "--iterm-worker", "--detached-worker"))
-# The flag that makes a close-out a close-out. Without it the launcher records the handoff and
-# the session carries on, so crediting a call that omits it would wave a stop through and leave
-# the context exactly as full as it was. [LAW:one-source-of-truth] the instruction hands this
-# flag out and `launched` demands it back; it is written once and interpolated into both.
-RESET_FLAG = "--reset"
+# What the launcher prints when it has scheduled a reset - the only thing that distinguishes a
+# close-out from a call that recorded a handoff and carried on. Printed by the tmux, iTerm2 and
+# detached branches and by nothing else, so it is the launcher saying so rather than this hook
+# guessing. Cross-checked against the launcher's source by the suite, because a rename there
+# would otherwise leave every close-out uncredited and every session stuck at the block.
+RESET_MARKER = "handoff scheduled"
 # Deleting the PreToolUse gate removed this hook's own refusal, not the platform's: a
 # worktree-isolated session still cannot run a non-git command the platform cannot prove stays
 # inside the worktree. Without this line such a session gets an instruction it may be unable to
@@ -192,43 +192,39 @@ def starts_a_turn(record):
     return record.get("type") == "user" and not any(
         isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks)
 
-def launched(tool_name, tool_input):
-    """Whether this call ran the close-out - the launcher, named either way an agent reaches it,
-    carrying the flag that actually resets the session.
-
-    Substrings, not a parse. Nothing is permitted on the strength of this answer; it only decides
-    whether a stop already under way is blocked once, and the parser that used to answer it more
-    precisely refused a legitimate `git commit -F -` and cost more than it caught.
-
-    The basename covers the absolute path too, being a substring of it, and covers the bare-name
-    invocation the old PATH resolution used to credit - a session that closes out by name and is
-    not credited stays blocked with no way out, which is the worse of the two errors.
-
-    RESET_FLAG is what separates a close-out from a call that only records a handoff and carries
-    on. Crediting the latter would let a session at the ceiling satisfy this check every turn and
-    never free a token: the failure the block exists to prevent, reached through the block."""
-    command = tool_input.get("command") or ""
-    return (tool_name == "Bash" and os.path.basename(LAUNCHER) in command
-            and RESET_FLAG in command
-            and not any(mode in command for mode in WORKER_MODES))
+def result_text(block):
+    """A tool result's text. The content is a plain string or a list of blocks depending on how
+    the tool returned, and a close-out is credited off what it says, so both shapes are read."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    return " ".join(part.get("text", "") for part in content or []
+                    if isinstance(part, dict))
 
 def closed_out(transcript_path):
-    """Whether the launcher ran successfully in the turn now ending - bounded at the turn,
-    because crediting an older one would wave through every later breach in a transcript the
-    tmux transport resets in place. [FRAMING:representation] a call that errored is written
-    into the transcript exactly like one that ran, so only the result says it happened."""
-    errored = set()
+    """Whether the close-out ran in the turn now ending, and actually reset the session.
+
+    [FRAMING:representation] the command string is a map of what a call was meant to do; the
+    result is the territory. Reading the map is what went wrong here twice - first a shell-grammar
+    parser precise enough to refuse a legitimate `git commit -F -`, then a substring loose enough
+    that `echo 'run finalize-session --reset compact'` credited a close-out that never ran. Both
+    were guesses about a command. RESET_MARKER is not a guess: the launcher prints it, from the
+    three transport branches that schedule a reset and nowhere else, so a result carrying it is
+    the launcher's own report that it ran, in launcher mode, and reset the session. A call that
+    only records a handoff says `handoff recorded` instead, and is correctly not credited.
+
+    Bounded at the turn, because crediting an older one would wave through every later breach in
+    a transcript the tmux transport resets in place. An errored call is written into the
+    transcript exactly like one that ran, so the error flag still decides before the text does.
+    """
     for record in records_newest_first(transcript_path):
         if starts_a_turn(record):
             return False
         content = record.get("message", {}).get("content")
         for block in reversed(content if isinstance(content, list) else []):
-            if not isinstance(block, dict):
-                continue
-            if block.get("is_error"):
-                errored.add(block.get("tool_use_id"))
-            if (block.get("type") == "tool_use" and block.get("id") not in errored
-                    and launched(block.get("name"), block.get("input") or {})):
+            if (isinstance(block, dict) and block.get("type") == "tool_result"
+                    and not block.get("is_error")
+                    and RESET_MARKER in result_text(block)):
                 return True
     return False
 
@@ -239,7 +235,7 @@ def log(hook, tokens, ceiling, verdict):
     it is folded from layers, so the line has to say which number won."""
     line = (f"{datetime.now().isoformat(timespec='seconds')} "
             f"session={str(hook.get('session_id'))[:8]} event={hook.get('hook_event_name')} "
-            f"tokens={tokens} ceiling={ceiling} tool={hook.get('tool_name', '-')} "
+            f"tokens={tokens} ceiling={ceiling} "
             f"-> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
