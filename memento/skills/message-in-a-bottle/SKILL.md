@@ -1,6 +1,6 @@
 ---
 name: message-in-a-bottle
-description: Writes a message to a future session's agent.  Send them your fondest memories of what you worked on, what went well, what didn't go well, and any useful tips they might need. You always run this when you finish a unit of work (closed a PR, completed the handed task, etc) or approach the context ceiling.  ALWAYS.
+description: Writes a message to a future session's agent.  Send them your fondest memories of what you worked on, what went well, what didn't go well, and any useful tips they might need. You always run this when you finish a unit of work (closed a PR, completed the handed task, etc).  ALWAYS.
 ---
 
 # finalize-session
@@ -9,15 +9,13 @@ The last operation of a finishing turn: prepares instructions for a future agent
 
 ## This is mandatory — you run it, you do not decide it
 
-When you reach a finalization point — you closed a PR, finished the task you were handed, or came within reach of the context ceiling — running `finalize-session` is the close-out. It is **not** a choice you weigh, a thing you ask the user about, or a step you defer "until later." The ceiling itself is memento's Stop hook, which names the live count and the limit when it fires; do not wait to be forced.
-
-[LAW:dataflow-not-control-flow] running this is unconditional at a finalization point — the same path every time. The only variability is a *value*: the handoff message you pass. 
+When you reach a finalization point — you closed a PR, or finished the task you were handed — running `finalize-session` is the close-out. It is **not** a choice you weigh, a thing you ask the user about, or a step you defer "until later." [LAW:dataflow-not-control-flow] running this is unconditional at a finalization point — the same path every time. The only variability is a *value*: the handoff message you pass.
 
 **The user being present is irrelevant.** Presence is not a gate, a tiebreaker, or a reason to skip — you finalize on the *work's* state, never on whether a human is watching. "The user is here, so I'll skip it" and "I'll ask if they want me to" are both WRONG: this step requires no user action and asks for none.
 
 ### The only gate, and the rationalizations that are never one
 
-There is exactly **one** legitimate input: **is the handed unit of work complete?** Unit complete (PR merged, ticket closed, task delivered) *or* context approaching the ceiling → you run it, now, with no further deliberation. Unit **not** complete → you are not "deciding not to finalize," you are *still doing the work*: finish the unit, then finalize. There is no third state, and "skip finalize because X" is never one of them.
+There is exactly **one** legitimate input: **is the handed unit of work complete?** Unit complete (PR merged, ticket closed, task delivered) → you run it, now, with no further deliberation. Unit **not** complete → you are not "deciding not to finalize," you are *still doing the work*: finish the unit, then finalize. There is no third state, and "skip finalize because X" is never one of them. **The token count is not an input, because it is not yours to know** — the live count and the resolved limit belong to memento's Stop hook, which states both in the instruction it hands you once the session is genuinely over the line; you act on that message when it arrives and never estimate your own position. The thought to catch is *"I'm probably getting close, I should finalize now rather than wait to be forced"* — that is a guess at a number you cannot see, and acting on it throws a live session's context away mid-work for nothing. Finish the unit; let the hook do its own talking.
 
 ## You can provide a 'hint' for the next stage, if valuable: /compact
 
