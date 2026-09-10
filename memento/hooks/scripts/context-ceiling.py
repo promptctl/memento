@@ -157,10 +157,20 @@ def session_directory(session_id):
     return directory
 
 def folded(layers):
-    """Every written layer's move applied to the ceiling beneath it, in order."""
+    """Every written layer's move applied to the ceiling beneath it, in order.
+
+    [LAW:single-enforcer] a resolved ceiling is checked for sense here, where every fold passes,
+    rather than at one of them. The shared fold is the one that gets written down, and a negative
+    reaching the record is unrecoverable: `-50000` is written, read back as an *adjustment*, and
+    resolves to 200,000 - a positive ceiling nobody set, in place of the loud exit. The format
+    cannot express a negative absolute and is never asked to, because no layer may resolve to
+    one."""
     ceiling = DEFAULT_CEILING
     for setting in layers:
         ceiling = parse_ceiling(setting)(ceiling)
+    if ceiling < 0:
+        sys.exit(f"memento config: {', then '.join(one.source for one in layers)} resolve to "
+                 f"a ceiling of {ceiling:,} tokens, and a count of tokens is never negative.")
     return ceiling
 
 def live_shared(anchor):
@@ -220,12 +230,7 @@ def resolve_ceiling(hook):
     directory = session_directory(hook["session_id"])
     layers = (shared_at_start(directory / SHARED_AT_START, anchor),
               ceiling_in(directory / CONFIG_NAME))
-    written = [one for one in layers if one]
-    ceiling = folded(written)
-    if ceiling < 0:
-        sys.exit(f"memento config: {', then '.join(one.source for one in written)} resolve to "
-                 f"a ceiling of {ceiling:,} tokens, and a count of tokens is never negative.")
-    return ceiling
+    return folded([one for one in layers if one])
 
 def records_newest_first(transcript_path):
     """This session's records, reading only as far back as the caller consumes. Sidechains are

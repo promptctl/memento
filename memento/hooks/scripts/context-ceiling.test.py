@@ -467,6 +467,16 @@ code, out, err = run([user, assistant(OVER)],
                      user_conf="ceiling = 300000\nceiling = 400000\n")
 check("one key set twice in one file fails loudly",
       code == 1 and "twice" in err and "line 2" in err, f"{code} {err}")
+# The shared fold is the one that gets written down, so it is the one that must not be allowed to
+# resolve negative: `-50000` recorded is `-50000` read back as an *adjustment*, which resolves to
+# a positive 200,000 nobody set and never trips the check below. Caught in review; the exit had
+# stopped firing for this input entirely, on the recording stop as well as every later one.
+code, out, err = run([user, assistant(OVER)], user_conf="ceiling = -300000\n")
+check("a shared fold that resolves below zero fails loudly rather than being recorded",
+      code == 1 and "never negative" in err and "-50,000" in err, f"{code} {err}")
+check("and it names the shared file that caused it, not the record derived from it",
+      code == 1 and CONFIG_NAME in err and SHARED_AT_START not in err, f"{code} {err}")
+
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 10000\n",
                      session_conf="ceiling = -50000\n")
 # Both layers by name, not by a count of filenames: the shared side of the fold now reaches the

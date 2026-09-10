@@ -143,9 +143,13 @@ at its first stop, and what they resolve to together is written down as
 `~/.config/promptctl/sessions/<session-id>/shared-at-start.conf`, an ordinary config file
 in the same format holding an absolute number or `off`: `ceiling = 350000`. From then on
 that record is the shared contribution for that session, and neither shared file is read
-again for it. Editing one, deleting it, or leaving a syntax error in it does not move a
-running session's ceiling and cannot gate it; a session that starts afterwards reads the
-changed files and gets the new number.
+again for it. Nothing removes that record. A session that stops even once leaves one
+small file under `~/.config/promptctl/sessions/`, and it stays there after the session is
+gone. Editing a shared file, deleting it, or leaving a syntax error in it does not move a
+running session's ceiling and cannot gate it. A session that starts afterwards reads the
+shared files as they stand: an edit or a deletion gives it the new number, and a syntax
+error stops the hook for that session with an error, the same loud failure a malformed
+config has always produced.
 
 That split is here because of one afternoon. A shared file held `350000` from 05:18 on
 2026-09-06 until an agent working in an unrelated project removed the line at 14:55, and
@@ -155,6 +159,15 @@ to fully gated between two consecutive tool calls, could not reach the remedy fr
 the gate, and never wrote a handoff. The record is made at the first stop rather than at
 the first token because `Stop` is the only event this hook is given — one turn of drift,
 spent where a session is still far below any ceiling.
+
+The record is keyed on the session id and is never rewritten, so a session that closes
+out and carries on keeps the ceiling it started under.
+`finalize-session --reset clear|compact` sends `/clear` or `/compact` as keystrokes into
+the same running process: the process survives and the session id with it, so the context
+after the reset is a new context under an old record. A later change to a shared file
+never reaches it, however much it looks from the pane like a session that started
+afterwards. Its own layer still applies immediately, so a session in that position can
+still give itself room.
 
 The session's own layer is read live at every stop and applies immediately in both
 directions, raising and lowering alike. A session can create that layer for itself. The
