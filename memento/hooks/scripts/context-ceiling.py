@@ -40,6 +40,12 @@ CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "prompt
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
 PROJECT_CONFIG_DIR = ".promptctl"
+# What the shared layers resolved to when a session started, in the same `key = value` shape
+# every other layer uses, so one parser reads them all. Memento writes this file and the agent
+# writes CONFIG_NAME beside it: one writer each, which is what keeps two files in one directory
+# from being two clocks. [LAW:one-source-of-truth] The name says what it holds rather than what
+# it sets, because a file called `shared.conf` invites the hand-edit that would defeat it.
+SHARED_AT_START = "shared-at-start.conf"
 CEILING_KEY = "ceiling"
 DISABLING_WORD = "off"
 # [0-9] rather than \d: `str.isdigit` was true of characters `int` then refused, so the guard
@@ -133,34 +139,89 @@ def parse_ceiling(written):
     moved = magnitude if shape.group("sign") == "+" else -magnitude
     return lambda beneath: beneath + moved
 
-def session_config(session_id):
-    """The session layer's path, for a session id that names one directory and nothing else.
+def session_directory(session_id):
+    """The directory holding one session's files, for a session id that names one directory and
+    nothing else.
 
     [LAW:parse-dont-validate] an id that is not a bare name reads a config from outside the tree
     - `Path.__truediv__` discards the left operand when the right is absolute, and follows `..`
     when it is not. Containment is asked of the resolved directory rather than of the spelling,
     because `..`, `./..` and `..//` all name the same place and such spellings do not form a
-    list."""
+    list. [LAW:single-enforcer] both of the session's files hang off this one result, so an id
+    becomes a path exactly once however many files a session grows."""
     directory = (SESSION_CONFIGS / str(session_id)).resolve()
     if directory.parent != SESSION_CONFIGS.resolve():
         sys.exit(f"memento config: session id {session_id!r} names {directory}, which is not "
                  f"a session directory under {SESSION_CONFIGS}. Memento cannot tell which "
                  f"session's settings it was meant to read.")
-    return directory / CONFIG_NAME
+    return directory
+
+def folded(layers):
+    """Every written layer's move applied to the ceiling beneath it, in order."""
+    ceiling = DEFAULT_CEILING
+    for setting in layers:
+        ceiling = parse_ceiling(setting)(ceiling)
+    return ceiling
+
+def live_shared(anchor):
+    """The user and project layers folded as they stand right now. Reached only when a session
+    has no record of its own yet, which is what keeps a shared file edited mid-run - or broken
+    into one `ceiling_in` exits on - away from every session already running."""
+    return folded([one for one in (ceiling_in(USER_CONFIG), project_ceiling(anchor)) if one])
+
+def record_shared(path, ceiling):
+    """Write the shared ceiling a session started under, and hand back what that file now says.
+
+    [LAW:effects-at-boundaries] the hook's one write, and the one place the fold above becomes a
+    file. Written whole and moved into place, because a create-then-write leaves the record empty
+    for the width of one flush: a session killed inside that window comes back to a file that
+    exists and parses to nothing, which no later stop can complete and every later stop dies on
+    - the gate off for that session, permanently, with nothing in the log to say so. After
+    `os.replace` the record is absent or complete, and never the third thing.
+    [LAW:types-are-the-program] Nothing here overwrites a real record: the caller reaches this
+    only for a path `ceiling_in` read nothing from.
+
+    Read back rather than handed back, so the stop that writes the record and every stop that
+    later reads it quote one file rather than two spellings of it - and so a value this wrote
+    that `ceiling_in` would refuse fails on the stop that wrote it, not on the next one.
+    [LAW:one-source-of-truth]"""
+    text = DISABLING_WORD if ceiling == math.inf else str(ceiling)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f"{path.name}.{os.getpid()}")
+    partial.write_text(f"{CEILING_KEY} = {text}\n")
+    os.replace(partial, path)
+    return ceiling_in(path)
+
+def shared_at_start(path, anchor):
+    """What the user and project layers resolved to when this session started.
+
+    The ceiling a session runs under is a fact about that session, so it is held as state the
+    session owns rather than re-derived at every stop from files a stranger edits mid-run.
+    [LAW:no-ambient-temporal-coupling] the alternative - rank each layer's mtime against the
+    session's start - cannot see the change that caused this ticket: on 2026-09-06 a shared line
+    was *deleted*, and a file that no longer exists has no mtime to rank. Freezing the resolved
+    value takes an edit, a deletion, a whole new layer and a file rewritten into a syntax error
+    as one case, with no direction test and no raise-or-lower asymmetry, because once this file
+    exists the shared ones are never opened again.
+
+    The record is made at the session's first stop rather than at its first token, because a
+    stop is the only event this hook is given. That is one turn of drift, spent where a session
+    is still far below any ceiling."""
+    return ceiling_in(path) or record_shared(path, live_shared(anchor))
 
 def resolve_ceiling(hook):
-    """The ceiling in force, folded from the least specific layer to the most.
+    """The ceiling in force: the shared layers as they stood when this session started, moved by
+    the session's own layer as it stands right now.
 
     [LAW:single-enforcer] the one place the order between the layers is decided. The project is
     anchored at the directory the session belongs to rather than wherever a Bash call last left
     it - a ceiling that moved because something ran `cd` would be a ceiling nobody set."""
     anchor = os.environ.get("CLAUDE_PROJECT_DIR") or hook["cwd"]
-    layers = (ceiling_in(USER_CONFIG), project_ceiling(anchor),
-              ceiling_in(session_config(hook["session_id"])))
+    directory = session_directory(hook["session_id"])
+    layers = (shared_at_start(directory / SHARED_AT_START, anchor),
+              ceiling_in(directory / CONFIG_NAME))
     written = [one for one in layers if one]
-    ceiling = DEFAULT_CEILING
-    for setting in written:
-        ceiling = parse_ceiling(setting)(ceiling)
+    ceiling = folded(written)
     if ceiling < 0:
         sys.exit(f"memento config: {', then '.join(one.source for one in written)} resolve to "
                  f"a ceiling of {ceiling:,} tokens, and a count of tokens is never negative.")
