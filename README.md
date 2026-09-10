@@ -2,13 +2,13 @@
 
 A Claude Code marketplace with one plugin in it. It is about one problem: an agent
 session has a beginning, a middle, and an end, and the ends are where work gets lost —
-a ticket picked up with no context, a PR review half-addressed, a session that hits the
-context limit and forgets what it was doing.
+a PR review half-addressed, a session that hits the context limit and forgets what it
+was doing.
 
-`memento` gives you three skills you invoke by hand: pull the next ticket, work a PR
-review to clean, write a handoff for the next session. It also ships one hook, which
-takes that last skill and makes it mandatory — past a token ceiling, a session cannot
-end its turn, or call any other tool, until it has written the handoff.
+`memento` gives you three skills you invoke by hand: work a PR review to clean, write a
+handoff for the next session, move this session's context ceiling. It also ships one
+hook, which takes the handoff skill and makes it mandatory — past a token ceiling, a
+session cannot end its turn, or call any other tool, until it has written the handoff.
 
 ## Install
 
@@ -44,12 +44,6 @@ Nothing is lost in the move. The ceiling and the close-out both live in `memento
 and the close-out has exactly one name: `memento:message-in-a-bottle`.
 
 ## Skills
-
-**`next`** — a pointer, not an implementation. The procedure for pulling a ticket ships
-with the `lit` binary: `lit init` (or `lit quickstart --refresh`) writes the current copy
-to the repository's own `.claude/skills/next/SKILL.md`, and from then on that is the one
-to use. It needs a lit newer than 0.11.0. The skill here exists to say so, and to stop an
-agent reconstructing the procedure from memory into a second copy that drifts.
 
 **`address-pr-reviews`** — works a PR's review feedback to clean. Each round: fetch
 every open finding, post a plan on each thread, implement, push (which re-runs the
@@ -191,7 +185,6 @@ memento/.claude-plugin/plugin.json
 memento/CHANGELOG.md
 memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
-memento/skills/next/
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
 ```

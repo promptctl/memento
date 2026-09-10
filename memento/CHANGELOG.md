@@ -2,6 +2,7 @@ Each version's section is written in the PR that bumps `.claude-plugin/plugin.js
 
 ## Unreleased
 
+- feat(next)!: the `next` skill is gone. It was only a pointer to the `/next` skill that `lit init` writes into a repository (lit newer than 0.11.0), and that project skill is the one to invoke. A repository lit has not initialized now has no `/next` at all, so there the `/next` handoff that `finalize-session` sends when given no message names a skill that does not exist.
 - fix(message-in-a-bottle): the close-out has one trigger the agent judges for itself - the handed unit of work is complete. It also told the agent to fire when it "came within reach of the context ceiling", and not to "wait to be forced", which asked it to estimate a number only the hook can see: the hook resolves the ceiling from the config layers and reads the live count from the transcript, and the agent has neither. Sessions were throwing their context away mid-work at a third of the ceiling on the strength of that guess. The token trigger belongs to the hook, which states both numbers in the instruction it hands over once a session is genuinely past the line.
 
 - feat!: the `MEMENTO_CONTEXT_CEILING` environment variable is gone. Three layers set the ceiling, and every one of them is a file: user, project, session. A ceiling in force is now always something written down at a path you can open, rather than something a process was started with and nothing on disk records. A session that wants its own number writes the session layer, which is what that layer is for.
