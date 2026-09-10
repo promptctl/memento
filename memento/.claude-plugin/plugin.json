@@ -1,7 +1,7 @@
 {
   "name": "memento",
   "version": "0.5.1",
-  "description": "Agent-native workflow tooling: pull the next lit ticket (next), the address-PR-review loop (address-pr-reviews), the cross-session handoff that carries a goal across a reset (message-in-a-bottle), and the context-ceiling hook that refuses to let a session end without writing one.",
+  "description": "Agent-native workflow tooling: the address-PR-review loop (address-pr-reviews), the cross-session handoff that carries a goal across a reset (message-in-a-bottle), and the context-ceiling hook that refuses to let a session end without writing one.",
   "author": {
     "name": "Brandon Fryslie"
   },
