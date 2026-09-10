@@ -86,6 +86,14 @@ The launcher picks its transport by capability: reset the tmux pane in place, el
 and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
 `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling anything.
 
+**`ceiling`** — moves the context ceiling for the session running right now: off, up by
+an amount, or pinned to a number. It writes the session layer described under *The
+context ceiling* below, which takes effect on the next tool call. Then it reads the
+hook's log to confirm the write took: a key the hook does not accept stops the gate
+without a word, and the log is the only place that shows it. Run it before the session
+breaches the ceiling, because past it the gate denies every Skill call except the
+close-out, `ceiling` included.
+
 ## The context ceiling
 
 What makes the close-out fire without being asked is
@@ -187,6 +195,7 @@ memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
+memento/skills/ceiling/
 ```
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
