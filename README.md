@@ -8,7 +8,7 @@ was doing.
 `memento` gives you three skills you invoke by hand: work a PR review to clean, write a
 handoff for the next session, move this session's context ceiling. It also ships one
 hook, which takes the handoff skill and makes it mandatory — past a token ceiling, a
-session cannot end its turn, or call any other tool, until it has written the handoff.
+session cannot end its turn until it has closed out: written the handoff and reset.
 
 ## Install
 
@@ -68,41 +68,49 @@ The contract for writing a fourth is in
 **`message-in-a-bottle`** — writes the message a future session wakes up with. You run
 it at the end of a unit of work (PR merged, ticket closed, task delivered) or when the
 context is running out. It calls
-`memento/skills/message-in-a-bottle/bin/finalize-session`, which schedules a delayed
-handoff into your own session: the session resets, and the message you wrote arrives as
-the next agent's opening prompt.
+`memento/skills/message-in-a-bottle/bin/finalize-session`, which records the handoff to
+disk and, with `--reset`, also schedules a delayed handoff into your own session: the
+session resets, and the message you wrote arrives as the next agent's opening prompt.
+Without the flag it prints the path it wrote and leaves the session running, so writing
+the message need not cost you your context.
 
 ```bash
 finalize-session [--goal '<condition>'] [--reset clear|compact] [message...]
 ```
 
-With no message it hands off `/next`. `--reset` decides whether the next session starts
-blank or with a compacted summary — honoured on the tmux transport only, since the
-other two transports launch a fresh process and are blank by construction. `--goal`
-re-issues an active `/goal` condition into the reset session, which otherwise dies
-silently at the handoff and stops an unattended run.
+With no message it hands off `/next`. `clear` starts the next session blank and `compact`
+starts it with a compacted summary — a distinction only the tmux transport can honour,
+since the other two launch a fresh process and are blank by construction.
+`--goal` re-issues an active `/goal` condition into the reset session, which otherwise
+dies silently at the handoff and stops an unattended run.
 
-The launcher picks its transport by capability: reset the tmux pane in place, else kill
-and relaunch the iTerm2 session, else spawn a fresh detached tmux window. Prefix
-`FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling anything.
+When it does reset, the launcher picks its transport by capability: reset the tmux pane
+in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
+window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
+anything.
 
 **`ceiling`** — moves the context ceiling for the session running right now: off, up by
-an amount, or pinned to a number. It writes the session layer described under *The
-context ceiling* below, which takes effect on the next tool call. Then it reads the
-hook's log to confirm the write took: a key the hook does not accept stops the gate
-without a word, and the log is the only place that shows it. Run it before the session
-breaches the ceiling, because past it the gate denies every Skill call except the
-close-out, `ceiling` included.
+an amount, or pinned to a number. It writes the session config layer described below, so
+the change takes effect the next time the ceiling is checked, which is when the turn
+ends. That timing is also why the skill's last step is a check: the log line proving the
+write took is written as the turn ends, so it is read on the turn after.
 
 ## The context ceiling
 
 What makes the close-out fire without being asked is
-`memento/hooks/scripts/context-ceiling.py`, registered on both `Stop` and `PreToolUse`.
+`memento/hooks/scripts/context-ceiling.py`, registered on `Stop`.
 
-On either event the hook reads the transcript for the most recent assistant message's
-token usage (all four fields — input, output, cache creation, cache read — because that
-is what the next request carries) and compares it to the ceiling. Under the ceiling, the
-hook says nothing.
+At a stop the hook reads the transcript for the most recent assistant message's token
+usage (all four fields — input, output, cache creation, cache read — because that is what
+the next request carries) and compares it to the ceiling. Under the ceiling, the hook says
+nothing.
+
+`Stop` is the one event where that count is true. It describes the live context only at
+the moment a turn ends: a session reset in place keeps its session id and its transcript
+file, so mid-turn the newest record can still belong to a context that was already thrown
+away. A payload for any other event stops the hook with an error naming the event rather
+than measuring anyway. The cost of running on one event is that a session working through
+a very long tool loop is not caught until that turn ends.
 
 The ceiling is 250,000 tokens by default, and three layers can move it. From the least
 specific to the most: `~/.config/promptctl/memento.conf`, then the nearest
@@ -140,10 +148,14 @@ mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
 
 Because the value is signed it lands on top of what the project pinned rather than
 replacing it — a project at 250,000 resolves to 350,000 — and it takes effect on the very
-next hook invocation, with nothing to restart, reload or signal. A session raises its
-ceiling before it breaches it, not after: past the ceiling the `PreToolUse` gate denies
-that command along with every other Bash call that is not `git` or the close-out
-launcher.
+next hook invocation, with nothing to restart, reload or signal, including from a session
+that is already over the ceiling.
+
+The `ceiling` skill runs that command for you and then reads the log on the following
+turn to confirm the write took. The check earns its keep: the write succeeds whatever you
+put in the file, and a key the hook does not accept does not leave the old ceiling
+standing — it stops the hook, which Claude Code treats as non-blocking, so the gate
+quietly stops running for the session that wrote the file.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
@@ -155,33 +167,16 @@ is worse than no ceiling. Every decision the hook makes is appended to
 `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
 you can tell an allow apart from a hook that never ran.
 
-Over the ceiling on `Stop`, the hook returns `{"decision": "block"}`. Claude Code refuses
-the stop and hands the hook's `reason` back to the agent as its next instruction: commit
-or push everything outstanding first, then run the `finalize-session` launcher with a
-handoff message.
+Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
+and hands the hook's `reason` back to the agent as its next instruction: commit or push
+everything outstanding first, then run the `finalize-session` launcher with a handoff
+message and `--reset compact`. The launcher always writes the handoff to disk; the flag is
+what makes recording it also reset the session.
 
 It forces this **once per session**. If the session stops again, the hook sees
 `stop_hook_active` and lets the stop proceed, printing a visible system message saying
 the one forced attempt was spent. A second block would spend more context on the problem
 that *is* too much context.
-
-`Stop` alone is not enough, because it only has teeth in a session that stops — and an
-autonomous session never stops, which is exactly the session the ceiling exists to
-catch. So `PreToolUse` enforces the same ceiling inside the tool loop, where it cannot
-be avoided. Above the ceiling it is default-deny: the tool call is not run, and the
-agent gets the close-out instruction back as the denial reason. Only three things
-are permitted through:
-
-- the `memento:message-in-a-bottle` skill, which is the close-out itself;
-- a Bash call to the `finalize-session` launcher, matched by resolved path rather than by
-  name, so something else wearing that name is still not the close-out;
-- `git status`, `diff`, `log`, `show`, `rev-parse`, `add`, `commit`, and `push`, which is
-  enough to see the tree and get outstanding work committed before the handoff.
-
-A Bash command the hook cannot parse is denied too; if it was reaching for the launcher,
-the denial says so and explains how to requote it. Denial withholds tools and never the
-exit, so it cannot wedge a session — which is why `PreToolUse` needs no spent-attempt
-valve and keeps no state.
 
 ## Repo layout
 
