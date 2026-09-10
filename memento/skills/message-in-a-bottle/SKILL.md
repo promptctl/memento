@@ -51,7 +51,7 @@ ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<
 
 - `--goal '<condition>'` — optional, and only when a `/goal` is active this session. Re-establishes that goal in the reset session so the run continues. Leading argument; quote the condition. **Omit entirely when no goal is set.**
 - `--reset clear|compact` — optional; states the next session's starting context outright instead of leaving it to be inferred from the message. Leading argument, in any order with `--goal`. `clear` = blank slate, `compact` = carry a summary forward. **Pass it whenever the choice is load-bearing** rather than a preference; omit it to let the message text decide (see above). An unrecognised value is refused with exit 2. **Honoured on the tmux transport only** — read the transport paragraph below before relying on `compact`.
-- `[message...]` — a slash command, plain text, multi-line, or containing quotes/backticks/dollar signs. Quote it at invocation as usual (your shell does word-splitting and `$VAR` expansion before the script sees argv). **Omit it to default to `/next`.**
+- `[message...]` — a slash command, plain text, multi-line, or containing quotes/backticks/dollar signs. Quote it at invocation as usual (your shell does word-splitting and `$VAR` expansion before the script sees argv). **Omit it to default to `/next`, a skill that exists only in a repository where `lit init` wrote it; anywhere else, pass the next instruction as the message.**
 
 On success the launcher prints `handoff scheduled → <target> … in Ns (log: <tempfile>)` and exits 0; the log captures worker progress and any transport errors.
 
