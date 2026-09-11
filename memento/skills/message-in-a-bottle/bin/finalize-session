@@ -375,16 +375,28 @@ OSA
 # exits, rather than four guards that drift apart. Unguarded, `set -e` ended the
 # launcher on mktemp's own status — a code the usage block does not mention, under
 # a message naming neither this tool nor what it was trying to write, on the one
-# failure (a full or unwritable $TMPDIR) where the operator most needs both.
+# failure (a full or unwritable temp dir) where the operator most needs both.
 # [LAW:no-silent-failure]
 #
 # It assigns through the caller's variable rather than printing the path, so the
 # exit below is the script's. Behind a command substitution it would only ever
 # have been a subshell's, leaving the outcome to errexit propagation.
+#
+# The message names the tool and the purpose and stops: `mktemp -t` reads the
+# Darwin per-user temp dir and ignores $TMPDIR outright, so naming a directory
+# here would misdirect the operator on the platform this most often runs on.
+#
+# [LAW:dataflow-not-control-flow] $RECORDED carries the whole difference between a
+# failure before the handoff is written and one after — empty until the write, the
+# handoff's path from then on — and is always interpolated, so no call site has to
+# know which side of the write it sits on. Every log tempfile is past it, and
+# exiting there without naming the file would strand a recorded handoff on disk.
 _mktemp_or_exit() {
   local __var="$1" purpose="$2" path
-  path=$(mktemp -t "finalize-$purpose.XXXXXX") \
-    || { echo "finalize-session: cannot create the $purpose tempfile in ${TMPDIR:-/tmp}" >&2; exit 2; }
+  path=$(mktemp -t "finalize-$purpose.XXXXXX") || {
+    echo "finalize-session: cannot create the $purpose tempfile.${RECORDED:+ The handoff was NOT delivered. It is preserved at: $RECORDED}" >&2
+    exit 2
+  }
   printf -v "$__var" '%s' "$path"
 }
 
@@ -520,12 +532,14 @@ case "$MODE" in
     MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
       "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
+    RECORDED=""
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""
     # [LAW:no-silent-failure] MSGFILE is deliberately absent from this trap and
     # from every worker's: the transient files go, the handoff stays.
     trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
     printf '%s' "$MESSAGE" > "$MSGFILE"
+    RECORDED="$MSGFILE"
     # [LAW:dataflow-not-control-flow] the goal rides its own tempfile as a value,
     # empty when none was carried. Workers read it and re-issue /goal only when it
     # is non-empty; nothing branches on a separate "has goal" flag.

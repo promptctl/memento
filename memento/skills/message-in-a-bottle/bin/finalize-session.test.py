@@ -297,6 +297,24 @@ NO_TMPDIR_BIN = os.path.join(FIXTURES, "notmpdir")
 os.mkdir(NO_TMPDIR_BIN)
 install(NO_TMPDIR_BIN, "mktemp", '#!/bin/bash\necho "mktemp: no space left on device" >&2\nexit 1\n')
 
+# The same condition, narrowed to the LOG tempfile. The blanket refusal above
+# cannot express the post-write case at all: it takes the goal tempfile too, so
+# the launcher dies before the handoff is ever written and the failure that
+# strands a recorded handoff never happens. Selecting on the purpose in argv is
+# what lets the goal tempfile succeed and the write land first.
+NO_LOGFILE_BIN = os.path.join(FIXTURES, "nologfile")
+os.mkdir(NO_LOGFILE_BIN)
+# `mktemp` by absolute path, not by name: this directory goes on the front of
+# PATH, so a bare `mktemp` would find this script again.
+install(NO_LOGFILE_BIN, "mktemp", '''#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    finalize-log.*) echo "mktemp: no space left on device" >&2; exit 1 ;;
+  esac
+done
+exec /usr/bin/mktemp "$@"
+''')
+
 # A PATH holding everything the launcher needs and provably no tmux. The absence
 # has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
 # package, so "the real directories happen to have no tmux" is a fact about this
@@ -332,8 +350,15 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
-        message="handoff", handoff_dir=None, reset="clear"):
-    """Launch finalize-session under a real `nest` chain and return its dry-run report."""
+        message="handoff", handoff_dir=None, reset="clear", dry_run="1",
+        log_mktemp_fails=False):
+    """Launch finalize-session under a real `nest` chain and return what it reported.
+
+    `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
+    whether to set it: the variable is always in the environment and the empty
+    string is what the launcher reads as off, so a case that needs the real
+    transport path travels the same code here as every dry-run case.
+    """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
     # The two PATHs are different shapes rather than one with an entry dropped:
@@ -344,11 +369,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         path.insert(0, FORGE_DIR)
     if mute_identity:
         path.insert(0, MUTE_DIR)
+    if log_mktemp_fails:
+        path.insert(0, NO_LOGFILE_BIN)
     env = {
         "PATH": ":".join(path),
         "HOME": os.environ.get("HOME", workdir),
         "TMPDIR": workdir,
-        "FINALIZE_DRY_RUN": "1",
+        "FINALIZE_DRY_RUN": dry_run,
         "NEST_PUBLISH_PID": pidfile,
         "FIXTURE_ROOT_PID": pidfile,
         # The claude process the detached transport relaunches as is planted at the
@@ -523,6 +550,28 @@ done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{REAL_DIRS}")
 check("a tempfile it cannot make is refused as the launcher, not as mktemp",
       done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The same refusal from the other side of the write, which is a different promise.
+# The goal tempfile is made before the handoff exists, so the case above is right
+# to assert nothing was recorded. Every LOG tempfile is made after it, and a
+# refusal there that named only the tool would leave a recorded handoff sitting on
+# disk with nothing pointing at it - the outcome the no-transport branch spells
+# out in full. Reaching it takes the launcher off dry-run, because every dry-run
+# arm exits before the log tempfile, and takes a mktemp that refuses only the log,
+# so the goal tempfile still succeeds and the write still lands.
+#
+# Nothing is spawned: the refusal comes before the nohup. And the assertion is its
+# own control, which is why there is no second run - it demands a recorded body AND
+# its path in stderr, so a fixture that refused every mktemp would die at the goal
+# tempfile with nothing written and fail this case rather than pass it.
+logfail_dir = tempfile.mkdtemp(prefix="finalize-logfail.")
+done = run(dry_run="", log_mktemp_fails=True, handoff_dir=logfail_dir)
+recorded = sorted(os.listdir(logfail_dir))
+check("a tempfile it cannot make after the handoff is written says where the handoff is",
+      done.returncode == REFUSED_RC and len(recorded) == 1
+      and os.path.join(logfail_dir, recorded[0]) in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+shutil.rmtree(logfail_dir, ignore_errors=True)
 
 done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
