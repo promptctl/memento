@@ -26,7 +26,7 @@
 # hand off into — that is the sole remaining hard failure.
 #
 # Modes:
-#   launcher:         finalize-session --help   (the argv lives in _usage, once)
+#   launcher:         its argv is _usage's to state — read it, or run --help
 #   tmux worker:      finalize-session --worker <target> <reset> <msgfile> <goalfile>
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
@@ -392,7 +392,7 @@ usage: finalize-session [--goal <condition>] [--reset clear|compact] [--] [messa
 Every flag here has two dashes, so only a two-dash word is read as one. Anything
 else is message: -h, "- shipped the parser", any argument carrying a newline.
 
-exit: 0 recorded · 2 bad argv, or no transport to deliver into
+exit: 0 recorded · 2 anything that stopped it — argv, setup, or transport
 USAGE
 }
 

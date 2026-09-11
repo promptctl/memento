@@ -437,7 +437,12 @@ check("the tmux-absent PATH can still run the launcher",
 # handoff RECORDED from a mistyped flag and delivered to the next agent as its
 # opening prompt, so "refused" has to mean "wrote nothing" to mean anything.
 
-BAD_ARGV_RC = 2  # shared with NO_TRANSPORT_RC: both are "the launcher refused"
+# A distinct fact from NO_TRANSPORT_RC, which happens to carry the same value
+# today. That one is "the launcher found nowhere to deliver into"; this one is
+# "the launcher refused the argv". Give bad argv its own code someday and this
+# constant moves while that one does not - so they are two, not one written
+# twice, and the coincidence of value is not a reason to merge them.
+BAD_ARGV_RC = 2
 
 
 def argv_case(*args):

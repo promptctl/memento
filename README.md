@@ -88,8 +88,8 @@ dies silently at the handoff and stops an unattended run.
 word it does not know is refused — named on stderr, exit 2, no handoff written —
 instead of being swallowed as message text. Only a two-dash word is read as a flag, so
 `-h`, a recap opening `- shipped the parser`, and anything carrying a newline all
-record as the message they are. Put `--` before the one case that stays ambiguous, a
-single-line message that is itself a two-dash word: `finalize-session -- --help`.
+record as the message they are. Put `--` first when the message begins with a two-dash
+word, whatever comes after it: `finalize-session -- --already-fixed see PR 123`.
 
 When it does reset, the launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
