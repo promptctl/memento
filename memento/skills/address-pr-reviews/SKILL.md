@@ -65,7 +65,20 @@ result = provider.wait(PR_URL)
 
 Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, reviewed, not_reviewed_reason}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
 
-[LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Stop and surface the run `url`; do not treat a failed run as a clean review.
+[LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Do not treat a failed run as a clean review. Before surfacing it, read the failed log for the one cause this loop fixes itself — the run id is the last path segment of `url`:
+
+```bash
+gh run view "$RUN_ID" --log-failed | grep -m1 -o "You.ve hit your limit[^\"]*"
+```
+
+A match means the reviewer's Claude account is out of usage quota. The run never read the diff, and it fails the same way on every rerun until that account's quota resets, typically days out. **A usage limit is a credential problem, and the fix is to swap credentials, not to wait.** The reviewer runs as one account from a pool of several; rotate it onto one that still has capacity. The procedure is *Rotating the reviewer account* in the `agent-code-review-setup` skill (`~/.claude/skills/agent-code-review-setup/SKILL.md`), in short: repoint the `SECRETS` table in its `install.sh` at a different `CLAUDE_CODE_OAUTH_TOKEN_<ACCOUNT>` keychain item and commit that in dotfiles, run `install.sh` from this repo's root so the repo secret follows, then `gh run rerun "$RUN_ID"` — the head SHA is unchanged, so only a rerun re-fires the reviewer — and go back to `provider.wait`. If the rerun hits the limit too, that account is spent as well; move to the next item in the pool. Stop and surface only once every account in the pool has been tried and limited, and say so with the reset time the log names.
+
+You will be reading "You've hit your limit · resets <date>", the date will be two days out, and the thought will be *"nothing can move until then — report the wait and stop."* Its cousin: *"I'll review it locally in the meantime."* Neither. Waiting leaves every open PR parked for days with the fix ten minutes away, and a local review is not the reviewer — `provider.fetch` is the only stream of findings this loop trusts (`[LAW:one-source-of-truth]`). The limit belongs to one account; the pool has more.
+
+- BAD (a real handoff, written after eight runs failed the same way): "the CI reviewer is rate-limited on every run; the limit resets 2026-09-13 19:00 UTC. There is NO workable ticket right now. Report the wait and stop."
+- GOOD: "run 3456… hit the usage limit on the current reviewer account. Repointed the table at the next account, ran install.sh here, `gh run rerun 3456…` — review completed with 3 findings, continuing the loop."
+
+For any other non-success conclusion, stop and surface the run `url`.
 
 [LAW:no-silent-failure] if `reviewed` is `False`, the run completed **without reviewing the head** — a spent `MAX_REVIEW_ROUNDS` cap, a fork PR, or a run that left no review for this commit (`not_reviewed_reason` names which). Its findings are absent for the same reason a clean review's are, so step 2 would return zero and the loop would merge an unreviewed commit — which is exactly how real code once shipped green and unread. Stop and surface `sha`, `not_reviewed_reason`, and `url`; the user decides whether to raise the cap and re-run, or review by another provider. Never treat it as a clean pass.
 
@@ -295,6 +308,7 @@ Then stop. The loop is finished, the work is shipped, the recap is filed.
 ## Rules
 
 - **You own the close-out.** When the loop exits clean, run Finalize (merge, close lit ticket, recap). Don't punt these to the user — `<ticket-lifecycle>` is explicit that the agent closes its own tickets, and a PR that sits open waiting for a human to push the merge button is the same anti-pattern. Step D runs whenever an aligned candidate exists in the pool; the instruction it records (direct work vs define-task) is shaped by whether the candidate is well-defined. The only halt case is project-level misalignment across every examined candidate — alignment is a strategy question the agent cannot answer on the user's behalf, and that case is surfaced as a per-candidate failure table for the user to act on.
+- **A usage-limit failure is a credential to swap, not a wait to report.** The reviewer's account is one of a pool. When the failed log says "You've hit your limit", rotate onto an account with capacity (the setup skill's *Rotating the reviewer account*), rerun the run, and continue. Waiting out a multi-day reset, or reviewing locally instead, is the loop stalling with the fix in reach.
 - **Architectural laws override reviewer authority.** Refuse suggestions that violate `[LAW:...]`. Cite the law in the pushback reply on the thread — that text is the durable record of why the code is the way it is.
 - **Plan on every thread before you touch code.** Each finding gets a plan comment in the plan phase — pushback-with-law for the ones you reject, the intended fix for the ones you accept. The comment is the durable record of the decision; the reviewer doesn't reply, so your comment is the only one.
 - **Resolve every finding you addressed, including pushbacks — through `provider.resolve(thread_id)`, and only on confirmation.** No-change findings resolve in the plan phase; change-needed findings resolve in the confirm phase, after the fix is pushed — never before, because resolving an unfixed thread lies about the code. Open findings accumulate forever; resolution is the step that gets silently dropped, which is why it runs through the provider's verified path, not a raw mutation.
