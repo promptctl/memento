@@ -71,11 +71,11 @@ Blocks until the review for the PR's **current head SHA** reaches `completed`, t
 
 ```bash
 JOB_ID=$(gh run view "$RUN_ID" -R "$OWNER/$REPO" --json jobs --jq '.jobs[] | select(.conclusion!="success") | .databaseId')
-gh api "repos/$OWNER/$REPO/check-runs/$JOB_ID/annotations" \
+[ -n "$JOB_ID" ] && gh api "repos/$OWNER/$REPO/check-runs/$JOB_ID/annotations" \
   --jq '.[] | select(.annotation_level=="failure") | .message' | grep -F 'rate-limited:'
 ```
 
-Match on that annotation and nothing looser. An annotation exists only because the action's own process issued an error command after exhausting its retries; nothing echoed from the diff or the transcript can mint one, so the literal in this file cannot misroute a run even when this file is the diff. The model's message ("You've hit your limit · resets …") is not the anchor for exactly that reason — it also appears wherever the log echoes the diff, and it once sent this skill's own PR down this path. No match, for whatever reason — a cancelled or timed-out job carries no such annotation — is the general case: stop and surface the run `url`.
+Match on that annotation and nothing looser. An annotation exists only because the action's own process issued an error command after exhausting its retries; nothing echoed from the diff or the transcript can mint one, so the literal in this file cannot misroute a run even when this file is the diff. The model's message ("You've hit your limit · resets …") is not the anchor for exactly that reason — it also appears wherever the log echoes the diff, and it once sent this skill's own PR down this path. No match, for whatever reason — a cancelled or timed-out job carries no such annotation, and a run that scheduled no job has no job id — is the general case: stop and surface the run `url`.
 
 A match means the Claude account whose token this repo's generated workflow hands the action (the `CLAUDE_CODE_OAUTH_TOKEN` input in `code-review.yml`, which owns that name) is out of usage quota. The run never read the diff, and it fails identically on every rerun until that account's quota resets, typically days out. **A usage limit is a credential problem, and the fix is to swap credentials, not to wait.** The credential comes from a pool of accounts kept by the `agent-code-review-setup` skill; its *Rotating the reviewer account* section (`~/.claude/skills/agent-code-review-setup/SKILL.md`) owns the mechanics — which accounts exist, how the reviewer's account is chosen, how a repo is moved onto it. Follow it in this order:
 
