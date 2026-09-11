@@ -44,12 +44,16 @@ The launcher always records the handoff. Whether it *also* resets this session i
 ## Invocation
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<condition>'] [--reset clear|compact] [message...]
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<condition>'] [--reset clear|compact] [--] [message...]
 ```
 
 - `--goal '<condition>'` — optional, and only when a `/goal` is active this session. Re-establishes that goal in the reset session so the run continues. Leading argument; quote the condition. **Omit entirely when no goal is set.**
 - `--reset clear|compact` — optional; **this is what makes the close-out reset the session, and it names the next session's starting context.** Leading argument, in any order with `--goal`. `clear` = blank slate, `compact` = carry a summary forward. Omit it and the handoff is recorded while this session keeps its context. An unrecognised value is refused with exit 2. **The `clear`/`compact` distinction holds on the tmux transport only** — read the transport paragraph below before relying on `compact`.
+- `--` — ends flag parsing; every token after it is message text. This is how a handoff that genuinely opens with a two-dash word gets sent.
+- `--help` — prints the usage block, exits 0, and records nothing.
 - `[message...]` — a slash command, plain text, multi-line, or containing quotes/backticks/dollar signs. Quote it at invocation as usual (your shell does word-splitting and `$VAR` expansion before the script sees argv). **Omit it to default to `/next`, a skill that exists only in a repository where `lit init` wrote it; anywhere else, pass the next instruction as the message.**
+
+The flags above are the whole set, and each one has two dashes. **A single-line argument whose first word is any other two-dash token is named on stderr and refused with exit 2, having recorded nothing** — that is what catches a typo like `--rest compact` instead of shipping it to the next agent as the handoff text. To send such a message anyway, **put it after `--`.** A single-dash token is message text (`-h`, `- shipped the parser`): no flag here is one dash, so nothing is being near-missed. So is any argument carrying a newline, however it opens — no flag spans a line, and this close-out's handoff is routinely a multi-line recap.
 
 On success the launcher exits 0, printing the outcome your flags chose. Without `--reset`: `handoff recorded → <path>` and `no reset: this session keeps its context, so carry on with the work.` With `--reset`: `handoff scheduled → <target> in Ns (log: <tempfile>)`, `<target>` taking a tmux-only `(/<mode>)` suffix — the log captures worker progress and any transport errors.
 
