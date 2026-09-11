@@ -84,11 +84,12 @@ since the other two launch a fresh process and are blank by construction.
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run.
 
-An unrecognised flag is refused — named on stderr, exit 2, no handoff written —
-instead of being swallowed as message text, and `--help` prints the usage block and
-exits 0. Only a lone dash-led word can be a flag, so a recap that opens
-`- shipped the parser` records as the message it is. Put `--` before a message that is
-itself one dash-led word: `finalize-session -- --help`.
+`--help` prints a usage block and exits 0 recording nothing, and any other two-dash
+word it does not know is refused — named on stderr, exit 2, no handoff written —
+instead of being swallowed as message text. Only a two-dash word is read as a flag, so
+`-h`, a recap opening `- shipped the parser`, and anything carrying a newline all
+record as the message they are. Put `--` before the one case that stays ambiguous, a
+single-line message that is itself a two-dash word: `finalize-session -- --help`.
 
 When it does reset, the launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux

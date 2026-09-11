@@ -461,11 +461,10 @@ def argv_case(*args):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-for flag in ("--help", "-h"):
-    done, bodies = argv_case(flag)
-    check(f"{flag} prints the usage and records nothing",
-          done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
-          f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
+done, bodies = argv_case("--help")
+check("--help prints the usage and records nothing",
+      done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
+      f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
 
 # The typo, which is the dangerous one: it looks like a flag, it is not one, and
 # before the border it became the next agent's entire instructions - silently,
@@ -475,27 +474,31 @@ check("a mistyped flag is refused rather than recorded as the handoff",
       done.returncode == BAD_ARGV_RC and "--rest" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The short-flag half of the same namespace. Refusing only `--*` would leave
-# this one falling through to the message exactly as before.
-done, bodies = argv_case("-x")
-check("an unknown short flag is refused too",
-      done.returncode == BAD_ARGV_RC and bodies == [],
+# The other side of the border, and the reason it is drawn at two dashes: every
+# flag this tool takes has two, so a single-dash token is a near-miss of nothing
+# and refusing it would be refusing prose for its first character. `-h` is the
+# case a reader expects to be a flag and is not.
+for text in ("-h", "- shipped the parser"):
+    done, bodies = argv_case(text)
+    check(f"a single-dash token is message text: {text!r}",
+          done.returncode == 0 and len(bodies) == 1 and text in bodies[0],
+          f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The newline clause. No flag spans a line, so a multi-line argument is prose
+# however it opens - and the close-out's handoff is routinely a multi-line recap,
+# written by a session with no context left to spend on a parse error.
+recap = "--reset was already passed\nso this line is recap, not argv"
+done, bodies = argv_case(recap)
+check("a multi-line message is text even when it opens with two dashes",
+      done.returncode == 0 and len(bodies) == 1 and recap in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The release valve. Without it the border would have made a legitimate handoff
-# unrepresentable - a narrowing, not a tightening.
+# The release valve, for the one case the two clauses above leave ambiguous: a
+# single-line message that is itself a two-dash word. Without it the border would
+# have made that handoff unrepresentable - a narrowing, not a tightening.
 done, bodies = argv_case("--", "--help")
-check("-- hands a dash-leading message through to the handoff",
+check("-- hands a lone two-dash word through to the handoff",
       done.returncode == 0 and len(bodies) == 1 and "\n--help\n" in bodies[0],
-      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
-
-# The shape the close-out actually produces. A flag is one word, so a dash-led
-# token carrying whitespace was never a flag and must not be refused - least of
-# all here, where the caller is a session with no context left to spend on
-# recovering from a parse error.
-done, bodies = argv_case("- shipped the parser\n- closed the ticket")
-check("a markdown recap opening with a bullet is message text, not a flag",
-      done.returncode == 0 and len(bodies) == 1 and "- shipped the parser" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 done, bodies = argv_case("ordinary handoff text")

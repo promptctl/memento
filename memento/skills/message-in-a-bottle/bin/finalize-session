@@ -389,6 +389,9 @@ usage: finalize-session [--goal <condition>] [--reset clear|compact] [--] [messa
   MEMENTO_HANDOFF_DIR     where the handoff is written
                           (default: ~/.claude/memento/handoffs)
 
+Every flag here has two dashes, so only a two-dash word is read as one. Anything
+else is message: -h, "- shipped the parser", any argument carrying a newline.
+
 exit: 0 recorded · 2 bad argv, or no transport to deliver into
 USAGE
 }
@@ -412,6 +415,9 @@ case "$MODE" in
     # Absent → empty string; the same code path runs, the value decides the effect.
     GOAL=""
     RESET_ARG=""
+    # A literal newline, named so the flag checkpoint below can match one inside a
+    # case pattern, where quoting is what keeps it literal against the globs.
+    NEWLINE=$'\n'
     while :; do
       case "${1:-}" in
         --goal)
@@ -428,34 +434,38 @@ case "$MODE" in
           esac
           shift 2 || { echo "--reset requires a mode argument" >&2; exit 2; }
           ;;
-        --help|-h)
+        --help)
           _usage; exit 0 ;;
         # The release valve for the refusal below, and it must be matched first
-        # because `--` is itself a dash-token: a handoff whose text genuinely
-        # starts with a dash stays expressible, said on purpose rather than by
-        # accident.
+        # because `--` is itself two dashes: a handoff whose text genuinely opens
+        # with `--` stays expressible, said on purpose rather than by accident.
         --)
           shift; break ;;
-        # A dash-led token carrying whitespace is not flag-shaped — a flag is one
-        # word — so it is message text and always was. This arm is what keeps the
-        # refusal below to exactly the tokens that could have been a flag: the
-        # close-out's handoff is usually a markdown recap, and one opening
-        # `- shipped the parser` must not be refused at the one moment a session
-        # has no context left to spend recovering from a parse error.
-        -*[[:space:]]*)
+        # A token carrying a newline is prose, and prose is what this tool
+        # carries. No flag spans a line, so the newline settles it before the
+        # refusal below ever looks: the close-out's handoff is routinely a
+        # multi-line recap, and refusing one that happens to open with `--` would
+        # bite at the moment a session has the least context left to work out why.
+        --*"$NEWLINE"*)
           break ;;
         # [LAW:parse-dont-validate] the checkpoint for the flag POSITION, sibling
         # of --reset's checkpoint for its value. Without it the flag namespace had
-        # no border at all: every unrecognised dash-token fell through to the
-        # message, so `finalize-session --help` recorded a handoff whose entire
-        # text was "--help" and, with --reset, handed that to the next agent as
-        # its opening prompt — which is how one real session woke up holding the
-        # string `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
+        # no border at all: every unrecognised token fell through to the message,
+        # so `finalize-session --help` recorded a handoff whose entire text was
+        # "--help" and, with --reset, handed that to the next agent as its opening
+        # prompt — which is how one real session woke up holding the string
+        # `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
         # silently: `--rest compact` shipped "--rest compact" as the handoff.
         # [LAW:no-silent-failure] a mistyped flag is a fact about the caller's
         # intent, and reinterpreting it as content destroys that fact at the one
         # moment this tool exists to preserve it.
-        -*)
+        #
+        # [LAW:types-are-the-program] two dashes is the whole of it, because every
+        # flag this tool takes has two. A single-dash token cannot be a near-miss
+        # of anything in that set — there is no short flag for it to have been —
+        # so `-h` is text, the same as `- shipped the parser`, and refusing either
+        # would refuse prose on the strength of its first character.
+        --*)
           echo "unknown flag '$1' — finalize-session --help lists what it takes." >&2
           echo "To send it as handoff text, put it after --." >&2
           exit 2 ;;
