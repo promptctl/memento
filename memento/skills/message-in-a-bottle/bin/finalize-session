@@ -400,9 +400,8 @@ _mktemp_or_exit() {
   printf -v "$__var" '%s' "$path"
 }
 
-# [LAW:one-source-of-truth] the launcher's argv, written down once. The header's
-# Modes block names the worker contracts and defers here for the launcher, so
-# there is no second list of flags to drift out of date.
+# [LAW:one-source-of-truth] the argv the tool itself ships, and the copy the docs
+# answer to. The header's Modes block names the worker contracts and defers here.
 _usage() {
   cat <<'USAGE'
 finalize-session — record the session handoff; optionally reset the session too.
