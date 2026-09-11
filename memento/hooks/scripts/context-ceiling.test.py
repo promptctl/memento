@@ -42,6 +42,7 @@ USER_CEILING = f"ceiling = {TEST_CEILING}\n"
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
 SESSION = "s-1"
 CONFIG_NAME = "memento.conf"
+SHARED_AT_START = "shared-at-start.conf"
 failures = []
 
 
@@ -346,6 +347,100 @@ code, out, _ = run([user, assistant(400_000)], project=shared,
 check("the user config is not applied a second time as the project config",
       blocked_at(out, 260_000), str(out))
 
+# --- a running session keeps the ceiling it started under ----------------------------------
+
+# The incident this section exists for. A shared file held 350,000 from 05:18 on 2026-09-06 until
+# an agent working in an unrelated project removed the line at 14:55. Every running session read
+# the default from the next tool call on; one of them was at 250,196 tokens, went from
+# unrestricted to fully gated between two calls, and never wrote a handoff. Each case runs a
+# session more than once against one config home, because a second run seeing what the first one
+# recorded is the whole of what is under test.
+
+home = scratch_dir()
+code, out, _ = run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+check("a session's first stop passes under the shared ceiling it started with",
+      code == 0 and out is None, f"{code} {out}")
+code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a shared ceiling lowered under a running session does not gate it",
+      code == 0 and out is None, f"{code} {out}")
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("nor does it move that session's ceiling", blocked_at(out, 350_000), str(out))
+# The other half of the rule: the rewrite is not ignored, it is scoped. Same config home, so the
+# only difference between this case and the one above it is which session is stopping.
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n",
+                session="s-after")
+check("a session started after the rewrite does get the new number",
+      blocked_at(out, 250_000), str(out))
+
+# What actually happened in the incident was a deletion, and a file that no longer exists has no
+# mtime to rank against the session's start - so this is the case that decides the design, not a
+# variation on the one above.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+os.unlink(os.path.join(home, CONFIG_NAME))
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf=None)
+check("a shared ceiling deleted under a running session leaves that session's ceiling standing",
+      blocked_at(out, 350_000), str(out))
+# A shared file rewritten into something `ceiling_in` exits on is the same class of change, and
+# the hook exiting is how the gate stops running for a session entirely.
+code, out, err = run([user, assistant(400_000)], config_home=home, user_conf="ceilling = 350000\n")
+check("a shared file broken after a session started does not take that session's gate down",
+      code == 0 and blocked_at(out, 350_000), f"{code} {err}")
+code, out, err = run([user, assistant(400_000)], config_home=home,
+                     user_conf="ceilling = 350000\n", session="s-into-breakage")
+check("while a session starting into that broken file still fails loudly",
+      code == 1 and "ceilling" in err, f"{code} {err}")
+
+# The rule is about shared layers, so the project layer is frozen on the same terms as the user
+# one - it is shared with every other session anchored at that project.
+home, repo = scratch_dir(), scratch_dir()
+run([user, assistant(1_000)], config_home=home, project=repo, project_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(400_000)], config_home=home, project=repo,
+                project_conf="ceiling = 250000\n")
+check("a project ceiling rewritten under a running session is frozen out too",
+      blocked_at(out, 350_000), str(out))
+
+# STOP CONDITION 2: the session's own layer is the one that still moves, immediately, in both
+# directions - which is what makes the block escapable from inside the block.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 250000\n")
+code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n",
+                   session_conf="ceiling = +100_000\n")
+check("a session layer written mid-session raises the ceiling on the very next stop",
+      code == 0 and out is None, f"{code} {out}")
+_, out, _ = run([user, assistant(200_000)], config_home=home, user_conf="ceiling = 250000\n",
+                session_conf="ceiling = -100_000\n")
+check("and lowers it on the next stop too - no direction test, no asymmetry",
+      blocked_at(out, 150_000), str(out))
+# The ceiling skill hands a session back by deleting this file, which must leave the record it
+# sits beside untouched. The live shared file is moved to 200,000 so a re-read would show.
+os.unlink(os.path.join(home, "sessions", SESSION, CONFIG_NAME))
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 200000\n")
+check("deleting the session layer hands the session back to its recorded start, not the live file",
+      blocked_at(out, 250_000), str(out))
+
+# A record half-written by a session killed mid-write would exist and parse to nothing, and a
+# record that can neither be read nor replaced is the gate off for that session for good. Written
+# whole and moved into place, so the empty file below is a state only this test can build.
+home = scratch_dir()
+write_conf(os.path.join(home, "sessions", SESSION, SHARED_AT_START), "")
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 350000\n")
+check("a record left empty by an interrupted write is completed rather than stopping the gate",
+      blocked_at(out, 350_000), str(out))
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("and the completed record is what the next stop reads", blocked_at(out, 350_000), str(out))
+
+# `off` has to survive the round trip through the record, or a session that started with the gate
+# off would silently get it back the moment the shared file moved.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = off\n")
+code, out, _ = run([user, assistant(5_000_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a session that started with the gate off keeps it off when the shared file turns it back on",
+      code == 0 and out is None, f"{code} {out}")
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n",
+                session_conf="ceiling = 300000\n")
+check("and its own layer can still put a number back", blocked_at(out, 300_000), str(out))
+
 # --- a setting nobody can misspell into silence -------------------------------------------
 
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 350k\n")
@@ -372,10 +467,23 @@ code, out, err = run([user, assistant(OVER)],
                      user_conf="ceiling = 300000\nceiling = 400000\n")
 check("one key set twice in one file fails loudly",
       code == 1 and "twice" in err and "line 2" in err, f"{code} {err}")
+# The shared fold is the one that gets written down, so it is the one that must not be allowed to
+# resolve negative: `-50000` recorded is `-50000` read back as an *adjustment*, which resolves to
+# a positive 200,000 nobody set and never trips the check below. Caught in review; the exit had
+# stopped firing for this input entirely, on the recording stop as well as every later one.
+code, out, err = run([user, assistant(OVER)], user_conf="ceiling = -300000\n")
+check("a shared fold that resolves below zero fails loudly rather than being recorded",
+      code == 1 and "never negative" in err and "-50,000" in err, f"{code} {err}")
+check("and it names the shared file that caused it, not the record derived from it",
+      code == 1 and CONFIG_NAME in err and SHARED_AT_START not in err, f"{code} {err}")
+
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 10000\n",
                      session_conf="ceiling = -50000\n")
+# Both layers by name, not by a count of filenames: the shared side of the fold now reaches the
+# message through the session's recorded start, so the two sources are two different files.
 check("adjustments that resolve below zero fail loudly, naming both layers",
-      code == 1 and "never negative" in err and err.count(CONFIG_NAME) == 2, f"{code} {err}")
+      code == 1 and "never negative" in err and SHARED_AT_START in err and CONFIG_NAME in err,
+      f"{code} {err}")
 
 # The disabling word is matched on what was written, not on what is left after the digit
 # separators come out - `o_f_f` is a typo, and reading it as `off` would take the gate down

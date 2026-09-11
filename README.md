@@ -138,18 +138,53 @@ handoff without touching — or knowing — the number the project pinned:
 ceiling = +100_000
 ```
 
-A session can create that layer for itself. The `<session-id>` in its path comes from
-`CLAUDE_CODE_SESSION_ID`, so one command gives the session running right now more room:
+The two shared layers — the user file and the project file — are read once per session,
+at its first stop, and what they resolve to together is written down as
+`~/.config/promptctl/sessions/<session-id>/shared-at-start.conf`, an ordinary config file
+in the same format holding an absolute number or `off`: `ceiling = 350000`. From then on
+that record is the shared contribution for that session, and neither shared file is read
+again for it. Nothing removes that record. A session that stops even once leaves one
+small file under `~/.config/promptctl/sessions/`, and it stays there after the session is
+gone. Editing a shared file, deleting it, or leaving a syntax error in it does not move a
+running session's ceiling and cannot gate it. A session that starts afterwards reads the
+shared files as they stand: an edit or a deletion gives it the new number, and a syntax
+error stops the hook for that session with an error, the same loud failure a malformed
+config has always produced.
+
+That split is here because of one afternoon. A shared file held `350000` from 05:18 on
+2026-09-06 until an agent working in an unrelated project removed the line at 14:55, and
+every running session read the default 250,000 from its next tool call onward. One of
+them was at 250,196 tokens, mid-epic, in a different directory. It went from unrestricted
+to fully gated between two consecutive tool calls, could not reach the remedy from inside
+the gate, and never wrote a handoff. The record is made at the first stop rather than at
+the first token because `Stop` is the only event this hook is given — one turn of drift,
+spent where a session is still far below any ceiling.
+
+The record is keyed on the session id and is never rewritten, so a session that closes
+out and carries on keeps the ceiling it started under.
+`finalize-session --reset clear|compact` sends `/clear` or `/compact` as keystrokes into
+the same running process: the process survives and the session id with it, so the context
+after the reset is a new context under an old record. A later change to a shared file
+never reaches it, however much it looks from the pane like a session that started
+afterwards. Its own layer still applies immediately, so a session in that position can
+still give itself room.
+
+The session's own layer is read live at every stop and applies immediately in both
+directions, raising and lowering alike. A session can create that layer for itself. The
+`<session-id>` in its path comes from `CLAUDE_CODE_SESSION_ID`, so one command gives the
+session running right now more room:
 
 ```
 dir="${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID"
 mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
 ```
 
-Because the value is signed it lands on top of what the project pinned rather than
-replacing it — a project at 250,000 resolves to 350,000 — and it takes effect on the very
-next hook invocation, with nothing to restart, reload or signal, including from a session
-that is already over the ceiling.
+Because the value is signed it lands on top of what the shared layers resolved to rather
+than replacing it — a session that started at 250,000 resolves to 350,000 — and it takes
+effect the next time the ceiling is checked, when the turn ends, with nothing to restart,
+reload or signal, including from a session that is already over the ceiling. Deleting
+that file hands the session back to the ceiling it started under, not to whatever the
+shared files say now: `shared-at-start.conf` is still standing.
 
 The `ceiling` skill runs that command for you and then reads the log on the following
 turn to confirm the write took. The check earns its keep: the write succeeds whatever you
