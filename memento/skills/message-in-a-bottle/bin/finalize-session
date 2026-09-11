@@ -26,7 +26,7 @@
 # hand off into — that is the sole remaining hard failure.
 #
 # Modes:
-#   launcher:         finalize-session [message...]
+#   launcher:         finalize-session --help   (the argv lives in _usage, once)
 #   tmux worker:      finalize-session --worker <target> <reset> <msgfile> <goalfile>
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
@@ -369,6 +369,30 @@ end tell
 OSA
 }
 
+# [LAW:one-source-of-truth] the launcher's argv, written down once. The header's
+# Modes block names the worker contracts and defers here for the launcher, so
+# there is no second list of flags to drift out of date.
+_usage() {
+  cat <<'USAGE'
+finalize-session — record the session handoff; optionally reset the session too.
+
+usage: finalize-session [--goal <condition>] [--reset clear|compact] [--] [message...]
+
+  --goal <condition>      re-issue an active /goal into the reset session, which
+                          otherwise wakes with no goal and stops an unattended run
+  --reset clear|compact   reset this session after recording. Without it the
+                          handoff is written and the session carries on
+  --                      end flag parsing; every token after it is message text
+  message...              what the next agent wakes up holding (default: /next)
+
+  FINALIZE_DRY_RUN=1      report the transport it would use; schedule nothing
+  MEMENTO_HANDOFF_DIR     where the handoff is written
+                          (default: ~/.claude/memento/handoffs)
+
+exit: 0 recorded · 2 bad argv, or no transport to deliver into
+USAGE
+}
+
 # [LAW:types-are-the-program] one discriminator at the entry; everything
 # downstream operates on validated, typed inputs for exactly one mode.
 case "${1:-}" in
@@ -404,6 +428,37 @@ case "$MODE" in
           esac
           shift 2 || { echo "--reset requires a mode argument" >&2; exit 2; }
           ;;
+        --help|-h)
+          _usage; exit 0 ;;
+        # The release valve for the refusal below, and it must be matched first
+        # because `--` is itself a dash-token: a handoff whose text genuinely
+        # starts with a dash stays expressible, said on purpose rather than by
+        # accident.
+        --)
+          shift; break ;;
+        # A dash-led token carrying whitespace is not flag-shaped — a flag is one
+        # word — so it is message text and always was. This arm is what keeps the
+        # refusal below to exactly the tokens that could have been a flag: the
+        # close-out's handoff is usually a markdown recap, and one opening
+        # `- shipped the parser` must not be refused at the one moment a session
+        # has no context left to spend recovering from a parse error.
+        -*[[:space:]]*)
+          break ;;
+        # [LAW:parse-dont-validate] the checkpoint for the flag POSITION, sibling
+        # of --reset's checkpoint for its value. Without it the flag namespace had
+        # no border at all: every unrecognised dash-token fell through to the
+        # message, so `finalize-session --help` recorded a handoff whose entire
+        # text was "--help" and, with --reset, handed that to the next agent as
+        # its opening prompt — which is how one real session woke up holding the
+        # string `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
+        # silently: `--rest compact` shipped "--rest compact" as the handoff.
+        # [LAW:no-silent-failure] a mistyped flag is a fact about the caller's
+        # intent, and reinterpreting it as content destroys that fact at the one
+        # moment this tool exists to preserve it.
+        -*)
+          echo "unknown flag '$1' — finalize-session --help lists what it takes." >&2
+          echo "To send it as handoff text, put it after --." >&2
+          exit 2 ;;
         *) break ;;
       esac
     done

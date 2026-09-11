@@ -75,7 +75,7 @@ Without the flag it prints the path it wrote and leaves the session running, so 
 the message need not cost you your context.
 
 ```bash
-finalize-session [--goal '<condition>'] [--reset clear|compact] [message...]
+finalize-session [--goal '<condition>'] [--reset clear|compact] [--] [message...]
 ```
 
 With no message it hands off `/next`. `clear` starts the next session blank and `compact`
@@ -83,6 +83,12 @@ starts it with a compacted summary — a distinction only the tmux transport can
 since the other two launch a fresh process and are blank by construction.
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run.
+
+An unrecognised flag is refused — named on stderr, exit 2, no handoff written —
+instead of being swallowed as message text, and `--help` prints the usage block and
+exits 0. Only a lone dash-led word can be a flag, so a recap that opens
+`- shipped the parser` records as the message it is. Put `--` before a message that is
+itself one dash-led word: `finalize-session -- --help`.
 
 When it does reset, the launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux

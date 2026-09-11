@@ -427,6 +427,82 @@ check("the tmux-absent PATH can still run the launcher",
       shutil.which("bash", path=NO_TMUX_BIN) is not None,
       "the launcher's `#!/usr/bin/env bash` resolves bash through PATH")
 
+# --- the flag namespace's border ------------------------------------------
+# These drive the launcher directly, with no `nest` chain: argv is refused (or
+# the usage printed) before any transport is looked for, so the process tree is
+# not part of the contract under test.
+#
+# Every case asserts what landed in the handoff directory, not merely the exit
+# code. The failure this border closes was never a wrong exit code - it was a
+# handoff RECORDED from a mistyped flag and delivered to the next agent as its
+# opening prompt, so "refused" has to mean "wrote nothing" to mean anything.
+
+BAD_ARGV_RC = 2  # shared with NO_TRANSPORT_RC: both are "the launcher refused"
+
+
+def argv_case(*args):
+    """Run the launcher with this argv against a handoff directory of its own.
+
+    Returns (completed process, [handoff bodies it wrote]) - the bodies rather
+    than the filenames, because the bug being pinned is about what a handoff
+    SAYS, and a filename cannot tell a recorded typo from a recorded message.
+    """
+    workdir = tempfile.mkdtemp(prefix="finalize-argv.")
+    handoffs = os.path.join(workdir, "handoffs")
+    try:
+        done = subprocess.run(
+            [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
+            env={"PATH": REAL_DIRS, "HOME": workdir, "TMPDIR": workdir,
+                 "MEMENTO_HANDOFF_DIR": handoffs})
+        names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
+        bodies = [open(os.path.join(handoffs, name)).read() for name in names]
+        return done, bodies
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+for flag in ("--help", "-h"):
+    done, bodies = argv_case(flag)
+    check(f"{flag} prints the usage and records nothing",
+          done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
+          f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
+
+# The typo, which is the dangerous one: it looks like a flag, it is not one, and
+# before the border it became the next agent's entire instructions - silently,
+# with a zero exit code and a reset chasing it.
+done, bodies = argv_case("--rest", "compact", "real work goes here")
+check("a mistyped flag is refused rather than recorded as the handoff",
+      done.returncode == BAD_ARGV_RC and "--rest" in done.stderr and bodies == [],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The short-flag half of the same namespace. Refusing only `--*` would leave
+# this one falling through to the message exactly as before.
+done, bodies = argv_case("-x")
+check("an unknown short flag is refused too",
+      done.returncode == BAD_ARGV_RC and bodies == [],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The release valve. Without it the border would have made a legitimate handoff
+# unrepresentable - a narrowing, not a tightening.
+done, bodies = argv_case("--", "--help")
+check("-- hands a dash-leading message through to the handoff",
+      done.returncode == 0 and len(bodies) == 1 and "\n--help\n" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The shape the close-out actually produces. A flag is one word, so a dash-led
+# token carrying whitespace was never a flag and must not be refused - least of
+# all here, where the caller is a session with no context left to spend on
+# recovering from a parse error.
+done, bodies = argv_case("- shipped the parser\n- closed the ticket")
+check("a markdown recap opening with a bullet is message text, not a flag",
+      done.returncode == 0 and len(bodies) == 1 and "- shipped the parser" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+done, bodies = argv_case("ordinary handoff text")
+check("an ordinary message is still recorded",
+      done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
 # --- resolution through a real ancestry -----------------------------------
 
 for depth in (0, 1, 5):
