@@ -288,6 +288,14 @@ install(FORGE_DIR, "ps", PS_FORGING)
 MUTE_DIR = os.path.join(FIXTURES, "mute")
 os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
+# A tmpdir with no room in it, which is a fixture and not an environment because
+# the environment cannot say it: macOS `mktemp -t` reads the Darwin per-user temp
+# dir and ignores $TMPDIR outright, so pointing $TMPDIR at an unwritable or
+# absent path there yields a perfectly good tempfile. Only a mktemp that refuses
+# states the condition on every platform.
+NO_TMPDIR_BIN = os.path.join(FIXTURES, "notmpdir")
+os.mkdir(NO_TMPDIR_BIN)
+install(NO_TMPDIR_BIN, "mktemp", '#!/bin/bash\necho "mktemp: no space left on device" >&2\nexit 1\n')
 
 # A PATH holding everything the launcher needs and provably no tmux. The absence
 # has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
@@ -385,7 +393,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
 
 DECLINED = "declined"
 DETACHED = "detached"
-NO_TRANSPORT_RC = 2  # the launcher's own code for "no transport to deliver into"
+# One code for every way the launcher declines to finish, which is the contract
+# its usage block states: "2 it could not - argv, setup, or transport". Refused
+# argv, an unmakeable tempfile and no transport to deliver into are three routes
+# to one fact, so they assert one constant. NO_TRANSPORT_RC is that constant
+# under the name the pane-resolution cases below already read by.
+REFUSED_RC = 2
+NO_TRANSPORT_RC = REFUSED_RC
 
 
 def picked(done):
@@ -437,15 +451,9 @@ check("the tmux-absent PATH can still run the launcher",
 # handoff RECORDED from a mistyped flag and delivered to the next agent as its
 # opening prompt, so "refused" has to mean "wrote nothing" to mean anything.
 
-# A distinct fact from NO_TRANSPORT_RC, which happens to carry the same value
-# today. That one is "the launcher found nowhere to deliver into"; this one is
-# "the launcher refused the argv". Give bad argv its own code someday and this
-# constant moves while that one does not - so they are two, not one written
-# twice, and the coincidence of value is not a reason to merge them.
-BAD_ARGV_RC = 2
 
 
-def argv_case(*args):
+def argv_case(*args, path=REAL_DIRS):
     """Run the launcher with this argv against a handoff directory of its own.
 
     Returns (completed process, [handoff bodies it wrote]) - the bodies rather
@@ -457,7 +465,7 @@ def argv_case(*args):
     try:
         done = subprocess.run(
             [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
-            env={"PATH": REAL_DIRS, "HOME": workdir, "TMPDIR": workdir,
+            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
@@ -476,7 +484,7 @@ check("--help prints the usage and records nothing",
 # with a zero exit code and a reset chasing it.
 done, bodies = argv_case("--rest", "compact", "real work goes here")
 check("a mistyped flag is refused rather than recorded as the handoff",
-      done.returncode == BAD_ARGV_RC and "--rest" in done.stderr and bodies == [],
+      done.returncode == REFUSED_RC and "--rest" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # The other side of the border, and the reason it is drawn at two dashes: every
@@ -504,6 +512,16 @@ check("a multi-line message is text even when it opens with two dashes",
 done, bodies = argv_case("--", "--help")
 check("-- hands a lone two-dash word through to the handoff",
       done.returncode == 0 and len(bodies) == 1 and "\n--help\n" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The launcher's other refusal, and the reason the usage block can promise one
+# failure code. A tempfile it cannot make used to end the run on mktemp's own
+# status - a code the contract does not mention, under a message naming neither
+# this tool nor what it was trying to write. The mktemp comes before the handoff
+# is written, so nothing recorded is part of the contract here too.
+done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{REAL_DIRS}")
+check("a tempfile it cannot make is refused as the launcher, not as mktemp",
+      done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 done, bodies = argv_case("ordinary handoff text")

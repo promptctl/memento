@@ -369,6 +369,25 @@ end tell
 OSA
 }
 
+# Make a transient file, or stop and say so: _mktemp_or_exit <varname> <purpose>.
+#
+# [LAW:single-enforcer] one place decides what a tempfile failure says and what it
+# exits, rather than four guards that drift apart. Unguarded, `set -e` ended the
+# launcher on mktemp's own status — a code the usage block does not mention, under
+# a message naming neither this tool nor what it was trying to write, on the one
+# failure (a full or unwritable $TMPDIR) where the operator most needs both.
+# [LAW:no-silent-failure]
+#
+# It assigns through the caller's variable rather than printing the path, so the
+# exit below is the script's. Behind a command substitution it would only ever
+# have been a subshell's, leaving the outcome to errexit propagation.
+_mktemp_or_exit() {
+  local __var="$1" purpose="$2" path
+  path=$(mktemp -t "finalize-$purpose.XXXXXX") \
+    || { echo "finalize-session: cannot create the $purpose tempfile in ${TMPDIR:-/tmp}" >&2; exit 2; }
+  printf -v "$__var" '%s' "$path"
+}
+
 # [LAW:one-source-of-truth] the launcher's argv, written down once. The header's
 # Modes block names the worker contracts and defers here for the launcher, so
 # there is no second list of flags to drift out of date.
@@ -501,7 +520,7 @@ case "$MODE" in
     MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
       "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
-    GOALFILE=$(mktemp -t finalize-goal.XXXXXX)
+    _mktemp_or_exit GOALFILE goal
     LOGFILE=""
     # [LAW:no-silent-failure] MSGFILE is deliberately absent from this trap and
     # from every worker's: the transient files go, the handoff stays.
@@ -558,7 +577,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --worker "$TARGET" "$RESET" "$MSGFILE" "$GOALFILE" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
@@ -576,7 +595,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$MSGFILE" "$GOALFILE" "$FLAGS" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
@@ -624,7 +643,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$MSGFILE" "$GOALFILE" "$FLAGS" "$CLAUDE_PID" "$CLAUDE_BIN" "$CLAUDE_IDENT" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
