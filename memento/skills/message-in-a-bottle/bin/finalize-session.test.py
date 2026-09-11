@@ -315,6 +315,21 @@ done
 exec /usr/bin/mktemp "$@"
 ''')
 
+# A mktemp that SUCCEEDS and hands back a path nothing can be written to, for the
+# goal tempfile only. It is the write at line 557 that has to fail here, not the
+# mktemp before it, so the handoff lands on disk first and the refusal is one that
+# has something to preserve.
+BAD_GOALPATH_BIN = os.path.join(FIXTURES, "badgoalpath")
+os.mkdir(BAD_GOALPATH_BIN)
+install(BAD_GOALPATH_BIN, "mktemp", '''#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    finalize-goal.*) echo "/nonexistent-finalize-dir/goal"; exit 0 ;;
+  esac
+done
+exec /usr/bin/mktemp "$@"
+''')
+
 # A PATH holding everything the launcher needs and provably no tmux. The absence
 # has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
 # package, so "the real directories happen to have no tmux" is a fact about this
@@ -573,6 +588,43 @@ check("a tempfile it cannot make after the handoff is written says where the han
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
 
+# The two writes, which were unguarded until the helper above owned every refusal.
+# Under `set -e` a failed redirection ended the launcher on the redirection's own
+# status - 1, not the 2 the usage block promises for "it could not" - under bash's
+# message, which names bash and the path and not this tool.
+#
+# The handoff write, reached by a directory that exists and refuses writes:
+# `mkdir -p` succeeds on a directory already there, so the guard before it passes
+# and the write is the first thing to fail. Nothing is recorded, so this refusal
+# must NOT offer a preserved handoff - asserted, because an empty $RECORDED that
+# started naming a half-written file would be this fix inverted.
+rodir = tempfile.mkdtemp(prefix="finalize-ro.")
+handoffs_ro = os.path.join(rodir, "handoffs")
+os.mkdir(handoffs_ro, 0o500)
+try:
+    done = subprocess.run(
+        [LAUNCHER, "a real handoff"], text=True, capture_output=True, timeout=30,
+        env={"PATH": REAL_DIRS, "HOME": rodir, "TMPDIR": rodir,
+             "MEMENTO_HANDOFF_DIR": handoffs_ro})
+    check("a handoff it cannot write is refused as the launcher, not as the shell",
+          done.returncode == REFUSED_RC and "finalize-session:" in done.stderr
+          and "preserved at" not in done.stderr,
+          f"rc={done.returncode} err={done.stderr!r}")
+finally:
+    os.chmod(handoffs_ro, 0o700)
+    shutil.rmtree(rodir, ignore_errors=True)
+
+# The goal write, which is past the handoff write and so must name what it leaves
+# behind. The path it names is read back out of the handoff's own body rather than
+# reconstructed here: the file states where it lives, and the refusal has to agree
+# with it, so the two representations are checked against each other.
+done, bodies = argv_case("a real handoff", path=f"{BAD_GOALPATH_BIN}:{REAL_DIRS}")
+msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
+check("a carried goal it cannot write still says where the handoff is",
+      done.returncode == REFUSED_RC and len(bodies) == 1 and msgpath in done.stderr
+      and "NOT delivered" in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} msgpath={msgpath!r}")
+
 done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
@@ -687,6 +739,12 @@ check("tmux absent from PATH: this is the one true decline - nothing left to spa
 # re-asserted beside every refused-pane case below (which no longer decline).
 check("declining is reported by exit code, not by prose alone",
       done.returncode == NO_TRANSPORT_RC, f"rc={done.returncode}")
+# The decline is the documented recovery route - the one case where a handoff is
+# recorded and provably undelivered - and the notice now comes from the shared
+# refusal rather than from three echoes here, so it is worth pinning at this site
+# too: a refactor that dropped the interpolation would leave the exit code intact.
+check("and it still says the handoff is preserved, and where",
+      "NOT delivered" in done.stderr and ".md" in done.stderr, f"err={done.stderr!r}")
 
 # The promise in one case: a live pane, owned by a real process, that no ancestor
 # accounts for - and it must be refused rather than claimed for want of anything
