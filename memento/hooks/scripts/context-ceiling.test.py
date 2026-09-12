@@ -29,20 +29,25 @@ def scratch_dir():
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "context-ceiling.py")
+PLUGIN = os.path.dirname(os.path.dirname(HERE))
+LIB = os.path.join(PLUGIN, "lib")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
 # The skill the block instruction tells the agent to load before running the close-out. It
 # describes the launcher's report, so its prose reads like that report without being one.
 CONTRACT = os.path.join(os.path.dirname(os.path.dirname(LAUNCHER)), "SKILL.md")
 # [LAW:one-source-of-truth] every case drives the threshold explicitly, so the shipped
-# default lives in the hook alone and retuning it cannot break these. A fixture magnitude,
-# not a second copy of that number.
+# default lives in ceiling_config alone and retuning it cannot break these. A fixture
+# magnitude, not a second copy of that number.
 TEST_CEILING = 100_000
 USER_CEILING = f"ceiling = {TEST_CEILING}\n"
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
 SESSION = "s-1"
-CONFIG_NAME = "memento.conf"
-SHARED_AT_START = "shared-at-start.conf"
+# The file names come from the module the hook itself reads them from, so a fixture here cannot
+# drift from the files the hook looks for. [LAW:one-source-of-truth]
+sys.path.insert(0, LIB)
+from ceiling_config import CONFIG_NAME, SHARED_AT_START  # noqa: E402
+
 failures = []
 
 
@@ -391,6 +396,17 @@ code, out, err = run([user, assistant(400_000)], config_home=home,
 check("while a session starting into that broken file still fails loudly",
       code == 1 and "ceilling" in err, f"{code} {err}")
 
+# Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
+# and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
+# anywhere stating why.
+bytes_home = scratch_dir()
+with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
+    handle.write(b"ceiling = 35\xff0000\n")
+code, out, err = run([user, assistant(400_000)], config_home=bytes_home, user_conf=None,
+                     session="s-into-bytes")
+check("a shared file of bytes that are not text fails in the parser's own voice",
+      code == 1 and "not text" in err and "Traceback" not in err, f"{code} {err}")
+
 # The rule is about shared layers, so the project layer is frozen on the same terms as the user
 # one - it is shared with every other session anchored at that project.
 home, repo = scratch_dir(), scratch_dir()
@@ -616,11 +632,14 @@ check("a payload with no cwd fails loudly",
       done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
 
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
-# only exit from the block fails to execute.
+# only exit from the block fails to execute. The shared config module is copied in beside the
+# hook because a plugin root is the whole directory: the hook resolves `lib/` relative to
+# itself, so a root holding the script alone is not a root this hook can run from.
 spaced_root = os.path.join(scratch_dir(), "ceiling test")
 spaced_hook = os.path.join(spaced_root, "hooks", "scripts", os.path.basename(HOOK))
 os.makedirs(os.path.dirname(spaced_hook))
 shutil.copy(HOOK, spaced_hook)
+shutil.copytree(LIB, os.path.join(spaced_root, "lib"))
 spaced_launcher = os.path.join(spaced_root, "skills", "message-in-a-bottle",
                                "bin", "finalize-session")
 try:
