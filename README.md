@@ -246,11 +246,27 @@ instead, because a submodule's common dir is the superproject's `.git/modules/<n
 parent is git's own internal storage — a directory no walk up from the submodule ever passes
 through, so a file written there would be reported as written and govern nothing. Asked from
 the process's own directory, as that one call used to be, a shell that had `cd`'d out of the
-session's project could land the new file in the wrong repository, or refuse while the anchored
-directory was a perfectly good repo. Outside a git repository there is no root to create that
-file at, so `ceiling set project` refuses and names the anchored directory it asked about;
-`ceiling clear project` needs no repository at all, and the session scope still works. The file
-is not gitignored, and committing it is your call.
+session's project could land the new file in the wrong repository, or refuse while the
+anchored directory was a perfectly good repo. Each of those questions used to carry
+`--path-format=absolute` too, a flag git only learned in 2.31, and `git rev-parse` answers an
+option it does not know by printing the option back and exiting 0 — so an older git did not
+refuse the command, it handed it the flag as the first line of the answer. The command built a
+path out of that, created a `.promptctl` directory named after a flag in whatever directory
+the process stood in, wrote the ceiling into it and reported it as written: another file
+nothing ever walks through. The flag is gone, and an answer is joined to the anchor and
+resolved instead, which is what the flag was doing — a relative answer from `rev-parse` is
+relative to the directory git was asked from, and that is the anchor — so the same paths come
+back, now on every git these questions have existed in. An answer equal to the question is no
+answer at all, since handing the question back is exactly how git says it does not know it, so
+the command refuses and names the question the git on your `PATH` does not understand rather
+than building a path from it. Outside a git repository there is no root to create that file
+at, so `ceiling set project` refuses, naming the anchored directory it asked git about and
+quoting git's own reason. It used to say `<directory> is not inside a git repository` and
+assert that, whatever git had actually complained about; the real case now reads as git wrote
+it, `fatal: not a git repository (or any of the parent directories): .git`, and the remedies —
+move this session's own ceiling instead, or write the project config by hand — come as advice
+rather than as a diagnosis. `ceiling clear project` needs no repository at all, and the
+session scope still works. The file is not gitignored, and committing it is your call.
 
 Two sessions moving the project's ceiling at once get a refusal rather than a lost write. The
 project layer is shared — every session in the checkout reads it, and since this command exists
@@ -283,12 +299,22 @@ cannot read at all is still one it can take away: it prints what it could not re
 the file. It used to die validating the file it was asked to delete, which left such a layer —
 the gate already off for that session, a stopped Stop hook being non-blocking — removable by
 nothing but hand; and the tolerance that fixed that covered only a grammar it could not parse, a
-key written twice or a missing `=`, so a file holding bytes that are not text, or one whose mode
-forbids opening it, still crashed the one command that exists to remove it. Unreadable is the
-class now, and all of it is reported the one tolerant way. `ceiling set` replaces such a layer
-too, where the request does not need what is beneath: a count or `off` states a ceiling outright
-and never reads the layer it overwrites, while a signed adjustment has no base to add to and
-refuses. Anywhere a ceiling is resolved, a layer that cannot be read is still refused loudly.
+key written twice or a missing `=`, so a file whose mode forbids opening it, or one holding
+bytes that are not text, still crashed the one command that exists to remove it. Unreadable is
+the class now, and all of it is reported the one tolerant way. Bytes that are not text are
+judged a level up, in the reader the hook and this command both read their layers through,
+where every other judgement that a file is not this format is already made: exit 1, and
+`memento config: <path> holds bytes that are not text, so no line of it can set a ceiling`.
+Catching that case in `clear` alone, as the round before this one did, left it raising a
+Python traceback everywhere else — in this command's report, on every path that resolves a
+ceiling rather than replacing a layer, and in the Stop hook, where it cost the most: the gate
+off, as a stopped hook always leaves it, and a traceback saying none of that. The hook refuses
+in that voice now, naming the file, and `clear` still takes such a file away, because it
+arrives there as the same refusal every unparseable layer arrives as. `ceiling set` replaces
+such a layer too, where the request does not need what is beneath: a count or `off` states a
+ceiling outright and never reads the layer it overwrites, while a signed adjustment has no
+base to add to and refuses. Anywhere a ceiling is resolved, a layer that cannot be read is
+still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push
