@@ -68,7 +68,7 @@ def world(user_conf=None, project_conf=None, session_conf=None, recorded=None, g
     return home, repo
 
 
-def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None):
+def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None, shadowing=None):
     """Invoke the command as the skill invokes it. Every ambient config is stripped: a developer's
     own ceiling or CLAUDE_PROJECT_DIR must not decide a test.
 
@@ -83,6 +83,8 @@ def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None):
         env["CLAUDE_PROJECT_DIR"] = anchor
     if pythonpath is not None:
         env["PYTHONPATH"] = pythonpath
+    if shadowing is not None:
+        env["PATH"] = f"{shadowing}:{env.get('PATH', '')}"
     done = subprocess.run([sys.executable, CLI, *argv], text=True, capture_output=True,
                           env=env, cwd=cwd)
     return done.returncode, done.stdout, done.stderr
@@ -132,6 +134,30 @@ def meddling_writer(text, target=None):
                      f"    (_target or path).write_text({text!r})\n"
                      "    return partial\n"
                      "ceiling_config.staged = meddled\n")
+    return directory
+
+
+ECHOING_GIT = """#!/bin/sh
+# `rev-parse` answers an option it does not know by printing it back and exiting 0, so this is every
+# question asked of a git too old for it.
+for argument in "$@"; do
+  case "$argument" in --*) echo "$argument" ;; esac
+done
+exit 0
+"""
+
+
+def stub_git(behaviour):
+    """A directory holding a `git` that behaves as named, for placing ahead of a child's PATH.
+
+    Which git a session runs is not something a case can install, and the behaviour that matters
+    here is exactly stateable without one. [LAW:verifiable-goals] a case that needed an old git on
+    the machine is a case nobody runs."""
+    directory = scratch_dir()
+    standing_in = os.path.join(directory, "git")
+    with open(standing_in, "w") as handle:
+        handle.write(behaviour)
+    os.chmod(standing_in, 0o755)
     return directory
 
 
@@ -337,11 +363,25 @@ check("a project move starts from the user layer where that is what stands benea
 
 home, repo = world(git=False)
 code, out, err = run(home, repo, "set", "project", "+100_000")
+# git's own words, not a paraphrase of them: the refusal quotes the reason rather than asserting a
+# cause this command cannot check.
 check("outside a git repository a project move refuses rather than guessing a root",
-      code == 1 and "not inside a git repository" in err, f"{code} {err}")
+      code == 1 and "fatal: not a git repository" in err, f"{code} {err}")
 check("and writes nothing, including the session layer",
       project_conf(repo) is None and session_conf(home) is None,
       f"{project_conf(repo)} {session_conf(home)}")
+
+# A git too old for one of these questions does not refuse either: `rev-parse` prints an option it
+# does not know back and exits 0, so the answer is the question, and a path built out of that is a
+# `.promptctl` directory named after a flag - written, reported, walked through by nothing.
+home, repo = world()
+code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(ECHOING_GIT))
+check("a git that hands a question back has not answered it",
+      code == 1 and "by handing it back" in err, f"{code} {err}")
+check("and no config lands in a directory named after a flag",
+      project_conf(repo) is None and session_conf(home) is None
+      and [name for name in os.listdir(repo) if name.startswith("--")] == [],
+      f"{project_conf(repo)} {sorted(os.listdir(repo))}")
 
 # The project is the session's project, not whichever directory something last ran `cd` into.
 # Every other case here runs with the anchor and the working directory in the same place, which is
@@ -479,6 +519,15 @@ code, out, err = run(home, repo, "clear", "session")
 check("a layer whose bytes are not text is one this command can still take away",
       code == 0 and not os.path.exists(bad_bytes), f"{code} {err}")
 check("and it says what it could not read on the way out", "unreadable" in out, out)
+
+# Every reader but `held` reaches the parser directly - the report's own layer lines among them - so
+# a layer nobody is removing has to refuse in the parser's voice rather than as a traceback.
+home, repo = world()
+with open(os.path.join(home, CONFIG_NAME), "wb") as handle:
+    handle.write(b"ceiling = 35\xff0000\n")
+code, out, err = run(home, repo, "show")
+check("a layer of bytes that are not text refuses where a ceiling is resolved from it",
+      code == 1 and "not text" in err and "Traceback" not in err, f"{code} {err}")
 
 home, repo = world(session_conf="ceiling = 400000\n")
 unopenable = os.path.join(home, "sessions", SESSION, CONFIG_NAME)

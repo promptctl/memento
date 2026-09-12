@@ -71,23 +71,42 @@ def this_session():
 
 
 def asked_of_git(anchor, question):
-    """One path git answers about the checkout the anchor stands in, empty where it has no answer.
+    """One path git answers about the checkout the anchor stands in, or None where it has no answer.
 
     Asked from the anchor and not from this process's own directory, which is the same reason
     every other lookup here takes one: a `cd` anywhere in the session must not decide which
     repository receives the file. [LAW:one-source-of-truth] an anchor that is not a directory at
-    all raises, and lands in the arm below with the rest of git's unavailability."""
+    all raises, and lands in the arm below with the rest of git's unavailability.
+
+    The answer is joined to the anchor rather than asked for absolute. `rev-parse` answers an option
+    it does not know by printing it back and exiting 0, and `--path-format` is one git only learned
+    in 2.31 - so asking an older one for absolute paths did not refuse, it returned the flag as the
+    first line of the answer, and a path built from that is a `.promptctl` directory named after a
+    flag, reported as written and walked through by nothing. [LAW:no-silent-failure] A relative
+    answer is relative to the directory git was asked from, which is the anchor, so the join says
+    what the flag said and says it on every git since these questions existed.
+
+    That echo is also why an answer is parsed rather than trusted: a question handed back is not a
+    path, and no caller downstream can tell the difference. [LAW:parse-dont-validate]"""
     try:
-        done = subprocess.run(["git", "rev-parse", "--path-format=absolute", question],
+        done = subprocess.run(["git", "rev-parse", question],
                               capture_output=True, text=True, cwd=anchor)
     except OSError as failure:
         sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
     if done.returncode != 0:
-        sys.exit(f"ceiling: {anchor} is not inside a git repository, so there is no project "
-                 f"root to write a project ceiling to. Move this session's own ceiling instead, "
-                 f"or write {PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever directory "
-                 f"you mean by the project.")
-    return done.stdout.strip()
+        sys.exit(f"ceiling: git could not say where the project is, asked from {anchor}: "
+                 f"{done.stderr.strip()}\nIf that is because this is not a git repository, there "
+                 f"is no root to write a project ceiling to: move this session's own ceiling "
+                 f"instead, or write {PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever "
+                 f"directory you mean by the project.")
+    answered = [line for line in done.stdout.splitlines() if line.strip()]
+    if question in answered:
+        sys.exit(f"ceiling: the git on this PATH answers `{question}` by handing it back, which "
+                 f"means it does not know that question and cannot say which repository a new "
+                 f"project config belongs in. Upgrade git, or write "
+                 f"{PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever directory you mean by "
+                 f"the project.")
+    return (Path(anchor) / answered[0]).resolve() if answered else None
 
 
 def repository_root(anchor):
@@ -106,8 +125,8 @@ def repository_root(anchor):
     directory no walk up from the submodule ever passes through. A file written there would be
     reported as written and would govern nothing. [LAW:no-silent-failure]"""
     if asked_of_git(anchor, "--show-superproject-working-tree"):
-        return Path(asked_of_git(anchor, "--show-toplevel"))
-    return Path(asked_of_git(anchor, "--git-common-dir")).parent
+        return asked_of_git(anchor, "--show-toplevel")
+    return asked_of_git(anchor, "--git-common-dir").parent
 
 
 def project_write_site(anchor):
@@ -207,14 +226,15 @@ def held(path):
     borrowed and printed rather than worked around with a second parser, so there is still one
     grammar. [LAW:one-source-of-truth]
 
-    Unreadable is wider than unparseable and the difference does not reach here: bytes that are not
-    text, and a mode that forbids the read, stop that reader as surely as a key written twice does,
-    and a file in any of those states is a file `clear` exists to take away. Each arrives as a
-    different exception and none of them is an answer, so all of them are reported the one way -
-    `UnicodeDecodeError` among them, a `ValueError` reached through neither of the others."""
+    Unreadable is wider than unparseable and the difference does not reach here: a mode that forbids
+    the read stops that reader as surely as a key written twice does, and a file in either state is
+    one `clear` exists to take away. The two arrive as different exceptions and neither is an
+    answer, so both are reported the one way. Bytes that are not text need no third arm - that is
+    the reader's own judgement about the format, and it arrives here as the refusal every other
+    shape that is not the format arrives as. [LAW:single-enforcer]"""
     try:
         found = ceiling_in(path)
-    except (SystemExit, OSError, UnicodeDecodeError) as refusal:
+    except (SystemExit, OSError) as refusal:
         return f"an unreadable setting - {refusal}"
     return found.text if found else None
 

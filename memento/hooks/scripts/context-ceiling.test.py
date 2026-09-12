@@ -396,6 +396,17 @@ code, out, err = run([user, assistant(400_000)], config_home=home,
 check("while a session starting into that broken file still fails loudly",
       code == 1 and "ceilling" in err, f"{code} {err}")
 
+# Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
+# and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
+# anywhere stating why.
+bytes_home = scratch_dir()
+with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
+    handle.write(b"ceiling = 35\xff0000\n")
+code, out, err = run([user, assistant(400_000)], config_home=bytes_home, user_conf=None,
+                     session="s-into-bytes")
+check("a shared file of bytes that are not text fails in the parser's own voice",
+      code == 1 and "not text" in err and "Traceback" not in err, f"{code} {err}")
+
 # The rule is about shared layers, so the project layer is frozen on the same terms as the user
 # one - it is shared with every other session anchored at that project.
 home, repo = scratch_dir(), scratch_dir()

@@ -9,9 +9,10 @@ which Claude Code treats as non-blocking, so the gate silently stops running for
 whose file holds it. `write_ceiling` emits only what `ceiling_in` accepts and reads back what it
 wrote, so the writer cannot guess the grammar wrong - there is nothing left to guess.
 
-The failure arm is the process. A file that is not this format exits 1 naming the file and the
-line, which is what both callers want at the moment a ceiling is unreadable: a ceiling you
-believe you set and did not is worse than no ceiling. [LAW:no-silent-failure]
+The failure arm is the process. A file that is not this format exits 1 naming the file, and the
+line wherever there is a line to name, which is what both callers want at the moment a ceiling is
+unreadable: a ceiling you believe you set and did not is worse than no ceiling.
+[LAW:no-silent-failure]
 """
 
 import collections
@@ -49,12 +50,33 @@ CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
 Written = collections.namedtuple("Written", "source text")
 
 
+def lines_in(path):
+    """One config file's lines, and none for a path no file stands at.
+
+    A file of bytes that are not text is a file that is not this format, answered here rather than
+    left to each caller, because it is the same judgement `ceiling_in` makes about every other shape
+    that is not this format and there is one place that judgement belongs. [LAW:single-enforcer] The
+    hook reads its layers through here too, and a traceback out of a Stop hook is a gate Claude Code
+    treats as non-blocking - off, for a reason nothing states. [LAW:no-silent-failure]
+
+    What the filesystem refuses is deliberately not caught: no permission and no such device are not
+    about the format, and the caller that can act on one - the command about to remove the file - is
+    the one that catches it."""
+    if not path.exists():
+        return []
+    try:
+        return path.read_text().splitlines()
+    except UnicodeDecodeError as refusal:
+        sys.exit(f"memento config: {path} holds bytes that are not text, so no line of it can set "
+                 f"a ceiling: {refusal}. Fix it or remove it.")
+
+
 def ceiling_in(path):
     """The ceiling one config file sets, or None. [LAW:no-silent-failure] a line that is not one
     exits here: a key that reads as a no-op is precisely the ceiling its author believes they
     set and did not."""
     found = None
-    for number, line in enumerate(path.read_text().splitlines() if path.exists() else [], 1):
+    for number, line in enumerate(lines_in(path), 1):
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
