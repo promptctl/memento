@@ -37,8 +37,8 @@ LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
 # describes the launcher's report, so its prose reads like that report without being one.
 CONTRACT = os.path.join(os.path.dirname(os.path.dirname(LAUNCHER)), "SKILL.md")
 # [LAW:one-source-of-truth] every case drives the threshold explicitly, so the shipped
-# default lives in the hook alone and retuning it cannot break these. A fixture magnitude,
-# not a second copy of that number.
+# default lives in ceiling_config alone and retuning it cannot break these. A fixture
+# magnitude, not a second copy of that number.
 TEST_CEILING = 100_000
 USER_CEILING = f"ceiling = {TEST_CEILING}\n"
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000

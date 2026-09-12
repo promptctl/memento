@@ -15,6 +15,8 @@ believe you set and did not is worse than no ceiling. [LAW:no-silent-failure]
 """
 
 import collections
+import contextlib
+import functools
 import math
 import os
 import re
@@ -39,6 +41,7 @@ PROJECT_CONFIG_DIR = ".promptctl"
 SHARED_AT_START = "shared-at-start.conf"
 CEILING_KEY = "ceiling"
 DISABLING_WORD = "off"
+PROJECT_VARIABLE = "CLAUDE_PROJECT_DIR"
 # [0-9] rather than \d: `str.isdigit` was true of characters `int` then refused, so the guard
 # and the conversion disagreed. Underscores group digits as Python's own literals do.
 CEILING_RE = re.compile(r"(?P<sign>[+-]?)(?P<digits>[0-9]+(?:_[0-9]+)*)\Z")
@@ -69,6 +72,17 @@ def ceiling_in(path):
     return found
 
 
+def anchored(fallback):
+    """The directory the project layer is looked up from, for a caller that knows where it would
+    stand if the session named no project.
+
+    The hook is handed a directory by Claude Code and this command has only its own, which is the
+    whole of what differs between them - so that is the argument, and the part that must not differ
+    is here. [LAW:one-source-of-truth] a ceiling that moved because something ran `cd` would be a
+    ceiling nobody set, and two copies of this line agreeing today is not the same as one line."""
+    return os.environ.get(PROJECT_VARIABLE) or fallback
+
+
 def project_file(anchor):
     """The project config in force at or above a directory, or None.
 
@@ -95,7 +109,13 @@ def project_ceiling(anchor):
 def parse_ceiling(written):
     """One written ceiling, as the move it makes on the ceiling beneath it. The three things a
     person can write - a count, an adjustment, `off` - leave here as one thing, so the fold
-    applies them in order with nothing left to dispatch on. [LAW:dataflow-not-control-flow]"""
+    applies them in order with nothing left to dispatch on. [LAW:dataflow-not-control-flow]
+
+    What is beneath arrives as a thunk, and only the arm that has a use for it calls one: a count
+    and `off` state a ceiling outright, so a caller replacing a layer with either of them never has
+    to read the layer it is replacing - which matters because reading it can fail. The arms already
+    differ in whether the number beneath is load-bearing; this is that difference made true of the
+    work as well as of the arithmetic."""
     if written.text.lower() == DISABLING_WORD:
         return lambda beneath: math.inf
     shape = CEILING_RE.match(written.text)
@@ -107,7 +127,7 @@ def parse_ceiling(written):
     if not shape.group("sign"):
         return lambda beneath: magnitude
     moved = magnitude if shape.group("sign") == "+" else -magnitude
-    return lambda beneath: beneath + moved
+    return lambda beneath: beneath() + moved
 
 
 def render(ceiling):
@@ -136,7 +156,7 @@ def session_directory(session_id):
     return directory
 
 
-def folded(layers, beneath=DEFAULT_CEILING):
+def folded(layers, beneath=lambda: DEFAULT_CEILING):
     """Every written layer's move applied to the ceiling beneath it, in order.
 
     [LAW:single-enforcer] a resolved ceiling is checked for sense here, where every fold passes,
@@ -144,15 +164,21 @@ def folded(layers, beneath=DEFAULT_CEILING):
     reaching the record is unrecoverable: `-50000` is written, read back as an *adjustment*, and
     resolves to 200,000 - a positive ceiling nobody set, in place of the loud exit. The format
     cannot express a negative absolute and is never asked to, because no layer may resolve to
-    one."""
+    one.
+
+    `beneath` is asked for rather than given, and the fold is assembled before it runs, so a stack
+    of layers whose topmost states a ceiling outright never asks at all. A caller writing over the
+    very file its base would come from is the reason: for `400_000` there is nothing it needs from
+    that file, and an unreadable one must not stop it from replacing it."""
     ceiling = beneath
     for setting in layers:
-        ceiling = parse_ceiling(setting)(ceiling)
-    if ceiling < 0:
-        sys.exit(f"memento config: a ceiling of {ceiling:,} tokens is set by "
+        ceiling = functools.partial(parse_ceiling(setting), ceiling)
+    resolved = ceiling()
+    if resolved < 0:
+        sys.exit(f"memento config: a ceiling of {resolved:,} tokens is set by "
                  f"{', then '.join(one.source for one in layers)}, and a count of tokens is "
                  f"never negative.")
-    return ceiling
+    return resolved
 
 
 def live_shared(anchor):
@@ -173,8 +199,8 @@ def staged(path, ceiling):
 
     Apart from `committed` so that a caller writing several files that have to state one number
     can stage all of them before any of them lands. The failures that happen - no permission, no
-    space, a parent that cannot be made - happen here, where nothing is in place yet and so
-    nothing has to be undone."""
+    space, a parent that cannot be made - happen here, where nothing is in place yet; `staging`
+    coordinates more than one of these and owns what a half-finished pass leaves behind."""
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f"{path.name}.{os.getpid()}")
     partial.write_text(f"{CEILING_KEY} = {render(ceiling)}\n")
@@ -194,6 +220,28 @@ def committed(partial, path):
     text the reader above accepts."""
     os.replace(partial, path)
     return ceiling_in(path)
+
+
+@contextlib.contextmanager
+def staging(paths, ceiling):
+    """Every path staged for one ceiling, and nothing staged left behind.
+
+    The pass that can fail is the staging one, so it finishes before the caller commits anything:
+    files that have to state one number cannot end up stating two. What that leaves to account for
+    is the partials themselves, and two different halts leave one - a staging pass that raises part
+    way through, and a commit pass that stops with partials still waiting. Both are the same
+    question asked of `unlink(missing_ok=True)`, because a partial `committed` has already consumed
+    is simply not there, so one `finally` answers both and a failure litters nothing.
+    [LAW:no-silent-failure] a stray `memento.conf.<pid>` beside a project's config is invisible to
+    every reader here and to the person whose repo it is in."""
+    partials = []
+    try:
+        for path in paths:
+            partials.append((path, staged(path, ceiling)))
+        yield partials
+    finally:
+        for _, partial in partials:
+            partial.unlink(missing_ok=True)
 
 
 def write_ceiling(path, ceiling):

@@ -108,6 +108,39 @@ def aged_argparse():
     return directory
 
 
+def meddling_writer(text):
+    """A directory that, on a child's PYTHONPATH, has another writer land on each destination
+    between the read the command compares against and the write it is about to make.
+
+    The command's check is against a race, and a race left to chance is a case that passes by
+    running too fast. The staging pass is the one seam the two reads straddle, so patching it makes
+    the collision happen on every run instead of almost never. [LAW:verifiable-goals]"""
+    directory = scratch_dir()
+    with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
+        handle.write(f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\n"
+                     "import ceiling_config\n"
+                     "_staged = ceiling_config.staged\n"
+                     "def meddled(path, ceiling):\n"
+                     "    partial = _staged(path, ceiling)\n"
+                     f"    path.write_text({text!r})\n"
+                     "    return partial\n"
+                     "ceiling_config.staged = meddled\n")
+    return directory
+
+
+def repo_with_commit(path):
+    """A repository holding one commit, which is what adding a worktree or a submodule needs."""
+    os.makedirs(path, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "master", path], check=True, capture_output=True)
+    for key, value in (("user.email", "test@example.invalid"), ("user.name", "ceiling test")):
+        subprocess.run(["git", "config", key, value], cwd=path, check=True, capture_output=True)
+    with open(os.path.join(path, "README"), "w") as handle:
+        handle.write("x\n")
+    subprocess.run(["git", "add", "README"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "first"], cwd=path, check=True, capture_output=True)
+    return path
+
+
 def gate(home, repo, tokens, session=SESSION):
     """The real Stop hook, at a token count, against the same layers. Returns (verdict, ceiling)
     read from its log line - the hook's own statement of which number won."""
@@ -233,6 +266,19 @@ check("a negative adjustment is a value and not an option on every interpreter",
 code, out, err = run(home, repo, "set", "session", pythonpath=aged_argparse())
 check("and a value left off there is still an invocation error rather than a silent default",
       code == 2, f"{code} {err}")
+
+# The one token that can stand in the value slot and not be a value. Quoted along with the rest, a
+# request for help is answered by a complaint about a ceiling spelled `-h`.
+home, repo = world()
+code, out, err = run(home, repo, "set", "project", "-h")
+check("asking for help where the value goes is answered with help, not with a grammar error",
+      code == 0 and "off|N|+N|-N" in out, f"{code} {out} {err}")
+check("and that answer writes nothing",
+      project_conf(repo) is None and session_conf(home) is None,
+      f"{project_conf(repo)} {session_conf(home)}")
+code, out, err = run(home, repo, "set", "--help", pythonpath=aged_argparse())
+check("the same request one token earlier still reaches argparse",
+      code == 0 and "{project,session}" in out, f"{code} {out} {err}")
 
 # --- set project ------------------------------------------------------------------------
 
@@ -414,6 +460,101 @@ home, repo = world(user_conf="ceiling = 400000\nceiling = 500000\n")
 code, out, err = run(home, repo, "show")
 check("a malformed layer is still refused wherever a ceiling is resolved from it",
       code == 1 and "twice" in err, f"{code} {err}")
+
+# --- a layer replaced, rather than read ---------------------------------------------------
+
+# A count states a ceiling outright, so the layer it replaces is one it never has to read. `clear`
+# was given that reasoning last round and `set` was not, which left a broken layer fixable only by
+# removing it first.
+BROKEN = "ceiling = 400000\nceiling = 500000\n"
+home, repo = world(session_conf=BROKEN)
+code, out, err = run(home, repo, "set", "session", "400_000")
+check("an absolute move replaces a layer too broken to parse instead of dying on it",
+      code == 0 and session_conf(home) == "ceiling = 400000\n", f"{code} {out} {err}")
+
+home, repo = world(session_conf=BROKEN)
+code, out, err = run(home, repo, "set", "session", "off")
+check("and off replaces it too, for the same reason", code == 0 and session_conf(home) ==
+      "ceiling = off\n", f"{code} {out} {err}")
+
+# An adjustment is the case that genuinely needs the number beneath, and a file that does not parse
+# has none to give. Reading the default instead would resolve to a ceiling nobody asked for.
+home, repo = world(session_conf=BROKEN)
+code, out, err = run(home, repo, "set", "session", "+50_000")
+check("an adjustment over the same file still refuses, having no base to add to",
+      code == 1 and "twice" in err, f"{code} {err}")
+check("and leaves that file exactly as it found it", session_conf(home) == BROKEN,
+      str(session_conf(home)))
+
+# The project layer is the shared one, and the same asymmetry applies to it.
+home, repo = world(project_conf=BROKEN)
+code, out, err = run(home, repo, "set", "project", "300_000")
+check("an absolute project move replaces a malformed project layer",
+      code == 0 and project_conf(repo) == "ceiling = 300000\n", f"{code} {out} {err}")
+
+# --- a destination that moved under the command -------------------------------------------
+
+# The project layer is shared, and since this command exists two sessions can adjust it at once.
+# Both would read the same number beneath and the later write would drop the earlier one, with each
+# report truthful about its own view and neither mentioning the loss.
+home, repo = world(session_conf="ceiling = 900000\n")
+code, out, err = run(home, repo, "set", "session", "400_000",
+                     pythonpath=meddling_writer("ceiling = 777000\n"))
+check("a destination that changed since it was read stops the write",
+      code == 1 and "changed while" in err, f"{code} {out} {err}")
+check("and the change that landed there is the one left standing",
+      session_conf(home) == "ceiling = 777000\n", str(session_conf(home)))
+
+# --- nothing staged left behind -----------------------------------------------------------
+
+# The staging pass can fail on its second file, and by then the first file's partial is real. A
+# `memento.conf.<pid>` is read by nothing here, which is exactly why leaving one would be invisible.
+home, repo = world()
+sessions = os.path.join(home, "sessions", SESSION)
+os.makedirs(sessions)
+os.chmod(sessions, 0o500)
+try:
+    code, out, err = run(home, repo, "set", "project", "300_000")
+finally:
+    os.chmod(sessions, 0o700)
+left = sorted(os.listdir(os.path.join(repo, PROJECT_CONFIG_DIR)))
+check("a staging pass that cannot finish leaves nothing of itself behind",
+      code != 0 and left == [], f"{code} {left}")
+check("and none of the move is in place", project_conf(repo) is None, str(project_conf(repo)))
+
+# --- which checkout the project is --------------------------------------------------------
+
+# A worktree's project is the checkout it belongs to: a file at the worktree's own root would
+# govern it only until that worktree is deleted.
+home = scratch_dir()
+main = repo_with_commit(os.path.join(scratch_dir(), "main"))
+linked = os.path.join(scratch_dir(), "linked")
+subprocess.run(["git", "worktree", "add", "-q", linked, "-b", "side"], cwd=main, check=True,
+               capture_output=True)
+code, out, err = run(home, linked, "set", "project", "300_000")
+check("a project move from a linked worktree writes the checkout it belongs to",
+      code == 0 and project_conf(main) == "ceiling = 300000\n", f"{code} {out} {err}")
+check("and leaves no second project file at the worktree's own root",
+      project_conf(linked) is None, str(project_conf(linked)))
+
+# A submodule's git dir is the superproject's `.git/modules/<name>`, whose parent is inside git's
+# own storage. No walk up from the submodule passes through there, so a file written there would be
+# reported as written and would govern nothing.
+home = scratch_dir()
+superproject = repo_with_commit(os.path.join(scratch_dir(), "super"))
+vendored = repo_with_commit(os.path.join(scratch_dir(), "vendored"))
+subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", vendored,
+                "vendor"], cwd=superproject, check=True, capture_output=True)
+inside = os.path.join(superproject, "vendor")
+code, out, err = run(home, inside, "set", "project", "300_000")
+check("a project move inside a submodule writes the submodule's own root",
+      code == 0 and project_conf(inside) == "ceiling = 300000\n", f"{code} {out} {err}")
+check("and writes nothing into the superproject's git storage",
+      not os.path.exists(os.path.join(superproject, ".git", "modules", PROJECT_CONFIG_DIR)),
+      os.path.join(superproject, ".git", "modules", PROJECT_CONFIG_DIR))
+verdict, enforced = gate(home, inside, 310_000, session="sub-1")
+check("and the hook reads that file back from inside the submodule",
+      enforced == 300_000 and verdict == "block", f"{verdict} {enforced}")
 
 # --- the gate reads what this wrote -----------------------------------------------------
 

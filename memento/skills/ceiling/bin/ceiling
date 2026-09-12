@@ -13,10 +13,11 @@ A scope is data, not a branch: it names the ceiling a move starts from, the file
 and the files a clear takes away, and every command runs the same steps over whatever that data
 says. [LAW:dataflow-not-control-flow]
 
-Exit codes, which are a contract: 0 the files now say what this printed; 1 a config file or a
-resolved ceiling is not usable, named with the file and line to go fix - any `wrote` line already
-printed still stands, because the unusable file can be a layer this command never touched; 2 the
-invocation was wrong.
+Exit codes, which are a contract: 0 the files now say what this printed; 1 the ceiling asked for
+cannot be written or cannot be read back - a config file or a resolved ceiling that is not usable,
+named with the file and line to go fix, or the session or repository this needs not being there -
+and any `wrote` line already printed still stands, because the unusable file can be a layer this
+command never touched; 2 the line as typed does not parse, which is argparse's own code for it.
 """
 
 import argparse
@@ -32,18 +33,18 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import (CONFIG_NAME, PROJECT_CONFIG_DIR, SHARED_AT_START,  # noqa: E402
-                            USER_CONFIG, Written, ceiling_in, committed, folded, in_force,
-                            live_shared, project_file, session_directory, shared_unrecorded,
-                            staged)
+                            USER_CONFIG, Written, anchored, ceiling_in, committed, folded,
+                            in_force, live_shared, project_file, session_directory,
+                            shared_unrecorded, staging)
 
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
-# The same anchor the hook prefers, so the project this command writes for is the project the hook
-# reads for. [LAW:one-source-of-truth] a ceiling that moved because something ran `cd` would be a
-# ceiling nobody set.
-ANCHOR = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+ANCHOR = anchored(os.getcwd())
 # `set` is the one command that takes a value, third token of the line, and that value is the one
 # token of this grammar that may begin with `-`.
 VALUE_TAKING, VALUE_AT = "set", 2
+# The tokens that can stand in the value slot and not be a value: a request for help is a request
+# for help wherever it is typed.
+HELP_FLAGS = ("-h", "--help")
 # What a move starts from, the files that receive it, and the files a clear takes away.
 Scope = collections.namedtuple("Scope", "beneath writes clears")
 
@@ -67,21 +68,15 @@ def this_session():
     return session_directory(named)
 
 
-def repository_root(anchor):
-    """The root of the checkout the anchor stands in.
-
-    Asked of git rather than assembled from directory names, and asked for the *common* dir so a
-    worktree answers with the checkout it belongs to: a file at a worktree's own root governs that
-    worktree until it is deleted, and the project is what the person meant. That root is also the
-    one directory every subdirectory and every nested worktree of this checkout walks up through,
-    which is what makes the hook find it from wherever a later session stands.
+def asked_of_git(anchor, question):
+    """One path git answers about the checkout the anchor stands in, empty where it has no answer.
 
     Asked from the anchor and not from this process's own directory, which is the same reason
     every other lookup here takes one: a `cd` anywhere in the session must not decide which
     repository receives the file. [LAW:one-source-of-truth] an anchor that is not a directory at
     all raises, and lands in the arm below with the rest of git's unavailability."""
     try:
-        done = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        done = subprocess.run(["git", "rev-parse", "--path-format=absolute", question],
                               capture_output=True, text=True, cwd=anchor)
     except OSError as failure:
         sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
@@ -90,7 +85,27 @@ def repository_root(anchor):
                  f"root to write a project ceiling to. Move this session's own ceiling instead, "
                  f"or write {PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever directory "
                  f"you mean by the project.")
-    return Path(done.stdout.strip()).parent
+    return done.stdout.strip()
+
+
+def repository_root(anchor):
+    """The root of the checkout the anchor stands in, which is where a project ceiling goes when
+    no project config stands yet.
+
+    Two checkouts can be standing at one anchor and they want different roots, so which one this is
+    is git's question to answer rather than a shape to read off the path. A linked worktree wants
+    the checkout it belongs to, which is what the *common* dir names: a file at a worktree's own
+    root would govern that worktree until it is deleted, and the project is what the person meant.
+    That root is also the one directory every subdirectory and every nested worktree walks up
+    through, which is what makes the hook find it from wherever a later session stands.
+
+    A submodule wants its own root, and the common dir is no route to it: the superproject keeps a
+    submodule's git dir at `.git/modules/<name>`, whose parent is inside git's own storage - a
+    directory no walk up from the submodule ever passes through. A file written there would be
+    reported as written and would govern nothing. [LAW:no-silent-failure]"""
+    if asked_of_git(anchor, "--show-superproject-working-tree"):
+        return Path(asked_of_git(anchor, "--show-toplevel"))
+    return Path(asked_of_git(anchor, "--git-common-dir")).parent
 
 
 def project_write_site(anchor):
@@ -208,15 +223,31 @@ def move(scope, request, directory, anchor):
     one number: a failure that can happen - no permission, no space - happens in the staging pass,
     where nothing is in place yet and the command exits having moved nothing. What each file held
     is printed as it is replaced, so a ceiling set for this session alone cannot vanish under a
-    project-scoped move with no record of what it was."""
-    beneath = scope.beneath(directory, anchor)
-    asked = Written(f"the {request!r} you asked for, on top of {tokens(beneath)}", request)
-    ceiling = folded([asked], beneath=beneath)
-    staging = [(path, held(path), staged(path, ceiling))
-               for path in scope.writes(directory, anchor)]
-    for path, standing, partial in staging:
-        replaced = f" (replacing {standing})" if standing else ""
-        print(f"wrote {committed(partial, path).source}{replaced}")
+    project-scoped move with no record of what it was.
+
+    What each file held is also read a second time, and a file that no longer holds it stops the
+    write. The project layer is shared - every session in the checkout reads it and, since this
+    command exists, can write it - so two sessions adjusting it at once would otherwise both start
+    from the same number and the later one would quietly drop the earlier one's change. A lock would
+    bind only the writers that take it, and this file is documented as one a person may edit by
+    hand, where no lock is taken; asking whether the number is still the one that was read covers
+    that writer too. [LAW:verifiable-goals] Every destination is checked before any is committed, so
+    a refusal cannot leave one file written and the other not."""
+    asked = Written(f"the {request!r} you asked for", request)
+    destinations = scope.writes(directory, anchor)
+    standing = {path: held(path) for path in destinations}
+    ceiling = folded([asked], beneath=lambda: scope.beneath(directory, anchor))
+    with staging(destinations, ceiling) as partials:
+        for path in destinations:
+            now = held(path)
+            if now != standing[path]:
+                sys.exit(f"ceiling: {path} changed while this command was working out what to "
+                         f"write - it held {standing[path] or 'no ceiling'} and now holds "
+                         f"{now or 'no ceiling'}. Nothing was written, so that change stands; "
+                         f"run this again if you still mean to move it.")
+        for path, partial in partials:
+            replaced = f" (replacing {standing[path]})" if standing[path] else ""
+            print(f"wrote {committed(partial, path).source}{replaced}")
 
 
 def clear(scope, directory, anchor):
@@ -245,10 +276,17 @@ def as_one_value(argv):
     `-50_000` - the underscored form this grammar documents and accepts - was taken for an option,
     the value never reached `parse_ceiling`, and the command exited 2 on a usage error instead of
     moving the ceiling down. `--` states the same thing in a way every version of argparse and
-    every shell already agrees about, and it goes in only ahead of the one slot that holds a value,
-    so `-h` still reaches argparse everywhere else. [LAW:parse-dont-validate] the ambiguity is
-    settled before the parse rather than recovered from after it."""
-    return [*argv[:VALUE_AT], "--", *argv[VALUE_AT:]] if argv[:1] == [VALUE_TAKING] else argv
+    every shell already agrees about, and it goes in only ahead of the slot that holds a value.
+
+    Except that one token standing there is not a value: `set <scope> -h` is someone asking what to
+    type, and quoting it would answer with a complaint about a ceiling spelled `-h`. Naming the two
+    help flags is narrower than asking whether the token looks like a number - that question is
+    argparse's own private regex, and a second copy of it here is the thing this function exists to
+    stop depending on. [LAW:parse-dont-validate] the ambiguity is settled before the parse rather
+    than recovered from after it."""
+    value = argv[VALUE_AT:]
+    asking_help = bool(value) and value[0] in HELP_FLAGS
+    return argv if argv[:1] != [VALUE_TAKING] or asking_help else [*argv[:VALUE_AT], "--", *value]
 
 
 parser = argparse.ArgumentParser(

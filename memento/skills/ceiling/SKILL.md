@@ -15,8 +15,9 @@ ${CLAUDE_PLUGIN_ROOT}/skills/ceiling/bin/ceiling set <session|project> <off|N|+N
 ${CLAUDE_PLUGIN_ROOT}/skills/ceiling/bin/ceiling clear <session|project>
 ```
 
-The scope is a required word, not a flag — there are no flags at all. Leave it out or
-misspell it and the command exits 2 having written nothing.
+The scope is a required word, not a flag. Leave it out or misspell it and the command
+exits 2 having written nothing; `set <scope> -h` is a request for help in the value slot
+and is answered with help — exit 0, nothing written.
 
 | Value | What it sets |
 |---|---|
@@ -25,6 +26,10 @@ misspell it and the command exits 2 having written nothing.
 | `400_000` | exactly that, whatever the layers beneath say |
 
 Underscores in numbers are fine. A unit suffix like `100k` is not, and is refused.
+
+A count or `off` states a ceiling outright, so it overwrites a layer too broken to parse
+rather than dying while reading it. `+50_000` over that layer refuses loudly — it has no
+base to add to, and a guessed one resolves to a ceiling nobody asked for.
 
 A new ceiling is in force the next time the hook checks, which is when this turn ends.
 There is nothing to restart, reload or signal, and this works from a session already
@@ -60,8 +65,9 @@ Two things to carry into what you tell the user:
 - **The project file lands in their checkout and is not gitignored.** Name the file and
   say it is untracked. Committing it is their call, not yours.
 - **`set project` needs a git repository**, which is how the root a new project config
-  lands at is found. Outside one it exits 1 and says so; `set session` still works there,
-  and so does `clear project` — removing files that already exist asks git nothing.
+  lands at is found — a submodule's own root, not the superproject's `.git/modules`, which
+  no walk up from the submodule reaches. Outside one it exits 1 and says so; `set session`
+  still works there, and so does `clear project` — removing files asks git nothing.
 
 ## Verification is the last lines of the output already in front of you
 
@@ -83,16 +89,23 @@ command renders only values the hook's own reader accepts and reads each file ba
 after writing it, so exit 0 means the files say what it printed.
 [LAW:verifiable-goals]
 
-A nonzero exit reports on a file, not on your write: the `wrote` lines print first, and
-every one that printed stands — read the lines, not your intention.
-[LAW:no-silent-failure] `1` is a config file or a resolved ceiling that is unusable,
-named with the file and line to go fix — a `-900_000` that lands below zero, a value some
-file holds that does not parse — and that file can be a layer this command never touched,
-so `set session 400_000` can write the session layer and exit 1 over a malformed user
-layer. Rightly: a layer the hook's reader cannot parse stops the Stop hook, Claude Code
-treats a dead Stop hook as non-blocking, and the gate is off for every session reading
-that file. Report both — what was written, and which file to go fix. `2` is a wrong
-invocation, and nothing was written.
+A nonzero exit does not undo what printed: the `wrote` lines print first, and every one
+that printed stands — read the lines, not your intention.
+[LAW:no-silent-failure] `1` is the ceiling asked for being unwritable, or unreadable back:
+an unusable config file or resolved ceiling, named with the file and line to go fix — a
+`-900_000` that lands below zero, a value some file holds that does not parse — or no
+session or repository to write for, `CLAUDE_CODE_SESSION_ID` unset or `set project`
+outside one. That file can be a layer this command never touched, so `set session 400_000`
+can write the session layer and exit 1 over a malformed user layer. Rightly: a layer the
+hook's reader cannot parse stops the Stop hook, Claude Code treats a dead Stop hook as
+non-blocking, and the gate is off for every session reading that file. Report both — what
+was written, and which file to go fix. `2` is the line as typed not parsing — argparse's
+own code, used for nothing else, and nothing was written.
+
+A `set` reads what each destination file holds, and reads it again immediately before
+writing. A destination that changed in between — another session running this command,
+someone editing the file by hand — stops the write: nothing lands, the change that did
+stands, and it exits 1 saying so and to run it again.
 
 The temptation is the easy one: you typed `+100_000`, it exited 0, and you report
 350,000 from arithmetic you did in your head. Read the line instead — a signed move is

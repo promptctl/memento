@@ -196,8 +196,10 @@ resolves to 350,000 — and it takes effect the next time the ceiling is checked
 turn ends, with nothing to restart, reload or signal, including from a session that is
 already over the ceiling. `ceiling set session -50_000` lowers it the same way: the leading `-`
 is read as part of the value rather than as an unknown option, on every Python the plugin runs
-under. `ceiling clear session` hands the session back to the ceiling it started under, not to
-whatever the shared files say now: `shared-at-start.conf` is still standing.
+under. The two help flags are the one exception, so `ceiling set session -h` prints usage rather
+than complaining about a ceiling spelled `-h`. `ceiling clear session` hands the session back to
+the ceiling it started under, not to whatever the shared files say now: `shared-at-start.conf` is
+still standing.
 
 The command is worth going through rather than writing that file yourself, for one reason:
 the write succeeds whatever you put in the file, and a key the hook does not accept does
@@ -209,9 +211,10 @@ out of `memento/lib/ceiling_config.py`, so the write that switches the gate off 
 the command can make.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
-repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
-the ceiling cannot change because something ran `cd`. Anything else — a typo, a unit
-suffix, a misspelled key, a key set twice in one file, an adjustment resolving below
+repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it — one
+function the hook and the command both call, differing only in the directory each falls
+back to — so the ceiling cannot change because something ran `cd`. Anything else — a typo,
+a unit suffix, a misspelled key, a key set twice in one file, an adjustment resolving below
 zero — stops the hook with an error naming the file and line the setting came from. It
 never falls back quietly to the default, on the grounds that a ceiling you believe you moved and did not
 is worse than no ceiling. Every decision the hook makes is appended to
@@ -226,22 +229,39 @@ adjustment, and that is what keeps them from drifting apart: an absolute ignores
 beneath it. Each is written beside its destination and moved into place only once both are
 staged, so the failures that actually happen — no permission, no space, a parent that cannot be
 made — land before either file is in force and the command exits having moved nothing rather
-than leaving two files stating different ceilings. Each `wrote` line names what that file held
-before it — `wrote .promptctl/memento.conf line 1 (replacing 900000)` — because this session's
-layer is one of the two, so a project-scoped move can overwrite a ceiling an earlier
-`ceiling set session` pinned, and that parenthetical is the only record of the number that was
-there. The file it rewrites is whichever project config that walk already finds in
+than leaving two files stating different ceilings. However that pass ends, the staged files it
+still holds go with it, so a halt part way through leaves no `memento.conf.<pid>` beside a
+project's config that nothing here reads and nobody would notice. Each `wrote` line names what
+that file held before it — `wrote .promptctl/memento.conf line 1 (replacing 900000)` — because
+this session's layer is one of the two, so a project-scoped move can overwrite a ceiling an
+earlier `ceiling set session` pinned, and that parenthetical is the only record of the number
+that was there. The file it rewrites is whichever project config that walk already finds in
 force, so no second file appears deeper in the tree where the walk would reach it first and
 two files would claim one ceiling. Where none stands it creates one at the repository root,
 found by asking git — from the anchored directory, not from wherever the process happens to
 stand — for the *common* dir, so a session working in a worktree writes the checkout that
-worktree belongs to rather than a file that dies with the worktree. Asked from the process's own
-directory, as that one call used to be, a shell that had `cd`'d out of the session's project
-could land the new file in the wrong repository, or refuse while the anchored directory was a
-perfectly good repo. Outside a git repository there is no root to create that file at, so
-`ceiling set project` refuses and names the anchored directory it asked about;
+worktree belongs to rather than a file that dies with the worktree. Inside a submodule it asks
+git first whether there is a superproject and writes the submodule's own working-tree root
+instead, because a submodule's common dir is the superproject's `.git/modules/<name>`, whose
+parent is git's own internal storage — a directory no walk up from the submodule ever passes
+through, so a file written there would be reported as written and govern nothing. Asked from
+the process's own directory, as that one call used to be, a shell that had `cd`'d out of the
+session's project could land the new file in the wrong repository, or refuse while the anchored
+directory was a perfectly good repo. Outside a git repository there is no root to create that
+file at, so `ceiling set project` refuses and names the anchored directory it asked about;
 `ceiling clear project` needs no repository at all, and the session scope still works. The file
 is not gitignored, and committing it is your call.
+
+Two sessions moving the project's ceiling at once get a refusal rather than a lost write. The
+project layer is shared — every session in the checkout reads it, and since this command exists
+any of them can write it — so `ceiling set project +50_000` run from two sessions at once would
+otherwise read the same number twice and the later write would silently drop the earlier one's
+change. Each destination is read once before the move is resolved and again immediately before
+it is written, and one that changed in between stops the command: nothing is written, the change
+that landed stands, and the refusal names both numbers so you can run it again. Every
+destination is checked before any is committed, so a refusal cannot leave one file written and
+the other not, and a lock would not do this job: these files are meant to be edited by hand, and
+a hand takes no lock.
 
 `ceiling clear project` removes the project layer and this session's. Later sessions return
 to the layer beneath the project; this one returns to the ceiling it started under. What
@@ -252,7 +272,10 @@ report's `project layer     (none)` line is what says the project layer is unset
 broken to parse is still one it can take away: it prints what it could not read and removes the
 file. It used to die validating the file it was asked to delete, which left a malformed layer —
 the gate already off for that session, a stopped Stop hook being non-blocking — removable by
-nothing but hand. Anywhere a ceiling is resolved, a malformed layer is still refused loudly.
+nothing but hand. `ceiling set` replaces one too, where the request does not need what is
+beneath: a count or `off` states a ceiling outright and never reads the layer it overwrites,
+while a signed adjustment has no base to add to and refuses. Anywhere a ceiling is resolved, a
+malformed layer is still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push

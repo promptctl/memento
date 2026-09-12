@@ -34,7 +34,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # writes them. [LAW:one-source-of-truth] A plugin is a directory rather than an installed
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
-from ceiling_config import (SHARED_AT_START, in_force,  # noqa: E402
+from ceiling_config import (SHARED_AT_START, anchored, in_force,  # noqa: E402
                             session_directory, shared_at_start)
 
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
@@ -75,10 +75,10 @@ def resolve_ceiling(hook):
     """The ceiling in force for the session this payload belongs to.
 
     The project is anchored at the directory the session belongs to rather than wherever a Bash
-    call last left it - a ceiling that moved because something ran `cd` would be a ceiling nobody
-    set. Reading the shared layers is also what records them for this session, which is why this
+    call last left it, which `anchored` decides for this and for the command that writes these
+    layers. Reading the shared layers is also what records them for this session, which is why this
     runs at a stop and nowhere else."""
-    anchor = os.environ.get("CLAUDE_PROJECT_DIR") or hook["cwd"]
+    anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
     return in_force(directory, shared_at_start(directory / SHARED_AT_START, anchor))
 
