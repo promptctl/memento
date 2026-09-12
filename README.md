@@ -6,9 +6,10 @@ a PR review half-addressed, a session that hits the context limit and forgets wh
 was doing.
 
 `memento` gives you three skills you invoke by hand: work a PR review to clean, write a
-handoff for the next session, move this session's context ceiling. It also ships one
-hook, which takes the handoff skill and makes it mandatory — past a token ceiling, a
-session cannot end its turn until it has closed out: written the handoff and reset.
+handoff for the next session, move the context ceiling for this session or its project.
+It also ships one hook, which takes the handoff skill and makes it mandatory — past a
+token ceiling, a session cannot end its turn until it has closed out: written the handoff
+and reset.
 
 ## Install
 
@@ -96,11 +97,22 @@ in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached
 window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
 anything.
 
-**`ceiling`** — moves the context ceiling for the session running right now: off, up by
-an amount, or pinned to a number. It writes the session config layer described below, so
-the change takes effect the next time the ceiling is checked, which is when the turn
-ends. That timing is also why the skill's last step is a check: the log line proving the
-write took is written as the turn ends, so it is read on the turn after.
+**`ceiling`** — moves the context ceiling, for the session running right now or for its
+whole project: off, up or down by a signed amount, or pinned to a number. It calls
+`memento/skills/ceiling/bin/ceiling`, which writes the config layers described below.
+
+```bash
+ceiling show
+ceiling set <session|project> <off|N|+N|-N>
+ceiling clear <session|project>
+```
+
+The scope is a required word with no default, because the two differ in blast radius — a
+project change leaves a file in the repo that outlives the session, a session change leaves
+nothing that does — and nothing in a person's phrasing reliably says which they meant. Every
+command ends by printing the ceiling in force for this session, the ceiling a new session
+here would get, and the file behind each layer, so the command's own output is the
+confirmation that the write took.
 
 ## The context ceiling
 
@@ -177,27 +189,23 @@ afterwards. Its own layer still applies immediately, so a session in that positi
 still give itself room.
 
 The session's own layer is read live at every stop and applies immediately in both
-directions, raising and lowering alike. A session can create that layer for itself. The
-`<session-id>` in its path comes from `CLAUDE_CODE_SESSION_ID`, so one command gives the
-session running right now more room:
+directions, raising and lowering alike. `ceiling set session +100_000` writes that layer
+for the session running right now. Because the value is signed it lands on top of what the
+shared layers resolved to rather than replacing it — a session that started at 250,000
+resolves to 350,000 — and it takes effect the next time the ceiling is checked, when the
+turn ends, with nothing to restart, reload or signal, including from a session that is
+already over the ceiling. `ceiling clear session` hands the session back to the ceiling it
+started under, not to whatever the shared files say now: `shared-at-start.conf` is still
+standing.
 
-```
-dir="${MEMENTO_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/promptctl}/sessions/$CLAUDE_CODE_SESSION_ID"
-mkdir -p "$dir" && echo 'ceiling = +100_000' > "$dir/memento.conf"
-```
-
-Because the value is signed it lands on top of what the shared layers resolved to rather
-than replacing it — a session that started at 250,000 resolves to 350,000 — and it takes
-effect the next time the ceiling is checked, when the turn ends, with nothing to restart,
-reload or signal, including from a session that is already over the ceiling. Deleting
-that file hands the session back to the ceiling it started under, not to whatever the
-shared files say now: `shared-at-start.conf` is still standing.
-
-The `ceiling` skill runs that command for you and then reads the log on the following
-turn to confirm the write took. The check earns its keep: the write succeeds whatever you
-put in the file, and a key the hook does not accept does not leave the old ceiling
-standing — it stops the hook, which Claude Code treats as non-blocking, so the gate
-quietly stops running for the session that wrote the file.
+The command is worth going through rather than writing that file yourself, for one reason:
+the write succeeds whatever you put in the file, and a key the hook does not accept does
+not leave the old ceiling standing — it stops the hook, which Claude Code treats as
+non-blocking, so the gate quietly stops running for the session that wrote the file.
+Everything the command writes goes out through one function that renders only what the
+hook's own parser accepts and then reads the file back, and both programs read that parser
+out of `memento/lib/ceiling_config.py`, so the write that switches the gate off is not one
+the command can make.
 
 The project layer is found by walking up, so a subdirectory or a worktree inherits the
 repo above it, and it is anchored at `CLAUDE_PROJECT_DIR` where Claude Code sets it, so
@@ -208,6 +216,24 @@ never falls back quietly to the default, on the grounds that a ceiling you belie
 is worse than no ceiling. Every decision the hook makes is appended to
 `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
 you can tell an allow apart from a hook that never ran.
+
+`ceiling set project` moves the project's ceiling instead, and writes two files to do it.
+The shared layers are frozen per session, so the project file alone would move the ceiling
+for every session after this one and not for the session that asked — which is the session
+that wanted headroom. Both files get the same resolved absolute number rather than the same
+adjustment, and that is what keeps them from drifting apart: an absolute ignores the layers
+beneath it. The file it rewrites is whichever project config that walk already finds in
+force, so no second file appears deeper in the tree where the walk would reach it first and
+two files would claim one ceiling. Where none stands it creates one at the repository root,
+found by asking git for the *common* dir, so a session working in a worktree writes the
+checkout that worktree belongs to rather than a file that dies with the worktree. Outside a
+git repository a project-scoped change refuses and says so; the session scope still works.
+The file is not gitignored, and committing it is your call.
+
+`ceiling clear project` removes the project layer and this session's. Later sessions return
+to the layer beneath the project; this one returns to the ceiling it started under. What
+each file held is printed as it goes, so a number someone meant to keep is recoverable from
+the output.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push
@@ -230,10 +256,16 @@ memento/.claude-plugin/plugin.json
 memento/CHANGELOG.md
 memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
+memento/lib/ceiling_config.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
 memento/skills/ceiling/
 ```
+
+`memento/lib/` is the one thing two parts of the plugin share: the hook and
+`memento/skills/ceiling/bin/ceiling` both read the config layers through
+`ceiling_config.py`, so the program that gates a session on its ceiling and the program
+that moves one cannot disagree about the file format or about which layer wins.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the

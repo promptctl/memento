@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Move the context ceiling: write the config layers one scope names, and report what is in force.
+
+The grammar of a written ceiling and the order the layers fold in are not here - they are in
+`lib/ceiling_config.py`, which the Stop hook reads the same layers through. A writer with its own
+copy of that grammar is the divergence [LAW:one-source-of-truth] forbids, and the shape it takes
+is specific: a value the hook's reader rejects stops the hook, which Claude Code treats as
+non-blocking, so the gate silently stops running for the session whose file holds it. Everything
+this writes goes out through `write_ceiling`, which renders what that reader accepts and reads the
+file back, so the bad write is unrepresentable rather than merely unlikely.
+
+A scope is data, not a branch: it names the ceiling a move starts from and the files that receive
+it, and every command runs the same steps over whatever that data says. [LAW:dataflow-not-control-flow]
+
+Exit codes, which are a contract: 0 the files now say what this printed; 1 a config file or a
+resolved ceiling is not usable, named with the file and line to go fix; 2 the invocation was wrong.
+"""
+
+import argparse
+import collections
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+# A plugin is a directory rather than an installed package, so the path comes before the import.
+sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
+from ceiling_config import (CONFIG_NAME, PROJECT_CONFIG_DIR, SHARED_AT_START,  # noqa: E402
+                            USER_CONFIG, Written, ceiling_in, folded, in_force, live_shared,
+                            project_file, session_directory, shared_unrecorded, write_ceiling)
+
+SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+# The same anchor the hook prefers, so the project this command writes for is the project the hook
+# reads for. [LAW:one-source-of-truth] a ceiling that moved because something ran `cd` would be a
+# ceiling nobody set.
+ANCHOR = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+# What a move starts from, and the files that receive it.
+Scope = collections.namedtuple("Scope", "beneath paths")
+
+
+def tokens(ceiling):
+    """One resolved ceiling as a person reads it, which is not how a config file holds it: the
+    file format is `ceiling_config.render`, and these two renderings answer to different readers."""
+    return "no ceiling" if ceiling == math.inf else f"{ceiling:,} tokens"
+
+
+def this_session():
+    """The directory holding this session's config layers.
+
+    [LAW:parse-dont-validate] the crossing from an environment that might not name a session to a
+    directory that does. Every command below needs it, because every ceiling is some session's, so
+    the absence is refused once here rather than guarded at each path that gets built from it."""
+    named = os.environ.get(SESSION_VARIABLE)
+    if not named:
+        sys.exit(f"ceiling: {SESSION_VARIABLE} is not set, so this command cannot tell whose "
+                 f"ceiling to move. Run it from inside a Claude Code session.")
+    return session_directory(named)
+
+
+def repository_root():
+    """The root of the checkout this command was run in.
+
+    Asked of git rather than assembled from directory names, and asked for the *common* dir so a
+    worktree answers with the checkout it belongs to: a file at a worktree's own root governs that
+    worktree until it is deleted, and the project is what the person meant. That root is also the
+    one directory every subdirectory and every nested worktree of this checkout walks up through,
+    which is what makes the hook find it from wherever a later session stands."""
+    try:
+        done = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                              capture_output=True, text=True)
+    except OSError as failure:
+        sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
+    if done.returncode != 0:
+        sys.exit(f"ceiling: {os.getcwd()} is not inside a git repository, so there is no project "
+                 f"root to write a project ceiling to. Move this session's own ceiling instead, "
+                 f"or write {PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever directory "
+                 f"you mean by the project.")
+    return Path(done.stdout.strip()).parent
+
+
+def project_write_site(anchor):
+    """The project config a project-scoped move writes: the one already in force here, else a new
+    one at the repository root.
+
+    Writing the file already in force is what keeps a second one from appearing deeper in the
+    tree, where the hook's walk would reach it first and two files would claim one ceiling.
+    [LAW:one-source-of-truth] Where none stands, a file left in whatever subdirectory the command
+    ran from would govern that subtree and silently not the project, so the root is the site."""
+    return project_file(anchor) or repository_root() / PROJECT_CONFIG_DIR / CONFIG_NAME
+
+
+def session_beneath(directory, anchor):
+    """What a session-scoped move starts from: the ceiling this session is running under now, so
+    `+100_000` means a hundred thousand more than it has."""
+    return in_force(directory, shared_unrecorded(directory / SHARED_AT_START, anchor))
+
+
+def session_paths(directory, anchor):
+    """The file a session-scoped move writes: this session's own layer, which outlives nothing."""
+    return [directory / CONFIG_NAME]
+
+
+def project_beneath(directory, anchor):
+    """What a project-scoped move starts from: what this project resolves to for a session
+    starting now.
+
+    Not what this session is running under. A session that gave itself extra room would otherwise
+    smuggle that allowance into the project's own number, and the project would end up stating a
+    ceiling that was only ever one session's business."""
+    return live_shared(anchor)
+
+
+def project_paths(directory, anchor):
+    """The files a project-scoped move writes: the project's layer and this session's own.
+
+    This session's layer is written because the user and project layers were frozen for it at its
+    first stop, into the record the hook keeps - so the project file alone moves the ceiling for
+    every session after this one and not for the session that asked. That is the whole of why a
+    project change needs a second write, and it is why both files receive the same resolved
+    number rather than the same adjustment: an absolute ignores the layers beneath it, so the two
+    files cannot drift into stating different ceilings however the shared layers later move."""
+    return [project_write_site(anchor), directory / CONFIG_NAME]
+
+
+SCOPES = {"session": Scope(beneath=session_beneath, paths=session_paths),
+          "project": Scope(beneath=project_beneath, paths=project_paths)}
+
+
+def layer(label, path, absent):
+    """One layer of the report: the ceiling its file holds, and the file holding it. A layer that
+    holds nothing still prints - which layers are empty is half of what a reader came to find
+    out, and a report that listed only the layers in play would make the default look unset."""
+    holding = ceiling_in(path) if path else None
+    print(f"  {label:<18}{holding.text if holding else absent:<14} {path or ''}".rstrip())
+
+
+def report(directory, anchor):
+    """The ceiling in force, the ceiling a new session here would get, and the layer behind each.
+
+    The last word of every command, including the ones that changed nothing, so a write that is
+    not reflected here did not happen and nothing else has to be consulted to learn that. The two
+    numbers are printed together because a project-scoped write has to land on both, and seeing
+    them agree is the whole verification. [LAW:verifiable-goals]"""
+    record = directory / SHARED_AT_START
+    print(f"this session        {tokens(in_force(directory, shared_unrecorded(record, anchor)))}")
+    layer("shared at start", record, "(not recorded)")
+    layer("session layer", directory / CONFIG_NAME, "(unset)")
+    print(f"a new session here  {tokens(live_shared(anchor))}")
+    layer("project layer", project_file(anchor), "(none)")
+    layer("user layer", USER_CONFIG, "(unset)")
+
+
+def move(scope, request, directory, anchor):
+    """Resolve one requested move against the ceiling beneath it and write it to every file the
+    scope names.
+
+    The same absolute number goes to every one of them. A signed request is a way of saying a
+    number you do not want to look up, not a thing a file has to keep saying: resolved here once,
+    it cannot be applied twice by two layers that both read it."""
+    beneath = scope.beneath(directory, anchor)
+    asked = Written(f"the {request!r} you asked for, on top of {tokens(beneath)}", request)
+    ceiling = folded([asked], beneath=beneath)
+    for path in scope.paths(directory, anchor):
+        print(f"wrote {write_ceiling(path, ceiling).source}")
+
+
+def clear(scope, directory, anchor):
+    """Remove every file the scope names, handing those layers back to the ones beneath them.
+
+    What each file said is printed as it goes, so a ceiling someone meant to keep is recoverable
+    from this command's own output rather than only from whoever remembers it. Read, removed, then
+    reported, in that order: a line printed before the unlink would describe a removal that a
+    permission error still had time to prevent."""
+    for path in scope.paths(directory, anchor):
+        standing = ceiling_in(path)
+        path.unlink(missing_ok=True)
+        print(f"removed {path} (it set {standing.text})" if standing else f"absent  {path}")
+
+
+parser = argparse.ArgumentParser(
+    prog="ceiling", description="Move the context ceiling for this session or its project.",
+    epilog="A project-scoped change also writes this session's own layer, because the project "
+           "layer was frozen for this session at its first stop. Both get the same resolved "
+           "number. Clearing a project ceiling returns later sessions to the layer beneath it, "
+           "and returns this one to the ceiling it started under.")
+commands = parser.add_subparsers(dest="command", required=True)
+commands.add_parser("show", help="print the ceiling in force and the files that set it")
+# `choices` is the checkpoint: past the parse a scope is one of two known things, so nothing
+# downstream asks again. [LAW:parse-dont-validate]
+setting = commands.add_parser("set", help="write a ceiling to the layers a scope names")
+setting.add_argument("scope", choices=sorted(SCOPES))
+setting.add_argument("ceiling", metavar="off|N|+N|-N",
+                    help="a count of tokens, a signed adjustment to the ceiling beneath, "
+                         "or off to lift the ceiling entirely")
+clearing = commands.add_parser("clear", help="remove the layers a scope names")
+clearing.add_argument("scope", choices=sorted(SCOPES))
+
+args = parser.parse_args()
+directory = this_session()
+# Every command ends in the same report, and the two that change something run one step before it.
+# [LAW:dataflow-not-control-flow] the set of operations does not vary; what varies is the data.
+{"show": lambda: None,
+ "set": lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
+ "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
+report(directory, ANCHOR)

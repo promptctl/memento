@@ -29,6 +29,8 @@ def scratch_dir():
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "context-ceiling.py")
+PLUGIN = os.path.dirname(os.path.dirname(HERE))
+LIB = os.path.join(PLUGIN, "lib")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
 # The skill the block instruction tells the agent to load before running the close-out. It
@@ -616,11 +618,14 @@ check("a payload with no cwd fails loudly",
       done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
 
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
-# only exit from the block fails to execute.
+# only exit from the block fails to execute. The shared config module is copied in beside the
+# hook because a plugin root is the whole directory: the hook resolves `lib/` relative to
+# itself, so a root holding the script alone is not a root this hook can run from.
 spaced_root = os.path.join(scratch_dir(), "ceiling test")
 spaced_hook = os.path.join(spaced_root, "hooks", "scripts", os.path.basename(HOOK))
 os.makedirs(os.path.dirname(spaced_hook))
 shutil.copy(HOOK, spaced_hook)
+shutil.copytree(LIB, os.path.join(spaced_root, "lib"))
 spaced_launcher = os.path.join(spaced_root, "skills", "message-in-a-bottle",
                                "bin", "finalize-session")
 try:
