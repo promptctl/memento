@@ -53,8 +53,8 @@ when the user is only asking.
 ## `set project` writes two files, and that is the feature
 
 It writes `.promptctl/memento.conf` at the repository root — or rewrites whichever
-project config is already in force at or above the working directory — **and** this
-session's own layer.
+project config is already in force at or above the anchor: `CLAUDE_PROJECT_DIR` where
+Claude Code sets it, otherwise the working directory — **and** this session's own layer.
 
 That second write is what makes the change reach the session that asked for it. Each
 session's user and project layers are frozen at its first stop, into a record the hook
