@@ -27,9 +27,11 @@ and is answered with help — exit 0, nothing written.
 
 Underscores in numbers are fine. A unit suffix like `100k` is not, and is refused.
 
-A count or `off` states a ceiling outright, so it overwrites a layer too broken to parse
-rather than dying while reading it. `+50_000` over that layer refuses loudly — it has no
-base to add to, and a guessed one resolves to a ceiling nobody asked for.
+A count or `off` states a ceiling outright, so it overwrites a layer it cannot read at all
+— a value that does not parse, bytes that are not text, a mode that forbids opening the
+file — rather than dying while reading it, and `clear` takes such a layer away. `+50_000`
+over that layer refuses loudly — it has no base to add to, and a guessed one resolves to a
+ceiling nobody asked for.
 
 A new ceiling is in force the next time the hook checks, which is when this turn ends.
 There is nothing to restart, reload or signal, and this works from a session already
@@ -92,20 +94,26 @@ after writing it, so exit 0 means the files say what it printed.
 A nonzero exit does not undo what printed: the `wrote` lines print first, and every one
 that printed stands — read the lines, not your intention.
 [LAW:no-silent-failure] `1` is the ceiling asked for being unwritable, or unreadable back:
-an unusable config file or resolved ceiling, named with the file and line to go fix — a
-`-900_000` that lands below zero, a value some file holds that does not parse — or no
+an unusable config file or resolved ceiling — a `-900_000` that lands below zero, a value
+some file holds that does not parse — the filesystem refusing a read or a write, or no
 session or repository to write for, `CLAUDE_CODE_SESSION_ID` unset or `set project`
-outside one. That file can be a layer this command never touched, so `set session 400_000`
-can write the session layer and exit 1 over a malformed user layer. Rightly: a layer the
-hook's reader cannot parse stops the Stop hook, Claude Code treats a dead Stop hook as
-non-blocking, and the gate is off for every session reading that file. Report both — what
-was written, and which file to go fix. `2` is the line as typed not parsing — argparse's
-own code, used for nothing else, and nothing was written.
+outside one. It names the file, and the line where a line is what to go fix. That file can
+be a layer this command never touched, so `set session 400_000` can write the session
+layer and exit 1 over a malformed user layer. Rightly: a layer the hook's reader cannot
+read stops the Stop hook, Claude Code treats a dead Stop hook as non-blocking, and the
+gate is off for every session reading that file. Report both — what was written, and which
+file to go fix. `2` is the line as typed not parsing — argparse's own code, used for
+nothing else, and nothing was written.
 
 A `set` reads what each destination file holds, and reads it again immediately before
 writing. A destination that changed in between — another session running this command,
 someone editing the file by hand — stops the write: nothing lands, the change that did
-stands, and it exits 1 saying so and to run it again.
+stands, and it exits 1 saying so and to run it again. It resolves the move a second time
+there too, and a request that now resolves to a different number refuses the same way: the
+layers a signed request adds to are not all destinations — a `set project` base folds in
+the user layer, which nothing here writes — so the ceiling beneath can move while every
+destination sits still. A count or `off` reads no base, so nothing underneath it can stop
+it that way.
 
 The temptation is the easy one: you typed `+100_000`, it exited 0, and you report
 350,000 from arithmetic you did in your head. Read the line instead — a signed move is

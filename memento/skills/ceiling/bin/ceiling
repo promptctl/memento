@@ -15,13 +15,15 @@ says. [LAW:dataflow-not-control-flow]
 
 Exit codes, which are a contract: 0 the files now say what this printed; 1 the ceiling asked for
 cannot be written or cannot be read back - a config file or a resolved ceiling that is not usable,
-named with the file and line to go fix, or the session or repository this needs not being there -
-and any `wrote` line already printed still stands, because the unusable file can be a layer this
-command never touched; 2 the line as typed does not parse, which is argparse's own code for it.
+the filesystem refusing a read or a write, or the session or repository this needs not being there,
+named with the file and, where a line is what to go fix, the line - and any `wrote` line already
+printed still stands, because the unusable file can be a layer this command never touched; 2 the
+line as typed does not parse, which is argparse's own code for it.
 """
 
 import argparse
 import collections
+import functools
 import math
 import os
 import subprocess
@@ -198,15 +200,21 @@ def held(path):
     """What one config file says now, for a line about to replace or remove it, or None for a file
     that sets nothing.
 
-    `ceiling_in` answers a file it cannot parse by ending the process, which is the right answer
+    `ceiling_in` answers a file it cannot read by ending the process, which is the right answer
     for every caller that needs a ceiling out of it and the wrong one for the two callers here:
     `clear` is the sanctioned way to remove a layer the hook is already dying on, and a reader
     that exits rather than answers leaves that file removable by nothing but hand. The refusal is
     borrowed and printed rather than worked around with a second parser, so there is still one
-    grammar. [LAW:one-source-of-truth]"""
+    grammar. [LAW:one-source-of-truth]
+
+    Unreadable is wider than unparseable and the difference does not reach here: bytes that are not
+    text, and a mode that forbids the read, stop that reader as surely as a key written twice does,
+    and a file in any of those states is a file `clear` exists to take away. Each arrives as a
+    different exception and none of them is an answer, so all of them are reported the one way -
+    `UnicodeDecodeError` among them, a `ValueError` reached through neither of the others."""
     try:
         found = ceiling_in(path)
-    except SystemExit as refusal:
+    except (SystemExit, OSError, UnicodeDecodeError) as refusal:
         return f"an unreadable setting - {refusal}"
     return found.text if found else None
 
@@ -232,11 +240,20 @@ def move(scope, request, directory, anchor):
     bind only the writers that take it, and this file is documented as one a person may edit by
     hand, where no lock is taken; asking whether the number is still the one that was read covers
     that writer too. [LAW:verifiable-goals] Every destination is checked before any is committed, so
-    a refusal cannot leave one file written and the other not."""
+    a refusal cannot leave one file written and the other not.
+
+    The request itself is resolved a second time, because what a write rests on is the number rather
+    than the files it came out of, and those are not the same question: a signed request reads the
+    layers beneath it, and some of those are nobody's destination - the user layer is in a
+    project-scoped base and is never written here - so a base can move with every destination
+    sitting still. Asking again is that question in the vocabulary the answer is in.
+    [LAW:one-source-of-truth] It asks nothing that was not asked already: a count and `off` state a
+    ceiling outright, so for them the second resolution opens no file and can refuse nothing."""
     asked = Written(f"the {request!r} you asked for", request)
     destinations = scope.writes(directory, anchor)
+    base = functools.partial(scope.beneath, directory, anchor)
     standing = {path: held(path) for path in destinations}
-    ceiling = folded([asked], beneath=lambda: scope.beneath(directory, anchor))
+    ceiling = folded([asked], beneath=base)
     with staging(destinations, ceiling) as partials:
         for path in destinations:
             now = held(path)
@@ -245,6 +262,12 @@ def move(scope, request, directory, anchor):
                          f"write - it held {standing[path] or 'no ceiling'} and now holds "
                          f"{now or 'no ceiling'}. Nothing was written, so that change stands; "
                          f"run this again if you still mean to move it.")
+        resolved_again = folded([asked], beneath=base)
+        if resolved_again != ceiling:
+            sys.exit(f"ceiling: {request!r} resolved to {tokens(ceiling)} and then to "
+                     f"{tokens(resolved_again)} while this command was working out what to write, "
+                     f"a layer beneath it having changed in between. Nothing was written, so that "
+                     f"change stands; run this again if you still mean to move it.")
         for path, partial in partials:
             replaced = f" (replacing {standing[path]})" if standing[path] else ""
             print(f"wrote {committed(partial, path).source}{replaced}")
@@ -261,7 +284,16 @@ def clear(scope, directory, anchor):
     One removal at a time, with no staging and nothing held back: two writes are bound by having
     to state one number, and two removals are bound by nothing - a layer taken away hands its
     session or its project to the layer beneath, which is right on its own however the next
-    removal goes."""
+    removal goes.
+
+    A `set` is the writer this is not bound against, and deliberately. The read sits next to the
+    unlink with nothing in between, so the second read `move` has would straddle no work at all:
+    there is no compare-and-unlink to be had, and a removal that lands one instruction later is the
+    same removal. What it costs is the printed number, which is the one read an instant before the
+    file went rather than the one taken away. Closing that would mean removing first and reporting
+    from the file taken away, and then every message here would quote a `memento.conf.<pid>` that
+    was never anybody's config - including the unreadable-layer line this printing exists for, where
+    the path is the whole of what a person needs. [LAW:polishing-by-subtraction]"""
     for path in scope.clears(directory, anchor):
         standing = held(path)
         path.unlink(missing_ok=True)
@@ -311,7 +343,14 @@ args = parser.parse_args(as_one_value(sys.argv[1:]))
 directory = this_session()
 # Every command ends in the same report, and the two that change something run one step before it.
 # [LAW:dataflow-not-control-flow] the set of operations does not vary; what varies is the data.
-{"show": lambda: None,
- VALUE_TAKING: lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
- "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
-report(directory, ANCHOR)
+# [LAW:single-enforcer] one place turns a filesystem that said no into this command's own refusal.
+# Every read, write and unlink below can raise one; the exit contract above promises the file and
+# the reason, and a traceback is that promise broken for the agent reading stderr for `ceiling: `.
+# The errno message carries both, so there is nothing to add to it. [LAW:effects-at-boundaries]
+try:
+    {"show": lambda: None,
+     VALUE_TAKING: lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
+     "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
+    report(directory, ANCHOR)
+except OSError as refusal:
+    sys.exit(f"ceiling: {refusal}")

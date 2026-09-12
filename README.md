@@ -258,24 +258,37 @@ any of them can write it — so `ceiling set project +50_000` run from two sessi
 otherwise read the same number twice and the later write would silently drop the earlier one's
 change. Each destination is read once before the move is resolved and again immediately before
 it is written, and one that changed in between stops the command: nothing is written, the change
-that landed stands, and the refusal names both numbers so you can run it again. Every
-destination is checked before any is committed, so a refusal cannot leave one file written and
-the other not, and a lock would not do this job: these files are meant to be edited by hand, and
-a hand takes no lock.
+that landed stands, and the refusal names both numbers so you can run it again. The move itself
+is resolved a second time, immediately before anything is written, because what a write rests on
+is the resolved number rather than the files it came out of: `+50_000` reads the layers beneath
+it, and for a project-scoped move those include the user layer, which is a destination of nothing
+here — so the ceiling beneath the move could change while every destination sat still, and that
+first check would see nothing to stop: the command would commit a number nobody set. The second
+resolution refuses the same way, naming both numbers. A count or `off` states a ceiling outright
+and reads no base at all, so nothing underneath it can refuse it that way. Every destination is
+checked before any is committed, so a refusal cannot leave one file written and the other not,
+and a lock would not do this job: these files are meant to be edited by hand, and a hand takes
+no lock. A filesystem that says no — a parent directory you cannot write, a full disk, a config
+file whose mode forbids the read — refuses the command too, as a `ceiling:` line naming the path
+and the reason the system gave rather than a Python traceback.
 
 `ceiling clear project` removes the project layer and this session's. Later sessions return
 to the layer beneath the project; this one returns to the ceiling it started under. What
 each file held is printed as it goes, so a number someone meant to keep is recoverable from
-the output. It removes the project config in force where one stands and nothing where none
-does, so in a project that never set a ceiling it prints this session's layer alone, and the
-report's `project layer     (none)` line is what says the project layer is unset. A layer too
-broken to parse is still one it can take away: it prints what it could not read and removes the
-file. It used to die validating the file it was asked to delete, which left a malformed layer —
+the output — read an instant before the file goes, since no filesystem offers a
+compare-and-unlink. It removes the project config in force where one stands and nothing where
+none does, so in a project that never set a ceiling it prints this session's layer alone, and the
+report's `project layer     (none)` line is what says the project layer is unset. A layer it
+cannot read at all is still one it can take away: it prints what it could not read and removes
+the file. It used to die validating the file it was asked to delete, which left such a layer —
 the gate already off for that session, a stopped Stop hook being non-blocking — removable by
-nothing but hand. `ceiling set` replaces one too, where the request does not need what is
-beneath: a count or `off` states a ceiling outright and never reads the layer it overwrites,
-while a signed adjustment has no base to add to and refuses. Anywhere a ceiling is resolved, a
-malformed layer is still refused loudly.
+nothing but hand; and the tolerance that fixed that covered only a grammar it could not parse, a
+key written twice or a missing `=`, so a file holding bytes that are not text, or one whose mode
+forbids opening it, still crashed the one command that exists to remove it. Unreadable is the
+class now, and all of it is reported the one tolerant way. `ceiling set` replaces such a layer
+too, where the request does not need what is beneath: a count or `off` states a ceiling outright
+and never reads the layer it overwrites, while a signed adjustment has no base to add to and
+refuses. Anywhere a ceiling is resolved, a layer that cannot be read is still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push

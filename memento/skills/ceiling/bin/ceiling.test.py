@@ -108,21 +108,28 @@ def aged_argparse():
     return directory
 
 
-def meddling_writer(text):
-    """A directory that, on a child's PYTHONPATH, has another writer land on each destination
-    between the read the command compares against and the write it is about to make.
+def meddling_writer(text, target=None):
+    """A directory that, on a child's PYTHONPATH, has another writer land between the read the
+    command compares against and the write it is about to make.
 
     The command's check is against a race, and a race left to chance is a case that passes by
-    running too fast. The staging pass is the one seam the two reads straddle, so patching it makes
-    the collision happen on every run instead of almost never. [LAW:verifiable-goals]"""
+    running too fast. The staging pass is the one seam those reads straddle, so patching it makes
+    the collision happen on every run instead of almost never. [LAW:verifiable-goals]
+
+    With no `target` the writer lands on each destination, which is what the command compares file
+    by file. A named one is for the other check: the ceiling a signed request adds to is resolved
+    from layers that are not destinations at all, so moving that means writing a file no destination
+    comparison looks at."""
     directory = scratch_dir()
     with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
         handle.write(f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\n"
                      "import ceiling_config\n"
+                     "from pathlib import Path\n"
+                     f"_target = Path({target!r}) if {target!r} else None\n"
                      "_staged = ceiling_config.staged\n"
                      "def meddled(path, ceiling):\n"
                      "    partial = _staged(path, ceiling)\n"
-                     f"    path.write_text({text!r})\n"
+                     f"    (_target or path).write_text({text!r})\n"
                      "    return partial\n"
                      "ceiling_config.staged = meddled\n")
     return directory
@@ -461,6 +468,26 @@ code, out, err = run(home, repo, "show")
 check("a malformed layer is still refused wherever a ceiling is resolved from it",
       code == 1 and "twice" in err, f"{code} {err}")
 
+# Unreadable is wider than unparseable, and the hook dies on all of it alike. A file whose bytes are
+# not text is as much a file `clear` exists to take away as one holding a key twice.
+home, repo = world()
+bad_bytes = os.path.join(home, "sessions", SESSION, CONFIG_NAME)
+os.makedirs(os.path.dirname(bad_bytes), exist_ok=True)
+with open(bad_bytes, "wb") as handle:
+    handle.write(b"ceiling = 35\xff0000\n")
+code, out, err = run(home, repo, "clear", "session")
+check("a layer whose bytes are not text is one this command can still take away",
+      code == 0 and not os.path.exists(bad_bytes), f"{code} {err}")
+check("and it says what it could not read on the way out", "unreadable" in out, out)
+
+home, repo = world(session_conf="ceiling = 400000\n")
+unopenable = os.path.join(home, "sessions", SESSION, CONFIG_NAME)
+os.chmod(unopenable, 0o000)
+code, out, err = run(home, repo, "clear", "session")
+check("so is one the filesystem will not open", code == 0 and not os.path.exists(unopenable),
+      f"{code} {err}")
+check("and that one says what it could not read too", "unreadable" in out, out)
+
 # --- a layer replaced, rather than read ---------------------------------------------------
 
 # A count states a ceiling outright, so the layer it replaces is one it never has to read. `clear`
@@ -505,6 +532,29 @@ check("a destination that changed since it was read stops the write",
 check("and the change that landed there is the one left standing",
       session_conf(home) == "ceiling = 777000\n", str(session_conf(home)))
 
+# What a write rests on is the number, and the layers that number comes from are not all
+# destinations: the user layer is in a project-scoped base and is written by nothing here, so it can
+# move with every destination sitting still. Comparing the files would see nothing to stop.
+home, repo = world(user_conf="ceiling = 300000\n")
+code, out, err = run(home, repo, "set", "project", "+50_000",
+                     pythonpath=meddling_writer("ceiling = 900000\n",
+                                                target=os.path.join(home, CONFIG_NAME)))
+check("a base that moved while the move was being worked out stops the write",
+      code == 1 and "resolved to 350,000 tokens and then to 950,000 tokens" in err,
+      f"{code} {out} {err}")
+check("and neither destination is written",
+      project_conf(repo) is None and session_conf(home) is None,
+      f"{project_conf(repo)} {session_conf(home)}")
+
+# The limit of that check, and the case that fails if the second resolution is an eager one: a count
+# states a ceiling outright, reads no base, and so has nothing beneath it that could refuse it.
+home, repo = world(user_conf="ceiling = 300000\n")
+code, out, err = run(home, repo, "set", "project", "300_000",
+                     pythonpath=meddling_writer("ceiling = 900000\n",
+                                                target=os.path.join(home, CONFIG_NAME)))
+check("a count asks for no base, so a change underneath it writes anyway",
+      code == 0 and project_conf(repo) == "ceiling = 300000\n", f"{code} {out} {err}")
+
 # --- nothing staged left behind -----------------------------------------------------------
 
 # The staging pass can fail on its second file, and by then the first file's partial is real. A
@@ -521,6 +571,35 @@ left = sorted(os.listdir(os.path.join(repo, PROJECT_CONFIG_DIR)))
 check("a staging pass that cannot finish leaves nothing of itself behind",
       code != 0 and left == [], f"{code} {left}")
 check("and none of the move is in place", project_conf(repo) is None, str(project_conf(repo)))
+check("and it refuses in this command's own shape rather than as a traceback",
+      code == 1 and err.startswith("ceiling: ") and "Traceback" not in err, f"{code} {err}")
+
+# --- a filesystem that said no ------------------------------------------------------------
+
+# An unlink asks permission of the parent directory rather than of the file. The exit contract
+# promises the file and the reason, which an errno carries and a traceback does not.
+home, repo = world(project_conf="ceiling = 350000\n")
+holding = os.path.join(repo, PROJECT_CONFIG_DIR)
+os.chmod(holding, 0o500)
+try:
+    code, out, err = run(home, repo, "clear", "project")
+finally:
+    os.chmod(holding, 0o700)
+check("a removal the filesystem refuses is this command's refusal, not a traceback",
+      code == 1 and err.startswith("ceiling: ") and "Traceback" not in err, f"{code} {err}")
+check("and the file it could not remove is left as it was",
+      project_conf(repo) == "ceiling = 350000\n", str(project_conf(repo)))
+
+# The same class of failure reached through a read, in the command that writes nothing at all.
+home, repo = world(user_conf="ceiling = 350000\n")
+shut = os.path.join(home, CONFIG_NAME)
+os.chmod(shut, 0o000)
+try:
+    code, out, err = run(home, repo, "show")
+finally:
+    os.chmod(shut, 0o600)
+check("a layer the filesystem will not open refuses the same way",
+      code == 1 and err.startswith("ceiling: ") and "Traceback" not in err, f"{code} {err}")
 
 # --- which checkout the project is --------------------------------------------------------
 
