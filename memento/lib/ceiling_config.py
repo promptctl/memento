@@ -162,26 +162,43 @@ def live_shared(anchor):
     return folded([one for one in (ceiling_in(USER_CONFIG), project_ceiling(anchor)) if one])
 
 
-def write_ceiling(path, ceiling):
-    """Replace one config file with the ceiling it now sets, and hand back what that file says.
+def staged(path, ceiling):
+    """One config file's new content, written beside where it is going and not yet in place.
 
-    [LAW:effects-at-boundaries] the one place a ceiling becomes a file. Written whole and moved
-    into place, because a create-then-write leaves the file empty for the width of one flush: a
-    session killed inside that window comes back to a file that exists and parses to nothing,
-    which no later stop can complete and every later stop dies on - the gate off for that
-    session, permanently, with nothing in the log to say so. After `os.replace` the file is
-    absent or complete, and never the third thing.
+    [LAW:effects-at-boundaries] the one place a ceiling becomes bytes. Written whole and staged
+    rather than into the destination, because a create-then-write leaves the file empty for the
+    width of one flush: a session killed inside that window comes back to a file that exists and
+    parses to nothing, which no later stop can complete and every later stop dies on - the gate
+    off for that session, permanently, with nothing in the log to say so.
+
+    Apart from `committed` so that a caller writing several files that have to state one number
+    can stage all of them before any of them lands. The failures that happen - no permission, no
+    space, a parent that cannot be made - happen here, where nothing is in place yet and so
+    nothing has to be undone."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f"{path.name}.{os.getpid()}")
+    partial.write_text(f"{CEILING_KEY} = {render(ceiling)}\n")
+    return partial
+
+
+def committed(partial, path):
+    """A staged file moved into place, and what the config there now says.
+
+    After `os.replace` the destination holds the old content or the new, and never the third
+    thing.
 
     Read back rather than handed back, so the writer and every later reader quote one file rather
     than two spellings of it, and so a value this wrote that `ceiling_in` would refuse fails here
     on the write rather than on the next stop that reads it. [LAW:one-source-of-truth] that
     read-back is also what leaves a writer nothing to guess: the only text that reaches disk is
     text the reader above accepts."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f"{path.name}.{os.getpid()}")
-    partial.write_text(f"{CEILING_KEY} = {render(ceiling)}\n")
     os.replace(partial, path)
     return ceiling_in(path)
+
+
+def write_ceiling(path, ceiling):
+    """One config file replaced by the ceiling it now sets, for a caller writing exactly one."""
+    return committed(staged(path, ceiling), path)
 
 
 def shared_at_start(path, anchor):

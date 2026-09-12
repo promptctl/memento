@@ -59,8 +59,9 @@ Two things to carry into what you tell the user:
 
 - **The project file lands in their checkout and is not gitignored.** Name the file and
   say it is untracked. Committing it is their call, not yours.
-- **A project-scoped move needs a git repository**, which is how the root is found.
-  Outside one it exits 1 and says so; `set session` still works there.
+- **`set project` needs a git repository**, which is how the root a new project config
+  lands at is found. Outside one it exits 1 and says so; `set session` still works there,
+  and so does `clear project` — removing files that already exist asks git nothing.
 
 ## Verification is the last lines of the output already in front of you
 
@@ -82,10 +83,16 @@ command renders only values the hook's own reader accepts and reads each file ba
 after writing it, so exit 0 means the files say what it printed.
 [LAW:verifiable-goals]
 
-A nonzero exit means the ceiling did not move, and you report that rather than what you
-intended. [LAW:no-silent-failure] `1` is a config file or a resolved ceiling that is
-unusable, named with the file and line to go fix — a `-900_000` that lands below zero, a
-value some file holds that does not parse. `2` is a wrong invocation.
+A nonzero exit reports on a file, not on your write: the `wrote` lines print first, and
+every one that printed stands — read the lines, not your intention.
+[LAW:no-silent-failure] `1` is a config file or a resolved ceiling that is unusable,
+named with the file and line to go fix — a `-900_000` that lands below zero, a value some
+file holds that does not parse — and that file can be a layer this command never touched,
+so `set session 400_000` can write the session layer and exit 1 over a malformed user
+layer. Rightly: a layer the hook's reader cannot parse stops the Stop hook, Claude Code
+treats a dead Stop hook as non-blocking, and the gate is off for every session reading
+that file. Report both — what was written, and which file to go fix. `2` is a wrong
+invocation, and nothing was written.
 
 The temptation is the easy one: you typed `+100_000`, it exited 0, and you report
 350,000 from arithmetic you did in your head. Read the line instead — a signed move is
@@ -104,7 +111,10 @@ command's to state, not yours.
 `clear project` removes the project layer and this session's: later sessions fall
 through to the layer beneath the project, and this session returns to the ceiling it
 *started* under — the frozen record still stands, so it does not fall back to whatever
-the files say now.
+the files say now. Where no project config stood there was nothing to remove, so only the
+session layer's line prints and `project layer     (none)` in the report is what says so.
 
-Either way `clear` prints what each file held before removing it, so a ceiling someone
-meant to keep is recoverable from the output rather than from whoever remembers it.
+Either way `clear` prints what each file held before removing it — as `set` prints
+`(replacing 900000)`, the only record of a session ceiling that `set project` overwrote —
+so a ceiling someone meant to keep is recoverable from the output rather than from whoever
+remembers it.

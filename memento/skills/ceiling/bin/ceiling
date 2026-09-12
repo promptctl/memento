@@ -6,14 +6,17 @@ The grammar of a written ceiling and the order the layers fold in are not here -
 copy of that grammar is the divergence [LAW:one-source-of-truth] forbids, and the shape it takes
 is specific: a value the hook's reader rejects stops the hook, which Claude Code treats as
 non-blocking, so the gate silently stops running for the session whose file holds it. Everything
-this writes goes out through `write_ceiling`, which renders what that reader accepts and reads the
+this writes goes out through that module, which renders what that reader accepts and reads each
 file back, so the bad write is unrepresentable rather than merely unlikely.
 
-A scope is data, not a branch: it names the ceiling a move starts from and the files that receive
-it, and every command runs the same steps over whatever that data says. [LAW:dataflow-not-control-flow]
+A scope is data, not a branch: it names the ceiling a move starts from, the files that receive it
+and the files a clear takes away, and every command runs the same steps over whatever that data
+says. [LAW:dataflow-not-control-flow]
 
 Exit codes, which are a contract: 0 the files now say what this printed; 1 a config file or a
-resolved ceiling is not usable, named with the file and line to go fix; 2 the invocation was wrong.
+resolved ceiling is not usable, named with the file and line to go fix - any `wrote` line already
+printed still stands, because the unusable file can be a layer this command never touched; 2 the
+invocation was wrong.
 """
 
 import argparse
@@ -29,16 +32,20 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import (CONFIG_NAME, PROJECT_CONFIG_DIR, SHARED_AT_START,  # noqa: E402
-                            USER_CONFIG, Written, ceiling_in, folded, in_force, live_shared,
-                            project_file, session_directory, shared_unrecorded, write_ceiling)
+                            USER_CONFIG, Written, ceiling_in, committed, folded, in_force,
+                            live_shared, project_file, session_directory, shared_unrecorded,
+                            staged)
 
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 # The same anchor the hook prefers, so the project this command writes for is the project the hook
 # reads for. [LAW:one-source-of-truth] a ceiling that moved because something ran `cd` would be a
 # ceiling nobody set.
 ANCHOR = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-# What a move starts from, and the files that receive it.
-Scope = collections.namedtuple("Scope", "beneath paths")
+# `set` is the one command that takes a value, third token of the line, and that value is the one
+# token of this grammar that may begin with `-`.
+VALUE_TAKING, VALUE_AT = "set", 2
+# What a move starts from, the files that receive it, and the files a clear takes away.
+Scope = collections.namedtuple("Scope", "beneath writes clears")
 
 
 def tokens(ceiling):
@@ -60,21 +67,26 @@ def this_session():
     return session_directory(named)
 
 
-def repository_root():
-    """The root of the checkout this command was run in.
+def repository_root(anchor):
+    """The root of the checkout the anchor stands in.
 
     Asked of git rather than assembled from directory names, and asked for the *common* dir so a
     worktree answers with the checkout it belongs to: a file at a worktree's own root governs that
     worktree until it is deleted, and the project is what the person meant. That root is also the
     one directory every subdirectory and every nested worktree of this checkout walks up through,
-    which is what makes the hook find it from wherever a later session stands."""
+    which is what makes the hook find it from wherever a later session stands.
+
+    Asked from the anchor and not from this process's own directory, which is the same reason
+    every other lookup here takes one: a `cd` anywhere in the session must not decide which
+    repository receives the file. [LAW:one-source-of-truth] an anchor that is not a directory at
+    all raises, and lands in the arm below with the rest of git's unavailability."""
     try:
         done = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=anchor)
     except OSError as failure:
         sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
     if done.returncode != 0:
-        sys.exit(f"ceiling: {os.getcwd()} is not inside a git repository, so there is no project "
+        sys.exit(f"ceiling: {anchor} is not inside a git repository, so there is no project "
                  f"root to write a project ceiling to. Move this session's own ceiling instead, "
                  f"or write {PROJECT_CONFIG_DIR}/{CONFIG_NAME} yourself in whichever directory "
                  f"you mean by the project.")
@@ -89,7 +101,7 @@ def project_write_site(anchor):
     tree, where the hook's walk would reach it first and two files would claim one ceiling.
     [LAW:one-source-of-truth] Where none stands, a file left in whatever subdirectory the command
     ran from would govern that subtree and silently not the project, so the root is the site."""
-    return project_file(anchor) or repository_root() / PROJECT_CONFIG_DIR / CONFIG_NAME
+    return project_file(anchor) or repository_root(anchor) / PROJECT_CONFIG_DIR / CONFIG_NAME
 
 
 def session_beneath(directory, anchor):
@@ -98,8 +110,10 @@ def session_beneath(directory, anchor):
     return in_force(directory, shared_unrecorded(directory / SHARED_AT_START, anchor))
 
 
-def session_paths(directory, anchor):
-    """The file a session-scoped move writes: this session's own layer, which outlives nothing."""
+def session_layer(directory, anchor):
+    """The file a session-scoped move writes and a session-scoped clear removes: this session's
+    own layer, which outlives nothing. One answer to both questions, because a session's layer is
+    created exactly where it is removed."""
     return [directory / CONFIG_NAME]
 
 
@@ -113,7 +127,7 @@ def project_beneath(directory, anchor):
     return live_shared(anchor)
 
 
-def project_paths(directory, anchor):
+def project_writes(directory, anchor):
     """The files a project-scoped move writes: the project's layer and this session's own.
 
     This session's layer is written because the user and project layers were frozen for it at its
@@ -125,8 +139,20 @@ def project_paths(directory, anchor):
     return [project_write_site(anchor), directory / CONFIG_NAME]
 
 
-SCOPES = {"session": Scope(beneath=session_beneath, paths=session_paths),
-          "project": Scope(beneath=project_beneath, paths=project_paths)}
+def project_clears(directory, anchor):
+    """The files a project-scoped clear removes: the project config in force where one stands, and
+    this session's own layer.
+
+    Where no project config stands there is nothing to remove and no site to name. Asked of the
+    write site instead, a clear would ask git for a repository root it has no use for, and refuse
+    to do nothing outside a repository - with a message about writing. Which files exist to be
+    taken away and where a new one would be created are two questions, and the repository is an
+    answer only the second one needs. [LAW:decomposition]"""
+    return [path for path in (project_file(anchor), directory / CONFIG_NAME) if path]
+
+
+SCOPES = {"session": Scope(beneath=session_beneath, writes=session_layer, clears=session_layer),
+          "project": Scope(beneath=project_beneath, writes=project_writes, clears=project_clears)}
 
 
 def layer(label, path, absent):
@@ -153,18 +179,44 @@ def report(directory, anchor):
     layer("user layer", USER_CONFIG, "(unset)")
 
 
+def held(path):
+    """What one config file says now, for a line about to replace or remove it, or None for a file
+    that sets nothing.
+
+    `ceiling_in` answers a file it cannot parse by ending the process, which is the right answer
+    for every caller that needs a ceiling out of it and the wrong one for the two callers here:
+    `clear` is the sanctioned way to remove a layer the hook is already dying on, and a reader
+    that exits rather than answers leaves that file removable by nothing but hand. The refusal is
+    borrowed and printed rather than worked around with a second parser, so there is still one
+    grammar. [LAW:one-source-of-truth]"""
+    try:
+        found = ceiling_in(path)
+    except SystemExit as refusal:
+        return f"an unreadable setting - {refusal}"
+    return found.text if found else None
+
+
 def move(scope, request, directory, anchor):
     """Resolve one requested move against the ceiling beneath it and write it to every file the
     scope names.
 
     The same absolute number goes to every one of them. A signed request is a way of saying a
     number you do not want to look up, not a thing a file has to keep saying: resolved here once,
-    it cannot be applied twice by two layers that both read it."""
+    it cannot be applied twice by two layers that both read it.
+
+    Every file is staged before any of them lands, because the files one scope names have to state
+    one number: a failure that can happen - no permission, no space - happens in the staging pass,
+    where nothing is in place yet and the command exits having moved nothing. What each file held
+    is printed as it is replaced, so a ceiling set for this session alone cannot vanish under a
+    project-scoped move with no record of what it was."""
     beneath = scope.beneath(directory, anchor)
     asked = Written(f"the {request!r} you asked for, on top of {tokens(beneath)}", request)
     ceiling = folded([asked], beneath=beneath)
-    for path in scope.paths(directory, anchor):
-        print(f"wrote {write_ceiling(path, ceiling).source}")
+    staging = [(path, held(path), staged(path, ceiling))
+               for path in scope.writes(directory, anchor)]
+    for path, standing, partial in staging:
+        replaced = f" (replacing {standing})" if standing else ""
+        print(f"wrote {committed(partial, path).source}{replaced}")
 
 
 def clear(scope, directory, anchor):
@@ -173,11 +225,30 @@ def clear(scope, directory, anchor):
     What each file said is printed as it goes, so a ceiling someone meant to keep is recoverable
     from this command's own output rather than only from whoever remembers it. Read, removed, then
     reported, in that order: a line printed before the unlink would describe a removal that a
-    permission error still had time to prevent."""
-    for path in scope.paths(directory, anchor):
-        standing = ceiling_in(path)
+    permission error still had time to prevent.
+
+    One removal at a time, with no staging and nothing held back: two writes are bound by having
+    to state one number, and two removals are bound by nothing - a layer taken away hands its
+    session or its project to the layer beneath, which is right on its own however the next
+    removal goes."""
+    for path in scope.clears(directory, anchor):
+        standing = held(path)
         path.unlink(missing_ok=True)
-        print(f"removed {path} (it set {standing.text})" if standing else f"absent  {path}")
+        print(f"removed {path} (it held {standing})" if standing else f"absent  {path}")
+
+
+def as_one_value(argv):
+    """The command line with `set`'s value put where argparse cannot read it as an option.
+
+    argparse decides whether a `-`-leading token is a value or an unrecognised option with a
+    private regex whose shape changed in 3.13. Before that it matched plain digits only, so
+    `-50_000` - the underscored form this grammar documents and accepts - was taken for an option,
+    the value never reached `parse_ceiling`, and the command exited 2 on a usage error instead of
+    moving the ceiling down. `--` states the same thing in a way every version of argparse and
+    every shell already agrees about, and it goes in only ahead of the one slot that holds a value,
+    so `-h` still reaches argparse everywhere else. [LAW:parse-dont-validate] the ambiguity is
+    settled before the parse rather than recovered from after it."""
+    return [*argv[:VALUE_AT], "--", *argv[VALUE_AT:]] if argv[:1] == [VALUE_TAKING] else argv
 
 
 parser = argparse.ArgumentParser(
@@ -190,7 +261,7 @@ commands = parser.add_subparsers(dest="command", required=True)
 commands.add_parser("show", help="print the ceiling in force and the files that set it")
 # `choices` is the checkpoint: past the parse a scope is one of two known things, so nothing
 # downstream asks again. [LAW:parse-dont-validate]
-setting = commands.add_parser("set", help="write a ceiling to the layers a scope names")
+setting = commands.add_parser(VALUE_TAKING, help="write a ceiling to the layers a scope names")
 setting.add_argument("scope", choices=sorted(SCOPES))
 setting.add_argument("ceiling", metavar="off|N|+N|-N",
                     help="a count of tokens, a signed adjustment to the ceiling beneath, "
@@ -198,11 +269,11 @@ setting.add_argument("ceiling", metavar="off|N|+N|-N",
 clearing = commands.add_parser("clear", help="remove the layers a scope names")
 clearing.add_argument("scope", choices=sorted(SCOPES))
 
-args = parser.parse_args()
+args = parser.parse_args(as_one_value(sys.argv[1:]))
 directory = this_session()
 # Every command ends in the same report, and the two that change something run one step before it.
 # [LAW:dataflow-not-control-flow] the set of operations does not vary; what varies is the data.
 {"show": lambda: None,
- "set": lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
+ VALUE_TAKING: lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
  "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
 report(directory, ANCHOR)

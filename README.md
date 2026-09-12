@@ -194,9 +194,10 @@ for the session running right now. Because the value is signed it lands on top o
 shared layers resolved to rather than replacing it — a session that started at 250,000
 resolves to 350,000 — and it takes effect the next time the ceiling is checked, when the
 turn ends, with nothing to restart, reload or signal, including from a session that is
-already over the ceiling. `ceiling clear session` hands the session back to the ceiling it
-started under, not to whatever the shared files say now: `shared-at-start.conf` is still
-standing.
+already over the ceiling. `ceiling set session -50_000` lowers it the same way: the leading `-`
+is read as part of the value rather than as an unknown option, on every Python the plugin runs
+under. `ceiling clear session` hands the session back to the ceiling it started under, not to
+whatever the shared files say now: `shared-at-start.conf` is still standing.
 
 The command is worth going through rather than writing that file yourself, for one reason:
 the write succeeds whatever you put in the file, and a key the hook does not accept does
@@ -222,18 +223,36 @@ The shared layers are frozen per session, so the project file alone would move t
 for every session after this one and not for the session that asked — which is the session
 that wanted headroom. Both files get the same resolved absolute number rather than the same
 adjustment, and that is what keeps them from drifting apart: an absolute ignores the layers
-beneath it. The file it rewrites is whichever project config that walk already finds in
+beneath it. Each is written beside its destination and moved into place only once both are
+staged, so the failures that actually happen — no permission, no space, a parent that cannot be
+made — land before either file is in force and the command exits having moved nothing rather
+than leaving two files stating different ceilings. Each `wrote` line names what that file held
+before it — `wrote .promptctl/memento.conf line 1 (replacing 900000)` — because this session's
+layer is one of the two, so a project-scoped move can overwrite a ceiling an earlier
+`ceiling set session` pinned, and that parenthetical is the only record of the number that was
+there. The file it rewrites is whichever project config that walk already finds in
 force, so no second file appears deeper in the tree where the walk would reach it first and
 two files would claim one ceiling. Where none stands it creates one at the repository root,
-found by asking git for the *common* dir, so a session working in a worktree writes the
-checkout that worktree belongs to rather than a file that dies with the worktree. Outside a
-git repository a project-scoped change refuses and says so; the session scope still works.
-The file is not gitignored, and committing it is your call.
+found by asking git — from the anchored directory, not from wherever the process happens to
+stand — for the *common* dir, so a session working in a worktree writes the checkout that
+worktree belongs to rather than a file that dies with the worktree. Asked from the process's own
+directory, as that one call used to be, a shell that had `cd`'d out of the session's project
+could land the new file in the wrong repository, or refuse while the anchored directory was a
+perfectly good repo. Outside a git repository there is no root to create that file at, so
+`ceiling set project` refuses and names the anchored directory it asked about;
+`ceiling clear project` needs no repository at all, and the session scope still works. The file
+is not gitignored, and committing it is your call.
 
 `ceiling clear project` removes the project layer and this session's. Later sessions return
 to the layer beneath the project; this one returns to the ceiling it started under. What
 each file held is printed as it goes, so a number someone meant to keep is recoverable from
-the output.
+the output. It removes the project config in force where one stands and nothing where none
+does, so in a project that never set a ceiling it prints this session's layer alone, and the
+report's `project layer     (none)` line is what says the project layer is unset. A layer too
+broken to parse is still one it can take away: it prints what it could not read and removes the
+file. It used to die validating the file it was asked to delete, which left a malformed layer —
+the gate already off for that session, a stopped Stop hook being non-blocking — removable by
+nothing but hand. Anywhere a ceiling is resolved, a malformed layer is still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push

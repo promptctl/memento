@@ -43,8 +43,11 @@ TEST_CEILING = 100_000
 USER_CEILING = f"ceiling = {TEST_CEILING}\n"
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
 SESSION = "s-1"
-CONFIG_NAME = "memento.conf"
-SHARED_AT_START = "shared-at-start.conf"
+# The file names come from the module the hook itself reads them from, so a fixture here cannot
+# drift from the files the hook looks for. [LAW:one-source-of-truth]
+sys.path.insert(0, LIB)
+from ceiling_config import CONFIG_NAME, SHARED_AT_START  # noqa: E402
+
 failures = []
 
 
