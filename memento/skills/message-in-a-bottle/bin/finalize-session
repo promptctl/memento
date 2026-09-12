@@ -533,6 +533,20 @@ case "$MODE" in
     # Empty until the handoff is on disk, and every refusal below reads it. Declared
     # here so it is defined before the first one, not at the write it describes.
     RECORDED=""
+    # [LAW:single-enforcer] _refuse is the one checkpoint for giving up, and `set -e`
+    # was the way around it. An explicit `|| _refuse` was never the only way out of
+    # this branch: a bare command substitution that failed ended the launcher on the
+    # failing command's own status — 1, a code the usage block does not name — under
+    # the shell's message, which names neither this tool nor the handoff already on
+    # disk. `pwd -P` in the detached transport did exactly that to a session whose
+    # working directory had been unlinked, leaving a complete handoff with nothing
+    # anywhere pointing at it. Routing that path into _refuse leaves one exit where
+    # there were two, and it closes the next one too: a give-up path added below
+    # inherits the contract instead of depending on its author to remember it, which
+    # is the whole of what converting the substitutions one at a time would buy.
+    # Condition contexts (`a || b`, `if`) are exempt, as they are under `set -e`, so
+    # the transport probes below still fall through rather than refusing.
+    trap '_refuse "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
@@ -618,7 +632,15 @@ case "$MODE" in
       UUID="${ITERM_SESSION_ID#*:}"
       CLAUDE_PID=$(_find_claude_pid) \
         || _refuse "iTerm2 transport: cannot locate the claude process to relaunch"
-      FLAGS=$(_claude_flags "$(ps -o command= -p "$CLAUDE_PID" 2>/dev/null)")
+      # [LAW:no-silent-failure] nested as an argument, a failing `ps` was discarded
+      # by the substitution that wrapped it: _claude_flags read "" and succeeded, so
+      # a claude process that exited during the close-out relaunched its successor
+      # with no --model, no --permission-mode and no --dangerously-skip-permissions
+      # — a different session than the one it replaced, reported as success. Read on
+      # its own line, the failure is the launcher's to refuse, like the pid above it.
+      CLAUDE_CMD=$(ps -o command= -p "$CLAUDE_PID") \
+        || _refuse "iTerm2 transport: cannot read the command line of claude process $CLAUDE_PID"
+      FLAGS=$(_claude_flags "$CLAUDE_CMD")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: claude ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\""
@@ -640,7 +662,9 @@ case "$MODE" in
       # function, reused, not a second copy of the same lookup.
       CLAUDE_PID=$(_find_claude_pid) \
         || _refuse "detached transport: cannot locate the claude process to relaunch"
-      FLAGS=$(_claude_flags "$(ps -o command= -p "$CLAUDE_PID" 2>/dev/null)")
+      CLAUDE_CMD=$(ps -o command= -p "$CLAUDE_PID") \
+        || _refuse "detached transport: cannot read the command line of claude process $CLAUDE_PID"
+      FLAGS=$(_claude_flags "$CLAUDE_CMD")
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
       # the pid is, and travels with it as data. The worker re-reads it and compares
       # rather than re-deriving what "the old claude" means at kill time — by then

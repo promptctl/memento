@@ -288,6 +288,38 @@ install(FORGE_DIR, "ps", PS_FORGING)
 MUTE_DIR = os.path.join(FIXTURES, "mute")
 os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
+
+# The real ps, except that the SECOND `-o command=` read of any one pid fails.
+#
+# The count is not a trick for want of a better key - it IS the condition. The
+# ancestry walk and the flags read ask byte-identical questions of the same pid
+# (`ps -o command= -p <pid>`, launcher lines 97 and 641/665), so no inspection of
+# argv can distinguish them, and the thing being modelled is precisely the gap
+# between them: the walk finds claude alive, and by the time the launcher reads
+# what that process was launched with, it is gone. Failing the second read of a
+# pid places the death exactly in that window and nowhere else.
+#
+# The identity read (`lstart=,command=`), the ancestry hops (`-o ppid=`) and the
+# whole-table walk (`-eo pid=,ppid=,etime=`) carry different field lists and pass
+# through untouched, the same selectivity discipline the muting ps above keeps.
+PS_NO_COMMAND = r"""#!/bin/bash
+set -uo pipefail
+fields=""; want=""; prev=""
+for arg in "$@"; do
+  [ "$prev" = "-o" ] && fields="$arg"
+  [ "$prev" = "-p" ] && want="$arg"
+  prev="$arg"
+done
+if [ "$fields" = "command=" ] && [ -n "$want" ]; then
+  seen="$FIXTURE_PS_SEEN/ps-$want"
+  [ -e "$seen" ] && { echo "ps: no such process" >&2; exit 1; }
+  : > "$seen"
+fi
+exec /bin/ps "$@"
+"""
+NO_PS_COMMAND_DIR = os.path.join(FIXTURES, "nopscommand")
+os.mkdir(NO_PS_COMMAND_DIR)
+install(NO_PS_COMMAND_DIR, "ps", PS_NO_COMMAND)
 # A tmpdir with no room in it, which is a fixture and not an environment because
 # the environment cannot say it: macOS `mktemp -t` reads the Darwin per-user temp
 # dir and ignores $TMPDIR outright, so pointing $TMPDIR at an unwritable or
@@ -330,6 +362,22 @@ done
 exec /usr/bin/mktemp "$@"
 ''')
 
+# A launcher whose working directory no longer exists, which is what a removed
+# worktree or a reaped scratch dir leaves a long-running session sitting in. The
+# condition is REAL, not simulated: this hop cds into a directory and removes it,
+# so the kernel genuinely has no path for the cwd it hands the launcher, and
+# `pwd -P` fails the way it would in the field. Nothing here mentions `pwd` - the
+# case asserts the exit contract, so any other unguarded give-up along this path
+# would be caught by the same fixture. [LAW:behavior-not-structure]
+CWDGONE = r"""#!/bin/bash
+set -uo pipefail
+d=$(mktemp -d "${TMPDIR:-/tmp}/cwdgone.XXXXXX") || exit 1
+cd "$d" || exit 1
+rmdir "$d" || exit 1
+exec "$@"
+"""
+CWDGONE_BIN = install(FIXTURES, "cwdgone", CWDGONE)
+
 # A PATH holding everything the launcher needs and provably no tmux. The absence
 # has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
 # package, so "the real directories happen to have no tmux" is a fact about this
@@ -366,7 +414,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, reset="clear", dry_run="1",
-        log_mktemp_fails=False):
+        log_mktemp_fails=False, cwd_gone=False, no_ps_command=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
@@ -386,6 +434,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         path.insert(0, MUTE_DIR)
     if log_mktemp_fails:
         path.insert(0, NO_LOGFILE_BIN)
+    if no_ps_command:
+        path.insert(0, NO_PS_COMMAND_DIR)
+        # Per-case state, inside the workdir this case already tears down, so two
+        # cases can never see each other's counts.
+        env_ps_seen = os.path.join(workdir, "ps-seen")
+        os.mkdir(env_ps_seen)
     env = {
         "PATH": ":".join(path),
         "HOME": os.environ.get("HOME", workdir),
@@ -402,6 +456,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         "NEST_CLAUDE_AT": str(depth),
         "NEST_AS_CLAUDE": NEST_AS_CLAUDE,
     }
+    if no_ps_command:
+        env["FIXTURE_PS_SEEN"] = env_ps_seen
     if forge_age is not None:
         env["FIXTURE_FORGE_AGE"] = forge_age
     if panes is not None:
@@ -419,7 +475,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
-        argv = [NEST_BIN, str(depth), LAUNCHER] + (["--reset", reset] if reset else []) + [message]
+        # The cwd-removing hop sits between the chain and the launcher, so the
+        # ancestry the walk climbs is unchanged and only the launcher's own cwd is
+        # gone - the fixture states one condition and not two.
+        entry = [CWDGONE_BIN, LAUNCHER] if cwd_gone else [LAUNCHER]
+        argv = [NEST_BIN, str(depth)] + entry + (["--reset", reset] if reset else []) + [message]
         done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
         # The chain's top pid, read before the workdir goes away. It names both the
@@ -588,6 +648,45 @@ check("a tempfile it cannot make after the handoff is written says where the han
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
 
+# The give-up nothing had converted. Every explicit `|| _refuse` was in place and
+# this path still left through `set -e`: past the handoff write, the detached
+# transport read its working directory with a bare command substitution, so a
+# session whose cwd had been unlinked ended on that command's own status - 1, a
+# code the usage block does not name - under a message naming neither this tool
+# nor the complete handoff it had already written.
+#
+# What is asserted is the contract, not the mechanism that now holds it: exit 2
+# and the preserved path. "NOT delivered" is the discriminating string - only the
+# launcher's own refusal says it, so a shell error that happened to carry the
+# right status could not satisfy this case.
+cwdgone_dir = tempfile.mkdtemp(prefix="finalize-cwdgone.")
+done = run(panes=None, handoff_dir=cwdgone_dir, cwd_gone=True)
+recorded = sorted(os.listdir(cwdgone_dir))
+check("a give-up with no guard of its own still exits 2 and names the preserved handoff",
+      done.returncode == REFUSED_RC and len(recorded) == 1
+      and "NOT delivered" in done.stderr
+      and os.path.join(cwdgone_dir, recorded[0]) in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+shutil.rmtree(cwdgone_dir, ignore_errors=True)
+
+# The flags the successor is relaunched under. Nested as an argument, a failing
+# `ps` was discarded by the substitution wrapping it - the flag parser read an
+# empty string and succeeded - so a claude process that exited during the
+# close-out handed its successor no --model, no --permission-mode and no
+# --dangerously-skip-permissions, and reported that as a scheduled handoff at
+# exit 0. A successor silently running under different permissions than the
+# session it replaced is the failure this forbids, so the assertion is the
+# refusal and not merely a non-zero status.
+nocmd_dir = tempfile.mkdtemp(prefix="finalize-nocmd.")
+done = run(panes=None, handoff_dir=nocmd_dir, no_ps_command=True)
+recorded = sorted(os.listdir(nocmd_dir))
+check("a claude whose command line cannot be read is refused, not relaunched flagless",
+      done.returncode == REFUSED_RC and len(recorded) == 1
+      and "cannot read the command line" in done.stderr
+      and os.path.join(nocmd_dir, recorded[0]) in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+shutil.rmtree(nocmd_dir, ignore_errors=True)
+
 # The two writes, which were unguarded until the helper above owned every refusal.
 # Under `set -e` a failed redirection ended the launcher on the redirection's own
 # status - 1, not the 2 the usage block promises for "it could not" - under bash's
@@ -606,8 +705,13 @@ try:
         [LAUNCHER, "a real handoff"], text=True, capture_output=True, timeout=30,
         env={"PATH": REAL_DIRS, "HOME": rodir, "TMPDIR": rodir,
              "MEMENTO_HANDOFF_DIR": handoffs_ro})
+    # The refusal's own sentence, not merely the string "finalize-session:": bash
+    # prefixes its redirection error with $0, which ends in the launcher's name, so
+    # the bare prefix is present on exactly the unguarded behavior this case exists
+    # to forbid. Asserting the sentence is what separates the launcher from the shell.
     check("a handoff it cannot write is refused as the launcher, not as the shell",
-          done.returncode == REFUSED_RC and "finalize-session:" in done.stderr
+          done.returncode == REFUSED_RC
+          and "finalize-session: cannot write the handoff to" in done.stderr
           and "preserved at" not in done.stderr,
           f"rc={done.returncode} err={done.stderr!r}")
 finally:
