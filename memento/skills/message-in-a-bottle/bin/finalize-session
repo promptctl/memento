@@ -127,6 +127,22 @@ _process_identity() {
   printf '%s' "$raw"
 }
 
+# What a pid was launched with, under the same bar `_process_identity` holds for
+# the same `ps -p` idiom: empty output is a failure to read the command line, never
+# a command line of its own. A `ps` that exits 0 printing nothing — a pid whose
+# holder left, a platform withholding another process's argv — would otherwise read
+# as "launched with no flags", and the successor would be relaunched without the
+# --model and --permission-mode the session it replaces was running under.
+# [LAW:single-enforcer] both transports read flags through here, so the invariant
+# is stated once rather than at each of them.
+_process_command() {
+  local pid="${1:-}" raw
+  [ -n "$pid" ] || return 1
+  raw=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s' "$raw"
+}
+
 # THE ONLY QUESTION THE RETIREMENT SEQUENCE ASKS ABOUT THE OLD PROCESS: is this pid still
 # holding the process captured at launch? `kill -0` cannot answer it. It answers "some
 # process is alive at this pid", and a pid the OS has reissued answers yes to that while
@@ -541,11 +557,13 @@ case "$MODE" in
     # disk. `pwd -P` in the detached transport did exactly that to a session whose
     # working directory had been unlinked, leaving a complete handoff with nothing
     # anywhere pointing at it. Routing that path into _refuse leaves one exit where
-    # there were two, and it closes the next one too: a give-up path added below
-    # inherits the contract instead of depending on its author to remember it, which
-    # is the whole of what converting the substitutions one at a time would buy.
-    # Condition contexts (`a || b`, `if`) are exempt, as they are under `set -e`, so
-    # the transport probes below still fall through rather than refusing.
+    # there were two, and a give-up added below inherits the contract rather than
+    # depending on its author to remember it, which is what converting the
+    # substitutions one at a time would not have bought. Its limit is worth knowing:
+    # it fires on a command that FAILS, so it cannot reach an assignment that
+    # swallows its own failure and reports 0 — the SELFDIR split below is guarded by
+    # hand for exactly that reason. Condition contexts (`a || b`, `if`) are exempt,
+    # as they are under `set -e`, so the transport probes below still fall through.
     trap '_refuse "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
@@ -595,7 +613,17 @@ case "$MODE" in
       SELF_RAW=$(command -v -- "$0") \
         || _refuse "cannot resolve own path from \$0=$0"
     fi
-    SELF="$(cd "$(dirname "$SELF_RAW")" && pwd)/$(basename "$SELF_RAW")"
+    # [LAW:no-silent-failure] two substitutions in one assignment report only the
+    # LAST one's status, so with `basename` closing the line a failed `cd` into a
+    # directory that no longer exists left status 0 and SELF the malformed
+    # "/finalize-session". Nothing downstream reads it synchronously — the worker is
+    # started with `nohup ... &` — so the launcher announced a scheduled handoff and
+    # exited 0 with no worker behind it. The trap below cannot cover this: it fires
+    # on a command that fails, and an assignment reporting success while failing
+    # reaches no exit path at all. Split, the `cd` is the assignment's own status.
+    SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
+      || _refuse "cannot resolve own directory from \$0=$0"
+    SELF="$SELFDIR/$(basename "$SELF_RAW")"
 
     # [LAW:parse-dont-validate] this is the parse of the environment into a
     # transport: it yields a value that could not exist beforehand (a tmux target,
@@ -636,9 +664,8 @@ case "$MODE" in
       # by the substitution that wrapped it: _claude_flags read "" and succeeded, so
       # a claude process that exited during the close-out relaunched its successor
       # with no --model, no --permission-mode and no --dangerously-skip-permissions
-      # — a different session than the one it replaced, reported as success. Read on
-      # its own line, the failure is the launcher's to refuse, like the pid above it.
-      CLAUDE_CMD=$(ps -o command= -p "$CLAUDE_PID") \
+      # — a different session than the one it replaced, reported as success.
+      CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "iTerm2 transport: cannot read the command line of claude process $CLAUDE_PID"
       FLAGS=$(_claude_flags "$CLAUDE_CMD")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
@@ -662,7 +689,7 @@ case "$MODE" in
       # function, reused, not a second copy of the same lookup.
       CLAUDE_PID=$(_find_claude_pid) \
         || _refuse "detached transport: cannot locate the claude process to relaunch"
-      CLAUDE_CMD=$(ps -o command= -p "$CLAUDE_PID") \
+      CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "detached transport: cannot read the command line of claude process $CLAUDE_PID"
       FLAGS=$(_claude_flags "$CLAUDE_CMD")
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
