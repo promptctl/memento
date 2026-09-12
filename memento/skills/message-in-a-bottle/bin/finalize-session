@@ -26,7 +26,7 @@
 # hand off into — that is the sole remaining hard failure.
 #
 # Modes:
-#   launcher:         finalize-session [message...]
+#   launcher:         its argv is _usage's to state — read it, or run --help
 #   tmux worker:      finalize-session --worker <target> <reset> <msgfile> <goalfile>
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
@@ -369,6 +369,72 @@ end tell
 OSA
 }
 
+# Refuse the run and say why: _refuse <reason>.
+#
+# [LAW:single-enforcer] one place turns a launcher failure into this tool's own
+# refusal — the tool named, the reason given, exit 2, and the recorded handoff's
+# path whenever there is one. It used to be hand-rolled at every site, and the
+# copies had already drifted: one named no tool at all, and only the no-transport
+# branch named the handoff it was walking away from. [LAW:no-silent-failure]
+#
+# [LAW:dataflow-not-control-flow] $RECORDED carries the whole difference between a
+# refusal before the handoff is written and one after — empty until the write, the
+# handoff's path from then on — and is always interpolated, so no call site has to
+# know which side of the write it sits on, and a refusal added later is right
+# without its author having to notice the question.
+_refuse() {
+  echo "finalize-session: $1${RECORDED:+
+The handoff was NOT delivered. It is preserved at: $RECORDED}" >&2
+  exit 2
+}
+
+# Make a transient file, or refuse: _mktemp_or_exit <varname> <purpose>.
+#
+# Unguarded, `set -e` ended the launcher on mktemp's own status — a code the usage
+# block does not mention, under a message naming neither this tool nor what it was
+# trying to write, on the one failure (a full or unwritable temp dir) where the
+# operator most needs both.
+#
+# It assigns through the caller's variable rather than printing the path, so the
+# exit below is the script's. Behind a command substitution it would only ever
+# have been a subshell's, leaving the outcome to errexit propagation.
+#
+# The reason names the purpose and stops: `mktemp -t` reads the Darwin per-user
+# temp dir and ignores $TMPDIR outright, so naming a directory here would
+# misdirect the operator on the platform this most often runs on.
+_mktemp_or_exit() {
+  local __var="$1" purpose="$2" path
+  path=$(mktemp -t "finalize-$purpose.XXXXXX") \
+    || _refuse "cannot create the $purpose tempfile."
+  printf -v "$__var" '%s' "$path"
+}
+
+# [LAW:one-source-of-truth] the argv the tool itself ships, and the copy the docs
+# answer to. The header's Modes block names the worker contracts and defers here.
+_usage() {
+  cat <<'USAGE'
+finalize-session — record the session handoff; optionally reset the session too.
+
+usage: finalize-session [--goal <condition>] [--reset clear|compact] [--] [message...]
+
+  --goal <condition>      re-issue an active /goal into the reset session, which
+                          otherwise wakes with no goal and stops an unattended run
+  --reset clear|compact   reset this session after recording. Without it the
+                          handoff is written and the session carries on
+  --                      end flag parsing; every token after it is message text
+  message...              what the next agent wakes up holding (default: /next)
+
+  FINALIZE_DRY_RUN=1      report the transport it would use; schedule nothing
+  MEMENTO_HANDOFF_DIR     where the handoff is written
+                          (default: ~/.claude/memento/handoffs)
+
+Every flag here has two dashes, so only a two-dash word is read as one. Anything
+else is message: -h, "- shipped the parser", any argument carrying a newline.
+
+exit: 0 it did what you asked · 2 it could not — argv, setup, or transport
+USAGE
+}
+
 # [LAW:types-are-the-program] one discriminator at the entry; everything
 # downstream operates on validated, typed inputs for exactly one mode.
 case "${1:-}" in
@@ -388,6 +454,9 @@ case "$MODE" in
     # Absent → empty string; the same code path runs, the value decides the effect.
     GOAL=""
     RESET_ARG=""
+    # A literal newline, named so the flag checkpoint below can match one inside a
+    # case pattern, where quoting is what keeps it literal against the globs.
+    NEWLINE=$'\n'
     while :; do
       case "${1:-}" in
         --goal)
@@ -404,6 +473,41 @@ case "$MODE" in
           esac
           shift 2 || { echo "--reset requires a mode argument" >&2; exit 2; }
           ;;
+        --help)
+          _usage; exit 0 ;;
+        # The release valve for the refusal below, and it must be matched first
+        # because `--` is itself two dashes: a handoff whose text genuinely opens
+        # with `--` stays expressible, said on purpose rather than by accident.
+        --)
+          shift; break ;;
+        # A token carrying a newline is prose, and prose is what this tool
+        # carries. No flag spans a line, so the newline settles it before the
+        # refusal below ever looks: the close-out's handoff is routinely a
+        # multi-line recap, and refusing one that happens to open with `--` would
+        # bite at the moment a session has the least context left to work out why.
+        --*"$NEWLINE"*)
+          break ;;
+        # [LAW:parse-dont-validate] the checkpoint for the flag POSITION, sibling
+        # of --reset's checkpoint for its value. Without it the flag namespace had
+        # no border at all: every unrecognised token fell through to the message,
+        # so `finalize-session --help` recorded a handoff whose entire text was
+        # "--help" and, with --reset, handed that to the next agent as its opening
+        # prompt — which is how one real session woke up holding the string
+        # `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
+        # silently: `--rest compact` shipped "--rest compact" as the handoff.
+        # [LAW:no-silent-failure] a mistyped flag is a fact about the caller's
+        # intent, and reinterpreting it as content destroys that fact at the one
+        # moment this tool exists to preserve it.
+        #
+        # [LAW:types-are-the-program] two dashes is the whole of it, because every
+        # flag this tool takes has two. A single-dash token cannot be a near-miss
+        # of anything in that set — there is no short flag for it to have been —
+        # so `-h` is text, the same as `- shipped the parser`, and refusing either
+        # would refuse prose on the strength of its first character.
+        --*)
+          echo "unknown flag '$1' — finalize-session --help lists what it takes." >&2
+          echo "To send it as handoff text, put it after --." >&2
+          exit 2 ;;
         *) break ;;
       esac
     done
@@ -425,8 +529,12 @@ case "$MODE" in
     # bypassing every shell-quoting hazard between argv → worker → transport. No
     # escaping branches anywhere. The file is durable rather than temporary
     # because it is the handoff itself, not a copy of it in flight.
+
+    # Empty until the handoff is on disk, and every refusal below reads it. Declared
+    # here so it is defined before the first one, not at the write it describes.
+    RECORDED=""
     mkdir -p -- "$HANDOFF_DIR" \
-      || { echo "finalize-session: cannot create handoff directory $HANDOFF_DIR" >&2; exit 2; }
+      || _refuse "cannot create handoff directory $HANDOFF_DIR"
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
     # [LAW:one-source-of-truth] the wrapped value is assembled once, here - and it
@@ -436,16 +544,22 @@ case "$MODE" in
     MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
       "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
-    GOALFILE=$(mktemp -t finalize-goal.XXXXXX)
+    _mktemp_or_exit GOALFILE goal
     LOGFILE=""
     # [LAW:no-silent-failure] MSGFILE is deliberately absent from this trap and
     # from every worker's: the transient files go, the handoff stays.
     trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
-    printf '%s' "$MESSAGE" > "$MSGFILE"
+    # The write is named as the destination it failed to reach, not as a preserved
+    # handoff: $RECORDED stays empty until it succeeds, so a half-written file is
+    # never offered to the operator as their work.
+    printf '%s' "$MESSAGE" > "$MSGFILE" \
+      || _refuse "cannot write the handoff to $MSGFILE"
+    RECORDED="$MSGFILE"
     # [LAW:dataflow-not-control-flow] the goal rides its own tempfile as a value,
     # empty when none was carried. Workers read it and re-issue /goal only when it
     # is non-empty; nothing branches on a separate "has goal" flag.
-    printf '%s' "$GOAL" > "$GOALFILE"
+    printf '%s' "$GOAL" > "$GOALFILE" \
+      || _refuse "cannot write the carried goal to $GOALFILE"
 
     # [LAW:decomposition] recording the handoff and resetting the session are two
     # jobs with opposite triggers. Recording is cheap and always safe, so it has
@@ -465,7 +579,7 @@ case "$MODE" in
       SELF_RAW="$0"
     else
       SELF_RAW=$(command -v -- "$0") \
-        || { echo "cannot resolve own path from \$0=$0" >&2; exit 2; }
+        || _refuse "cannot resolve own path from \$0=$0"
     fi
     SELF="$(cd "$(dirname "$SELF_RAW")" && pwd)/$(basename "$SELF_RAW")"
 
@@ -493,7 +607,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --worker "$TARGET" "$RESET" "$MSGFILE" "$GOALFILE" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
@@ -503,7 +617,7 @@ case "$MODE" in
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
       CLAUDE_PID=$(_find_claude_pid) \
-        || { echo "iTerm2 transport: cannot locate the claude process to relaunch" >&2; exit 2; }
+        || _refuse "iTerm2 transport: cannot locate the claude process to relaunch"
       FLAGS=$(_claude_flags "$(ps -o command= -p "$CLAUDE_PID" 2>/dev/null)")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
@@ -511,7 +625,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$MSGFILE" "$GOALFILE" "$FLAGS" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
@@ -525,7 +639,7 @@ case "$MODE" in
       # carries, are found the same way the iTerm2 transport finds them — one
       # function, reused, not a second copy of the same lookup.
       CLAUDE_PID=$(_find_claude_pid) \
-        || { echo "detached transport: cannot locate the claude process to relaunch" >&2; exit 2; }
+        || _refuse "detached transport: cannot locate the claude process to relaunch"
       FLAGS=$(_claude_flags "$(ps -o command= -p "$CLAUDE_PID" 2>/dev/null)")
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
       # the pid is, and travels with it as data. The worker re-reads it and compares
@@ -534,7 +648,7 @@ case "$MODE" in
       # the stranger. [LAW:no-silent-failure] a pid we cannot identify is not a pid
       # we may later signal, so this is a hard stop, not a degraded mode.
       CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
-        || { echo "detached transport: cannot read the identity of claude process $CLAUDE_PID" >&2; exit 2; }
+        || _refuse "detached transport: cannot read the identity of claude process $CLAUDE_PID"
       # A fresh detached window's default shell is a login shell that resources
       # dotfiles before running anything handed to it, so it can rebuild PATH
       # out from under whatever this process currently has — unlike the iTerm2
@@ -546,7 +660,7 @@ case "$MODE" in
       # that may resolve to something else, or nothing, once the login shell
       # finishes its own startup.
       CLAUDE_BIN=$(command -v claude) \
-        || { echo "detached transport: 'claude' is not resolvable on PATH; cannot name what to relaunch" >&2; exit 2; }
+        || _refuse "detached transport: 'claude' is not resolvable on PATH; cannot name what to relaunch"
       CWD=$(pwd -P)
       # tmux session names may not contain ':' or '.'; $$ and epoch seconds are
       # digits only, and collide only if two handoffs from the same pid fire in
@@ -559,7 +673,7 @@ case "$MODE" in
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
-      LOGFILE=$(mktemp -t finalize-log.XXXXXX)
+      _mktemp_or_exit LOGFILE log
       nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$MSGFILE" "$GOALFILE" "$FLAGS" "$CLAUDE_PID" "$CLAUDE_BIN" "$CLAUDE_IDENT" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
@@ -575,14 +689,13 @@ case "$MODE" in
       # delivery: nothing was delivered, this says so, and it says where the
       # message is. Reporting the path while exiting 0 would be the
       # answer-shaped void; reporting it while exiting 2 is just not throwing
-      # the work away on the way out.
+      # the work away on the way out. _refuse states that part, here and
+      # everywhere else past the write, so this branch no longer spells it out.
       # This is the sole genuine no-transport case: no owned pane, no reachable
       # iTerm2 session, and no tmux binary to spawn a fresh window with either
       # — there is truly nothing on this machine to deliver into.
-      echo "finalize-session: no tmux, iTerm2, or tmux binary to spawn a fresh window with." >&2
-      echo "Nothing on this machine to deliver the close-out into." >&2
-      echo "The handoff was NOT delivered. It is preserved at: $MSGFILE" >&2
-      exit 2
+      _refuse "no tmux, iTerm2, or tmux binary to spawn a fresh window with.
+Nothing on this machine to deliver the close-out into."
       # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
     fi
     ;;

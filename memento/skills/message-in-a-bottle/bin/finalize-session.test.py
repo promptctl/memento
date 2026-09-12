@@ -288,6 +288,47 @@ install(FORGE_DIR, "ps", PS_FORGING)
 MUTE_DIR = os.path.join(FIXTURES, "mute")
 os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
+# A tmpdir with no room in it, which is a fixture and not an environment because
+# the environment cannot say it: macOS `mktemp -t` reads the Darwin per-user temp
+# dir and ignores $TMPDIR outright, so pointing $TMPDIR at an unwritable or
+# absent path there yields a perfectly good tempfile. Only a mktemp that refuses
+# states the condition on every platform.
+NO_TMPDIR_BIN = os.path.join(FIXTURES, "notmpdir")
+os.mkdir(NO_TMPDIR_BIN)
+install(NO_TMPDIR_BIN, "mktemp", '#!/bin/bash\necho "mktemp: no space left on device" >&2\nexit 1\n')
+
+# The same condition, narrowed to the LOG tempfile. The blanket refusal above
+# cannot express the post-write case at all: it takes the goal tempfile too, so
+# the launcher dies before the handoff is ever written and the failure that
+# strands a recorded handoff never happens. Selecting on the purpose in argv is
+# what lets the goal tempfile succeed and the write land first.
+NO_LOGFILE_BIN = os.path.join(FIXTURES, "nologfile")
+os.mkdir(NO_LOGFILE_BIN)
+# `mktemp` by absolute path, not by name: this directory goes on the front of
+# PATH, so a bare `mktemp` would find this script again.
+install(NO_LOGFILE_BIN, "mktemp", '''#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    finalize-log.*) echo "mktemp: no space left on device" >&2; exit 1 ;;
+  esac
+done
+exec /usr/bin/mktemp "$@"
+''')
+
+# A mktemp that SUCCEEDS and hands back a path nothing can be written to, for the
+# goal tempfile only. It is the write at line 557 that has to fail here, not the
+# mktemp before it, so the handoff lands on disk first and the refusal is one that
+# has something to preserve.
+BAD_GOALPATH_BIN = os.path.join(FIXTURES, "badgoalpath")
+os.mkdir(BAD_GOALPATH_BIN)
+install(BAD_GOALPATH_BIN, "mktemp", '''#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    finalize-goal.*) echo "/nonexistent-finalize-dir/goal"; exit 0 ;;
+  esac
+done
+exec /usr/bin/mktemp "$@"
+''')
 
 # A PATH holding everything the launcher needs and provably no tmux. The absence
 # has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
@@ -324,8 +365,15 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
-        message="handoff", handoff_dir=None, reset="clear"):
-    """Launch finalize-session under a real `nest` chain and return its dry-run report."""
+        message="handoff", handoff_dir=None, reset="clear", dry_run="1",
+        log_mktemp_fails=False):
+    """Launch finalize-session under a real `nest` chain and return what it reported.
+
+    `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
+    whether to set it: the variable is always in the environment and the empty
+    string is what the launcher reads as off, so a case that needs the real
+    transport path travels the same code here as every dry-run case.
+    """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
     # The two PATHs are different shapes rather than one with an entry dropped:
@@ -336,11 +384,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         path.insert(0, FORGE_DIR)
     if mute_identity:
         path.insert(0, MUTE_DIR)
+    if log_mktemp_fails:
+        path.insert(0, NO_LOGFILE_BIN)
     env = {
         "PATH": ":".join(path),
         "HOME": os.environ.get("HOME", workdir),
         "TMPDIR": workdir,
-        "FINALIZE_DRY_RUN": "1",
+        "FINALIZE_DRY_RUN": dry_run,
         "NEST_PUBLISH_PID": pidfile,
         "FIXTURE_ROOT_PID": pidfile,
         # The claude process the detached transport relaunches as is planted at the
@@ -385,7 +435,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
 
 DECLINED = "declined"
 DETACHED = "detached"
-NO_TRANSPORT_RC = 2  # the launcher's own code for "no transport to deliver into"
+# One code for every way the launcher declines to finish, which is the contract
+# its usage block states: "2 it could not - argv, setup, or transport". Refused
+# argv, an unmakeable tempfile and no transport to deliver into are three routes
+# to one fact, so they assert one constant. NO_TRANSPORT_RC is that constant
+# under the name the pane-resolution cases below already read by.
+REFUSED_RC = 2
+NO_TRANSPORT_RC = REFUSED_RC
 
 
 def picked(done):
@@ -426,6 +482,153 @@ check("the tmux-absent PATH contains no tmux",
 check("the tmux-absent PATH can still run the launcher",
       shutil.which("bash", path=NO_TMUX_BIN) is not None,
       "the launcher's `#!/usr/bin/env bash` resolves bash through PATH")
+
+# --- the flag namespace's border ------------------------------------------
+# These drive the launcher directly, with no `nest` chain: argv is refused (or
+# the usage printed) before any transport is looked for, so the process tree is
+# not part of the contract under test.
+#
+# Every case asserts what landed in the handoff directory, not merely the exit
+# code. The failure this border closes was never a wrong exit code - it was a
+# handoff RECORDED from a mistyped flag and delivered to the next agent as its
+# opening prompt, so "refused" has to mean "wrote nothing" to mean anything.
+
+
+
+def argv_case(*args, path=REAL_DIRS):
+    """Run the launcher with this argv against a handoff directory of its own.
+
+    Returns (completed process, [handoff bodies it wrote]) - the bodies rather
+    than the filenames, because the bug being pinned is about what a handoff
+    SAYS, and a filename cannot tell a recorded typo from a recorded message.
+    """
+    workdir = tempfile.mkdtemp(prefix="finalize-argv.")
+    handoffs = os.path.join(workdir, "handoffs")
+    try:
+        done = subprocess.run(
+            [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
+            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
+                 "MEMENTO_HANDOFF_DIR": handoffs})
+        names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
+        bodies = [open(os.path.join(handoffs, name)).read() for name in names]
+        return done, bodies
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+done, bodies = argv_case("--help")
+check("--help prints the usage and records nothing",
+      done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
+      f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
+
+# The typo, which is the dangerous one: it looks like a flag, it is not one, and
+# before the border it became the next agent's entire instructions - silently,
+# with a zero exit code and a reset chasing it.
+done, bodies = argv_case("--rest", "compact", "real work goes here")
+check("a mistyped flag is refused rather than recorded as the handoff",
+      done.returncode == REFUSED_RC and "--rest" in done.stderr and bodies == [],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The other side of the border, and the reason it is drawn at two dashes: every
+# flag this tool takes has two, so a single-dash token is a near-miss of nothing
+# and refusing it would be refusing prose for its first character. `-h` is the
+# case a reader expects to be a flag and is not.
+for text in ("-h", "- shipped the parser"):
+    done, bodies = argv_case(text)
+    check(f"a single-dash token is message text: {text!r}",
+          done.returncode == 0 and len(bodies) == 1 and text in bodies[0],
+          f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The newline clause. No flag spans a line, so a multi-line argument is prose
+# however it opens - and the close-out's handoff is routinely a multi-line recap,
+# written by a session with no context left to spend on a parse error.
+recap = "--reset was already passed\nso this line is recap, not argv"
+done, bodies = argv_case(recap)
+check("a multi-line message is text even when it opens with two dashes",
+      done.returncode == 0 and len(bodies) == 1 and recap in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The release valve, for the one case the two clauses above leave ambiguous: a
+# single-line message that is itself a two-dash word. Without it the border would
+# have made that handoff unrepresentable - a narrowing, not a tightening.
+done, bodies = argv_case("--", "--help")
+check("-- hands a lone two-dash word through to the handoff",
+      done.returncode == 0 and len(bodies) == 1 and "\n--help\n" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The launcher's other refusal, and the reason the usage block can promise one
+# failure code. A tempfile it cannot make used to end the run on mktemp's own
+# status - a code the contract does not mention, under a message naming neither
+# this tool nor what it was trying to write. The mktemp comes before the handoff
+# is written, so nothing recorded is part of the contract here too.
+done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{REAL_DIRS}")
+check("a tempfile it cannot make is refused as the launcher, not as mktemp",
+      done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The same refusal from the other side of the write, which is a different promise.
+# The goal tempfile is made before the handoff exists, so the case above is right
+# to assert nothing was recorded. Every LOG tempfile is made after it, and a
+# refusal there that named only the tool would leave a recorded handoff sitting on
+# disk with nothing pointing at it - the outcome the no-transport branch spells
+# out in full. Reaching it takes the launcher off dry-run, because every dry-run
+# arm exits before the log tempfile, and takes a mktemp that refuses only the log,
+# so the goal tempfile still succeeds and the write still lands.
+#
+# Nothing is spawned: the refusal comes before the nohup. And the assertion is its
+# own control, which is why there is no second run - it demands a recorded body AND
+# its path in stderr, so a fixture that refused every mktemp would die at the goal
+# tempfile with nothing written and fail this case rather than pass it.
+logfail_dir = tempfile.mkdtemp(prefix="finalize-logfail.")
+done = run(dry_run="", log_mktemp_fails=True, handoff_dir=logfail_dir)
+recorded = sorted(os.listdir(logfail_dir))
+check("a tempfile it cannot make after the handoff is written says where the handoff is",
+      done.returncode == REFUSED_RC and len(recorded) == 1
+      and os.path.join(logfail_dir, recorded[0]) in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+shutil.rmtree(logfail_dir, ignore_errors=True)
+
+# The two writes, which were unguarded until the helper above owned every refusal.
+# Under `set -e` a failed redirection ended the launcher on the redirection's own
+# status - 1, not the 2 the usage block promises for "it could not" - under bash's
+# message, which names bash and the path and not this tool.
+#
+# The handoff write, reached by a directory that exists and refuses writes:
+# `mkdir -p` succeeds on a directory already there, so the guard before it passes
+# and the write is the first thing to fail. Nothing is recorded, so this refusal
+# must NOT offer a preserved handoff - asserted, because an empty $RECORDED that
+# started naming a half-written file would be this fix inverted.
+rodir = tempfile.mkdtemp(prefix="finalize-ro.")
+handoffs_ro = os.path.join(rodir, "handoffs")
+os.mkdir(handoffs_ro, 0o500)
+try:
+    done = subprocess.run(
+        [LAUNCHER, "a real handoff"], text=True, capture_output=True, timeout=30,
+        env={"PATH": REAL_DIRS, "HOME": rodir, "TMPDIR": rodir,
+             "MEMENTO_HANDOFF_DIR": handoffs_ro})
+    check("a handoff it cannot write is refused as the launcher, not as the shell",
+          done.returncode == REFUSED_RC and "finalize-session:" in done.stderr
+          and "preserved at" not in done.stderr,
+          f"rc={done.returncode} err={done.stderr!r}")
+finally:
+    os.chmod(handoffs_ro, 0o700)
+    shutil.rmtree(rodir, ignore_errors=True)
+
+# The goal write, which is past the handoff write and so must name what it leaves
+# behind. The path it names is read back out of the handoff's own body rather than
+# reconstructed here: the file states where it lives, and the refusal has to agree
+# with it, so the two representations are checked against each other.
+done, bodies = argv_case("a real handoff", path=f"{BAD_GOALPATH_BIN}:{REAL_DIRS}")
+msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
+check("a carried goal it cannot write still says where the handoff is",
+      done.returncode == REFUSED_RC and len(bodies) == 1 and msgpath in done.stderr
+      and "NOT delivered" in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r} msgpath={msgpath!r}")
+
+done, bodies = argv_case("ordinary handoff text")
+check("an ordinary message is still recorded",
+      done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # --- resolution through a real ancestry -----------------------------------
 
@@ -536,6 +739,12 @@ check("tmux absent from PATH: this is the one true decline - nothing left to spa
 # re-asserted beside every refused-pane case below (which no longer decline).
 check("declining is reported by exit code, not by prose alone",
       done.returncode == NO_TRANSPORT_RC, f"rc={done.returncode}")
+# The decline is the documented recovery route - the one case where a handoff is
+# recorded and provably undelivered - and the notice now comes from the shared
+# refusal rather than from three echoes here, so it is worth pinning at this site
+# too: a refactor that dropped the interpolation would leave the exit code intact.
+check("and it still says the handoff is preserved, and where",
+      "NOT delivered" in done.stderr and ".md" in done.stderr, f"err={done.stderr!r}")
 
 # The promise in one case: a live pane, owned by a real process, that no ancestor
 # accounts for - and it must be refused rather than claimed for want of anything
