@@ -19,6 +19,7 @@ refusal a worktree session actually meets is the platform's, which no change her
 so EXIT_HINT below carries it into the instruction this hook hands out at a stop.
 """
 
+import collections
 import fcntl
 import json
 import os
@@ -34,7 +35,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # writes them. [LAW:one-source-of-truth] A plugin is a directory rather than an installed
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
-from ceiling_config import (SHARED_AT_START, anchored, in_force,  # noqa: E402
+from ceiling_config import (GRACE, SHARED_AT_START, anchored, in_force,  # noqa: E402
                             session_directory, shared_at_start)
 
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
@@ -66,10 +67,26 @@ RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
 EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
              'action "keep" first, and close out from the directory it returns you to.')
 
-INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
+# What a block past the ceiling says, by how far past it the session is. A close-out forced in the
+# middle of a unit hands the next session half a task to reread from the start, so up to the limit
+# the agent finishes the unit it is in, and from the limit on it closes out wherever it stands.
+Band = collections.namedtuple("Band", "label reason spent")
+
+FINISHING = Band("finish", """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. Finish the unit of work you are in the middle of - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again; this hook does not block twice in a row. You do not track the count - this hook does, and at {limit:,} it tells you to close out wherever you stand. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:
     {launcher} --reset compact '<handoff message>'
 {exit_hint}
-`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
+`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not move the ceiling to make room, and do not ask the user whether to finalize.""",
+    "memento: this session is past the {ceiling:,} ceiling at ~{tokens:,} tokens and stopped again "
+    "without closing out, so the stop proceeds. It may finish the unit of work it is in; at "
+    "{limit:,} it is made to close out.")
+
+CLOSING = Band("block", """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
+    {launcher} --reset compact '<handoff message>'
+{exit_hint}
+`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize.""",
+    "memento: context ceiling breached (~{tokens:,} > {ceiling:,}) and this session has spent its "
+    "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
+    "session starts with nothing.")
 
 def resolve_ceiling(hook):
     """The ceiling in force for the session this payload belongs to.
@@ -212,19 +229,24 @@ def log(hook, tokens, ceiling, verdict):
 
 def stop(hook, tokens, ceiling):
     """Blocked once, never twice: a second block spends more context on the problem that IS too
-    much context."""
+    much context.
+
+    Which band the count falls in decides what the block says, not whether it happens: every stop
+    past the ceiling runs the same steps, and the band is the text they carry.
+    [LAW:dataflow-not-control-flow] The band is read off the count and nothing else, so a session
+    reset in place is back under both lines at its next stop with no allowance left over to clear."""
+    limit = ceiling + GRACE
+    band = CLOSING if tokens >= limit else FINISHING
     if closed_out(hook["transcript_path"]):
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
                                                f"tokens, past the {ceiling:,} ceiling, so "
                                                f"the stop proceeds."}
     if hook.get("stop_hook_active"):
-        return "spent", {"systemMessage": f"memento: context ceiling breached (~{tokens:,} > "
-                                          f"{ceiling:,}) and this session has spent its one "
-                                          f"forced close-out attempt, so the stop proceeds. "
-                                          f"If the close-out did not run, the next session "
-                                          f"starts with nothing."}
-    return "block", {"decision": "block", "reason": INSTRUCTION.format(
-        tokens=tokens, ceiling=ceiling, launcher=shlex.quote(LAUNCHER), exit_hint=EXIT_HINT)}
+        return "spent", {"systemMessage": band.spent.format(tokens=tokens, ceiling=ceiling,
+                                                            limit=limit)}
+    return band.label, {"decision": "block", "reason": band.reason.format(
+        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
+        exit_hint=EXIT_HINT)}
 
 # The ceiling is read from the payload's session and project, so it is resolved here rather
 # than at import: what it depends on does not exist until stdin has been read. The transcript

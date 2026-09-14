@@ -33,6 +33,10 @@ sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 from ceiling_config import (CONFIG_NAME, DEFAULT_CEILING,  # noqa: E402
                             PROJECT_CONFIG_DIR, SHARED_AT_START)
 
+# What `+100_000` resolves to from the shipped default, derived so retuning that default moves the
+# expectation with it rather than failing every case built on it. [LAW:one-source-of-truth]
+RAISED = DEFAULT_CEILING + 100_000
+
 SESSION = "sess-1"
 failures = []
 
@@ -250,9 +254,9 @@ check("a scope the command does not have is refused by the parser",
 home, repo = world()
 code, out, err = run(home, repo, "set", "session", "+100_000")
 check("a signed move raises this session by that much",
-      code == 0 and "350,000 tokens" in out, f"{code} {out} {err}")
+      code == 0 and f"{RAISED:,} tokens" in out, f"{code} {out} {err}")
 check("the session layer holds the resolved number, which is what the hook reads back",
-      session_conf(home) == "ceiling = 350000\n", session_conf(home))
+      session_conf(home) == f"ceiling = {RAISED}\n", session_conf(home))
 check("a session-scoped move leaves the project alone", project_conf(repo) is None,
       str(project_conf(repo)))
 # The number a new session here would get is the one a session-scoped move must NOT touch.
@@ -262,7 +266,8 @@ check("and show still reports the default for a new session here",
 # A second move starts from the first, because `+50_000` means more room than I have now.
 code, out, err = run(home, repo, "set", "session", "+50_000")
 check("a second signed move starts from the ceiling now in force",
-      code == 0 and "400,000 tokens" in out and session_conf(home) == "ceiling = 400000\n",
+      code == 0 and f"{RAISED + 50_000:,} tokens" in out
+      and session_conf(home) == f"ceiling = {RAISED + 50_000}\n",
       f"{out} {session_conf(home)}")
 
 code, out, err = run(home, repo, "set", "session", "300_000")
@@ -295,7 +300,8 @@ check("and writes nothing on the way out", session_conf(home) is None, str(sessi
 home, repo = world()
 code, out, err = run(home, repo, "set", "session", "-50_000", pythonpath=aged_argparse())
 check("a negative adjustment is a value and not an option on every interpreter",
-      code == 0 and session_conf(home) == "ceiling = 200000\n", f"{code} {out} {err}")
+      code == 0 and session_conf(home) == f"ceiling = {DEFAULT_CEILING - 50_000}\n",
+      f"{code} {out} {err}")
 code, out, err = run(home, repo, "set", "session", pythonpath=aged_argparse())
 check("and a value left off there is still an invocation error rather than a silent default",
       code == 2, f"{code} {err}")
@@ -318,13 +324,13 @@ check("the same request one token earlier still reaches argparse",
 home, repo = world()
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project-scoped move writes the project layer",
-      code == 0 and project_conf(repo) == "ceiling = 350000\n", str(project_conf(repo)))
+      code == 0 and project_conf(repo) == f"ceiling = {RAISED}\n", str(project_conf(repo)))
 check("and this session's layer as well, because the shared layers were frozen for it",
-      session_conf(home) == "ceiling = 350000\n", str(session_conf(home)))
+      session_conf(home) == f"ceiling = {RAISED}\n", str(session_conf(home)))
 # The invariant the whole design turns on: one number, stated by both files.
 check("so this session and a new session here run under the same ceiling",
-      "this session        350,000 tokens" in out and "a new session here  350,000 tokens" in out,
-      out)
+      f"this session        {RAISED:,} tokens" in out
+      and f"a new session here  {RAISED:,} tokens" in out, out)
 check("the command names every file it wrote", out.count("wrote ") == 2, out)
 
 # A subdirectory is where the command runs, not where the project is.
@@ -414,7 +420,7 @@ check("a move says what each file held, so a session's own ceiling is not lost s
 home, repo = world(recorded=f"ceiling = {DEFAULT_CEILING}\n")
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a session whose shared layers are already frozen still gets the project's new ceiling",
-      code == 0 and "this session        350,000 tokens" in out, f"{code} {out}")
+      code == 0 and f"this session        {RAISED:,} tokens" in out, f"{code} {out}")
 
 # A session that started with no ceiling at all still takes the project's number, because the
 # session layer this writes is absolute and an absolute ignores the record beneath it.
@@ -430,7 +436,7 @@ check("and the gate enforces it against a session that was previously ungated",
 home, repo = world(session_conf="ceiling = 900_000\n")
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project move starts from the project, not from the room one session gave itself",
-      code == 0 and project_conf(repo) == "ceiling = 350000\n", str(project_conf(repo)))
+      code == 0 and project_conf(repo) == f"ceiling = {RAISED}\n", str(project_conf(repo)))
 
 # --- one project, and no further ---------------------------------------------------------
 
@@ -713,10 +719,10 @@ check("and a session under it is allowed",
 home, repo = world()
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project move reports the headroom asked for, before any stop has happened",
-      code == 0 and "this session        350,000 tokens" in out, f"{code} {out}")
-verdict, enforced = gate(home, repo, 360_000)
+      code == 0 and f"this session        {RAISED:,} tokens" in out, f"{code} {out}")
+verdict, enforced = gate(home, repo, RAISED + 10_000)
 check("and the gate's first stop enforces that, not twice the headroom",
-      enforced == 350_000 and verdict == "block", f"{verdict} {enforced}")
+      enforced == RAISED and verdict == "block", f"{verdict} {enforced}")
 
 # --- the shipped surface ----------------------------------------------------------------
 
