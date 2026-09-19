@@ -15,7 +15,7 @@ Read every pending review finding on the PR, **post your plan on each thread fir
 # Load the provider once at the start of the loop
 import provider_loader
 provider = provider_loader.get()  # reads provider.json, validates CAPABILITIES
-# or pin one explicitly for this session: provider_loader.get("adversarial")
+# or pin one explicitly for this session: provider_loader.get("local")
 ```
 
 ## Setup — derive PR_URL, OWNER, REPO, PR_NUM once
@@ -41,7 +41,7 @@ if not check["installed"]:
 
 [LAW:no-silent-failure] a missing reviewer is the one failure that would otherwise look like "clean review, zero findings." Surface it as a hard stop, never an empty pass. Installed → proceed to the loop.
 
-When a provider declares `setup_check: False`, the whole section is skipped: there is no installed workflow to check. (Every current provider — `action`, `local`, `adversarial` — declares it `True`, so read `CAPABILITIES` rather than assuming from the provider name.)
+When a provider declares `setup_check: False`, the whole section is skipped: there is no installed workflow to check. (Every current provider — `action`, `local` — declares it `True`, so read `CAPABILITIES` rather than assuming from the provider name.)
 
 ## The loop
 
@@ -63,7 +63,7 @@ Then wait for the review to complete (all providers, always):
 result = provider.wait(PR_URL)
 ```
 
-Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, reviewed, not_reviewed_reason}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
+Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
 
 [LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Do not treat a failed run as a clean review. Stop and surface the run `url` — with one exception: the `action` provider, on a usage-limited run, where the loop fixes the cause itself. An `action` run whose failed log carries no such annotation is any other failure and stops here like the rest. Every other provider stops here on any non-success conclusion; the mechanics below are GitHub Actions mechanics and mean nothing to them.
 
@@ -88,8 +88,6 @@ You will be reading "You've hit your limit · resets <date>", the date will be t
 
 - BAD (a real handoff, after eight runs failed the same way): "the CI reviewer is rate-limited on every run; the limit resets 2026-09-13 19:00 UTC. There is NO workable ticket right now. Report the wait and stop."
 - GOOD: "run 3456… hit the usage limit on the reviewer account. Rotated per the setup skill, propagated here, `gh run rerun 3456…` — review completed with 3 findings, continuing the loop."
-
-[LAW:no-silent-failure] if `reviewed` is `False`, the run completed **without reviewing the head** — a spent `MAX_REVIEW_ROUNDS` cap, a fork PR, or a run that left no review for this commit (`not_reviewed_reason` names which). Its findings are absent for the same reason a clean review's are, so step 2 would return zero and the loop would merge an unreviewed commit — which is exactly how real code once shipped green and unread. Stop and surface `sha`, `not_reviewed_reason`, and `url`; the user decides whether to raise the cap and re-run, or review by another provider. Never treat it as a clean pass.
 
 ### 2. Fetch findings, and capture the change requests to dismiss
 
@@ -128,7 +126,7 @@ Schema:
 }
 ```
 
-**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null when the provider declares `resolve: True`. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed *and reviewed the head*, so empty is unambiguous. Proceed to **Finalize** below.
+**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null when the provider declares `resolve: True`. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed, so empty is unambiguous. Proceed to **Finalize** below.
 
 [LAW:verifiable-goals] this empty `fetch` is the **only** thing that establishes done. Never infer doneness from "I pushed my fixes" or "I addressed everything" — re-run `fetch` and read zero unresolved. A fixed-but-unresolved finding still counts as unresolved here, which is the safety net: it re-surfaces as `already_fixed`, and you resolve it now rather than leaving it open forever.
 
