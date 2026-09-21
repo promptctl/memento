@@ -602,15 +602,19 @@ check("the tmux-absent PATH can still run the launcher",
 
 
 
-def argv_case(*args, path=f"{FIXTURES}:{REAL_DIRS}"):
+def argv_case(*args, path_prefix=""):
     """Run the launcher with this argv against a handoff directory of its own.
 
     Returns (completed process, [handoff bodies it wrote]) - the bodies rather
     than the filenames, because the bug being pinned is about what a handoff
     SAYS, and a filename cannot tell a recorded typo from a recorded message.
     Dry-run, because these cases are about the argv border and the record it
-    leaves; the transport is exercised elsewhere.
+    leaves; the transport is exercised elsewhere. `path_prefix` goes ahead of the
+    fixtures, never in place of them: a caller that could replace the PATH could
+    also lose the fixture tmux and refuse for want of a transport - the same
+    exit code as an argv refusal, proving nothing about argv.
     """
+    path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
     handoffs = os.path.join(workdir, "handoffs")
     try:
@@ -671,7 +675,7 @@ check("-- hands a lone two-dash word through to the handoff",
 # status - a code the contract does not mention, under a message naming neither
 # this tool nor what it was trying to write. The mktemp comes before the handoff
 # is written, so nothing recorded is part of the contract here too.
-done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{FIXTURES}:{REAL_DIRS}")
+done, bodies = argv_case("a real handoff", path_prefix=NO_TMPDIR_BIN)
 check("a tempfile it cannot make is refused as the launcher, not as mktemp",
       done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
@@ -803,7 +807,7 @@ finally:
 # behind. The path it names is read back out of the handoff's own body rather than
 # reconstructed here: the file states where it lives, and the refusal has to agree
 # with it, so the two representations are checked against each other.
-done, bodies = argv_case("a real handoff", path=f"{BAD_GOALPATH_BIN}:{FIXTURES}:{REAL_DIRS}")
+done, bodies = argv_case("a real handoff", path_prefix=BAD_GOALPATH_BIN)
 msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
 check("a carried goal it cannot write still says where the handoff is",
       done.returncode == REFUSED_RC and len(bodies) == 1 and msgpath in done.stderr
@@ -1333,8 +1337,13 @@ STRANGER.wait()
 done = run()
 check("every run resets: a transport is chosen with no flag asked for",
       "transport=" in done.stdout and "handoff recorded" not in done.stdout, done.stdout[:200])
-check("and the old opt-in flag is refused as the unknown flag it now is",
-      run(message="--reset").returncode == REFUSED_RC, "")
+# The removed flag, in the value-carrying forms callers used to write. A launcher that grew
+# the arm back would accept these, so a bare `--reset` (refused either way) proves nothing.
+for mode in ("clear", "compact"):
+    done, bodies = argv_case("--reset", mode, "real work goes here")
+    check(f"--reset {mode} is refused as the unknown flag it now is",
+          done.returncode == REFUSED_RC and "unknown flag '--reset'" in done.stderr
+          and bodies == [], f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
 try:

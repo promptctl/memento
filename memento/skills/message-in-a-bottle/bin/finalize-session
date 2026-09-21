@@ -463,7 +463,7 @@ case "$MODE" in
   launcher)
     # [LAW:dataflow-not-control-flow] an optional carried goal is a leading
     # --goal <condition> value, stripped here so the remainder is the message.
-    # /clear, /compact, and a fresh relaunch all wipe the session-scoped /goal, so
+    # /clear and a fresh relaunch both wipe the session-scoped /goal, so
     # without this the next agent wakes with no goal and the autonomous run stops.
     # Absent → empty string; the same code path runs, the value decides the effect.
     GOAL=""

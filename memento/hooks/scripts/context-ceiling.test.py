@@ -246,7 +246,7 @@ code, out, _ = run([user, assistant(OVER),
 check("a confirming git call after the close-out does not undo it",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
-# The tmux transport compacts in place, so the transcript keeps growing past a close-out.
+# The tmux transport clears in place, so the transcript keeps growing past a close-out.
 # Crediting that one forever would wave through every later breach in the same file.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
