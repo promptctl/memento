@@ -443,7 +443,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
-        message="handoff", handoff_dir=None, reset="clear", dry_run="1",
+        message="handoff", handoff_dir=None, dry_run="1",
         log_mktemp_fails=False, cwd_gone=False, ps_second_read=None,
         self_dir_gone=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
@@ -526,7 +526,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # gone - the fixture states one condition and not two.
         launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
-        argv = [NEST_BIN, str(depth)] + entry + (["--reset", reset] if reset else []) + [message]
+        argv = [NEST_BIN, str(depth)] + entry + [message]
         done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
         # The chain's top pid, read before the workdir goes away. It names both the
@@ -602,12 +602,14 @@ check("the tmux-absent PATH can still run the launcher",
 
 
 
-def argv_case(*args, path=REAL_DIRS):
+def argv_case(*args, path=f"{FIXTURES}:{REAL_DIRS}"):
     """Run the launcher with this argv against a handoff directory of its own.
 
     Returns (completed process, [handoff bodies it wrote]) - the bodies rather
     than the filenames, because the bug being pinned is about what a handoff
     SAYS, and a filename cannot tell a recorded typo from a recorded message.
+    Dry-run, because these cases are about the argv border and the record it
+    leaves; the transport is exercised elsewhere.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
     handoffs = os.path.join(workdir, "handoffs")
@@ -615,7 +617,8 @@ def argv_case(*args, path=REAL_DIRS):
         done = subprocess.run(
             [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
-                 "MEMENTO_HANDOFF_DIR": handoffs})
+                 "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
+                 "TMUX_PANE": "%99", "FIXTURE_PANES": "%99 0 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
@@ -649,7 +652,7 @@ for text in ("-h", "- shipped the parser"):
 # The newline clause. No flag spans a line, so a multi-line argument is prose
 # however it opens - and the close-out's handoff is routinely a multi-line recap,
 # written by a session with no context left to spend on a parse error.
-recap = "--reset was already passed\nso this line is recap, not argv"
+recap = "--goal was already passed\nso this line is recap, not argv"
 done, bodies = argv_case(recap)
 check("a multi-line message is text even when it opens with two dashes",
       done.returncode == 0 and len(bodies) == 1 and recap in bodies[0],
@@ -668,7 +671,7 @@ check("-- hands a lone two-dash word through to the handoff",
 # status - a code the contract does not mention, under a message naming neither
 # this tool nor what it was trying to write. The mktemp comes before the handoff
 # is written, so nothing recorded is part of the contract here too.
-done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{REAL_DIRS}")
+done, bodies = argv_case("a real handoff", path=f"{NO_TMPDIR_BIN}:{FIXTURES}:{REAL_DIRS}")
 check("a tempfile it cannot make is refused as the launcher, not as mktemp",
       done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
@@ -800,7 +803,7 @@ finally:
 # behind. The path it names is read back out of the handoff's own body rather than
 # reconstructed here: the file states where it lives, and the refusal has to agree
 # with it, so the two representations are checked against each other.
-done, bodies = argv_case("a real handoff", path=f"{BAD_GOALPATH_BIN}:{REAL_DIRS}")
+done, bodies = argv_case("a real handoff", path=f"{BAD_GOALPATH_BIN}:{FIXTURES}:{REAL_DIRS}")
 msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
 check("a carried goal it cannot write still says where the handoff is",
       done.returncode == REFUSED_RC and len(bodies) == 1 and msgpath in done.stderr
@@ -1271,7 +1274,7 @@ def tmux_worker_case(pane_text, timeout="2"):
     }
     try:
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", "clear", msgfile, goalfile],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -1323,37 +1326,22 @@ finally:
 
 STRANGER.terminate()
 STRANGER.wait()
-# --- the reset is spent only when it was asked for --------------------------------------
-# Recording the handoff and resetting the session are separate jobs. Welded together, every
-# "the unit is done" judgment upstream threw away a session that still had most of its
-# context. The launcher no longer measures anything to decide: the ceiling hook is the one
-# clock, and `--reset` is how it says a session is out of room. [LAW:one-source-of-truth]
+# --- a handoff hands off: record and reset are one act ----------------------------------
+# There is no flag that records the message and leaves the session running. Every run picks
+# a transport, and the message is on disk before it does. [LAW:no-mode-explosion]
 
-done = run(reset=None)
-check("with no --reset the handoff is recorded and the session keeps its context",
-      "handoff recorded" in done.stdout and "no reset" in done.stdout
-      and "transport=" not in done.stdout, done.stdout[:200])
-check("and it names the flag that would have reset it",
-      "--reset" in done.stdout, done.stdout[:200])
-
-done = run(reset="clear")
-check("an explicit --reset resets rather than recording only",
-      "transport=" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
-check("and the mode it was handed is the mode the transport is told to use",
-      "reset=/clear" in done.stdout, done.stdout[:200])
-# The other mode, driven separately because the flag is now the only thing that can select it:
-# the message-text inference that used to choose `compact` is gone. `compact` is also the value
-# the ceiling hook's own instruction hands out, so an untested flag here is an untested hook.
-done = run(reset="compact")
-check("--reset compact, the mode the hook passes at the ceiling, reaches the transport",
-      "reset=/compact" in done.stdout and "no reset" not in done.stdout, done.stdout[:200])
+done = run()
+check("every run resets: a transport is chosen with no flag asked for",
+      "transport=" in done.stdout and "handoff recorded" not in done.stdout, done.stdout[:200])
+check("and the old opt-in flag is refused as the unknown flag it now is",
+      run(message="--reset").returncode == REFUSED_RC, "")
 
 handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
 try:
-    run(reset=None, handoff_dir=handoffs, message="carry this forward")
+    run(handoff_dir=handoffs, message="carry this forward")
     written = [os.path.join(handoffs, n) for n in os.listdir(handoffs)]
-    check("the handoff is on disk even when nothing was reset", len(written) == 1, str(written))
-    check("and carries the message, so the record is the same either way",
+    check("the handoff is on disk before the transport runs", len(written) == 1, str(written))
+    check("and carries the message",
           written and "carry this forward" in open(written[0]).read(), str(written))
 finally:
     shutil.rmtree(handoffs, ignore_errors=True)

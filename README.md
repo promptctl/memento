@@ -70,18 +70,15 @@ The contract for writing a fourth is in
 it at the end of a unit of work (PR merged, ticket closed, task delivered) or when the
 context is running out. It calls
 `memento/skills/message-in-a-bottle/bin/finalize-session`, which records the handoff to
-disk and, with `--reset`, also schedules a delayed handoff into your own session: the
-session resets, and the message you wrote arrives as the next agent's opening prompt.
-Without the flag it prints the path it wrote and leaves the session running, so writing
-the message need not cost you your context.
+disk and schedules a delayed handoff into your own session: the session resets, and the
+message you wrote arrives as the next agent's opening prompt. Every run resets; a handoff
+hands off.
 
 ```bash
-finalize-session [--goal '<condition>'] [--reset clear|compact] [--] [message...]
+finalize-session [--goal '<condition>'] [--] [message...]
 ```
 
-With no message it hands off `/next`. `clear` starts the next session blank and `compact`
-starts it with a compacted summary — a distinction only the tmux transport can honour,
-since the other two launch a fresh process and are blank by construction.
+With no message it hands off `/next`. The next session starts blank on every transport.
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run.
 
@@ -92,7 +89,7 @@ instead of being swallowed as message text. Only a two-dash word is read as a fl
 record as the message they are. Put `--` first when the message begins with a two-dash
 word, whatever comes after it: `finalize-session -- --already-fixed see PR 123`.
 
-When it does reset, the launcher picks its transport by capability: reset the tmux pane
+The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
 anything.
@@ -181,7 +178,7 @@ spent where a session is still far below any ceiling.
 
 The record is keyed on the session id and is never rewritten, so a session that closes
 out and carries on keeps the ceiling it started under.
-`finalize-session --reset clear|compact` sends `/clear` or `/compact` as keystrokes into
+On the tmux transport `finalize-session` sends `/clear` as keystrokes into
 the same running process: the process survives and the session id with it, so the context
 after the reset is a new context under an old record. A later change to a shared file
 never reaches it, however much it looks from the pane like a session that started
@@ -319,8 +316,7 @@ still refused loudly.
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: commit or push
 everything outstanding first, then run the `finalize-session` launcher with a handoff
-message and `--reset compact`. The launcher always writes the handoff to disk; the flag is
-what makes recording it also reset the session.
+message. The launcher writes the handoff to disk and resets the session into it.
 
 It forces this **once per session**. If the session stops again, the hook sees
 `stop_hook_active` and lets the stop proceed, printing a visible system message saying
