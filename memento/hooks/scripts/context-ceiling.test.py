@@ -77,9 +77,7 @@ def tool_use(name, tool_input, call_id="t-1", sidechain=False):
 
 # The launcher's own report of a scheduled reset is what credits a close-out, so a result
 # carries real launcher output by default and `out` only where the call is not one.
-SCHEDULED = "handoff scheduled \u2192 tmux memento:1.0 (/compact) in 10s (log: /tmp/l)"
-RECORDED = ("handoff recorded \u2192 /tmp/m.md\n"
-            "no reset: this session keeps its context, so carry on with the work.")
+SCHEDULED = "handoff scheduled \u2192 tmux memento:1.0 in 10s (log: /tmp/l)"
 
 
 def tool_result(call_id="t-1", is_error=False, content="out", sidechain=False):
@@ -150,10 +148,6 @@ check("over the ceiling, the stop is blocked", out and out.get("decision") == "b
 check("the reason names the launcher, the count and the ceiling",
       out and LAUNCHER in out["reason"] and f"{OVER:,}" in out["reason"]
       and f"{TEST_CEILING:,}" in out["reason"], str(out))
-# --reset is the whole coupling to finalize-session's contract: a handoff without it resets
-# nothing, so the instruction that omitted it would ask for a close-out that never closes out.
-check("the reason hands over the flag that actually resets the session",
-      out and "--reset compact" in out["reason"], str(out))
 # A worktree-isolated session may be refused the command above by the platform, which deleting
 # this hook's own gate did nothing to change.
 check("the reason tells a worktree session how to reach a directory it can run from",
@@ -169,14 +163,14 @@ check("giving up does not claim the close-out failed",
       and "was NOT closed out" not in out.get("systemMessage", ""), str(out))
 
 ran_closeout = [user, assistant(OVER),
-                tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}),
+                tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
                 tool_result(content=SCHEDULED)]
 code, out, _ = run(ran_closeout)
 check("a stop right after the close-out ran is allowed",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}),
+                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
                     tool_result(is_error=True, content=SCHEDULED)])
 check("a close-out that was refused does not count as having run",
       out and out.get("decision") == "block", str(out))
@@ -184,36 +178,20 @@ code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command": "git status"}), tool_result()])
 check("a call that is not the close-out does not count as one",
       out and out.get("decision") == "block", str(out))
-# Without --reset the launcher records the handoff and the session carries on with its context
-# untouched, and it says so. Crediting that would let a session at the ceiling satisfy this
-# check every turn and never free a token - the failure the block exists to prevent.
-code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
-                    tool_result(content=RECORDED)])
-check("a launcher call that reset nothing is not credited as the close-out",
-      out and out.get("decision") == "block", str(out))
 # The instruction hands out an absolute path, but an agent holding the skill may reach the
 # launcher by name, or through a wrapper. What it was called does not decide this; what it did.
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": "finalize-session --reset compact 'bye'"}),
+                    tool_use("Bash", {"command": "finalize-session 'bye'"}),
                     tool_result(content=SCHEDULED)])
 check("a bare-name close-out is credited at the stop",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
-# The two ways a command string lied. Naming the launcher and the flag is not running them:
-# the first of these ran nothing at all, and the second is a handoff message quoting the flag,
-# which finalize-session parses as no flag and this hook once read as one.
+# A command string that names the launcher without running it.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command":
-                        "echo 'reminder: run finalize-session --reset compact before stopping'"}),
-                    tool_result(content="reminder: run finalize-session --reset compact")])
+                        "echo 'reminder: run finalize-session before stopping'"}),
+                    tool_result(content="reminder: run finalize-session")])
 check("a command that only mentions the close-out is not credited as running it",
-      out and out.get("decision") == "block", str(out))
-code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command":
-                        f"{LAUNCHER} 'Next agent: run --reset compact once the audit is done'"}),
-                    tool_result(content=RECORDED)])
-check("--reset quoted inside the handoff message is not a close-out",
       out and out.get("decision") == "block", str(out))
 # The two ways a result lied, and both were reachable by following the block's own instruction:
 # it says to load the close-out contract, and an agent that then wants to know what the launcher
@@ -255,23 +233,23 @@ check("printing the line from a command that names the launcher is not a close-o
 # choked on; a real, successful close-out written that way must still be credited.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command":
-                        f'{LAUNCHER} --reset compact "See `git rev-parse HEAD`"'}),
+                        f'{LAUNCHER} "See `git rev-parse HEAD`"'}),
                     tool_result(content=SCHEDULED)])
 check("a close-out containing shell-special characters is credited if it ran",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}, call_id="a"),
+                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}, call_id="a"),
                     tool_result("a", content=SCHEDULED),
                     tool_use("Bash", {"command": "git push"}, call_id="b"),
                     tool_result("b")])
 check("a confirming git call after the close-out does not undo it",
       code == 0 and out and "decision" not in out
       and "the close-out ran" in out.get("systemMessage", ""), str(out))
-# The tmux transport compacts in place, so the transcript keeps growing past a close-out.
+# The tmux transport clears in place, so the transcript keeps growing past a close-out.
 # Crediting that one forever would wave through every later breach in the same file.
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}),
+                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
                     tool_result(content=SCHEDULED),
                     user, assistant(OVER)])
 check("a close-out from an earlier turn does not excuse a later breach",
@@ -563,7 +541,7 @@ check("a trailing subagent record does not mask the session's count",
 code, out, _ = run([user, assistant(UNDER), assistant(900_000, sidechain=True)])
 check("a subagent's context does not count against the session", code == 0 and out is None, str(out))
 code, out, _ = run([user, assistant(OVER),
-                    tool_use("Bash", {"command": f"{LAUNCHER} --reset compact 'bye'"}, sidechain=True),
+                    tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}, sidechain=True),
                     tool_result(content=SCHEDULED, sidechain=True)])
 check("a subagent running the launcher is not this session's close-out",
       out and out.get("decision") == "block", str(out))
@@ -674,11 +652,6 @@ check("the launcher's own source does not match the marker",
 prose = [line for line in open(CONTRACT) if "handoff scheduled" in line]
 check("the close-out contract's prose does not match the marker",
       len(prose) >= 2 and not any(marker.search(line) for line in prose), str(prose))
-# The no-reset path must not carry it, or a recorded handoff would credit a reset that never
-# happened - the failure that made the launcher's report worth reading in the first place.
-recording = [line for line in open(LAUNCHER) if re.search(r'^\s*echo "handoff recorded', line)]
-check("the launcher's record-only report does not match the marker",
-      len(recording) == 1 and not marker.search(recording[0]), str(recording))
 registered = json.load(open(os.path.join(os.path.dirname(HERE), "hooks.json")))["hooks"]
 # The count is only true of the live context at a stop: a session reset in place keeps its
 # transcript, so on any earlier event the newest record can describe a context already gone.

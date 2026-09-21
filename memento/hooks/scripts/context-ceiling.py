@@ -67,9 +67,9 @@ EXIT_HINT = ('In a worktree that command may be refused where you stand; run Exi
              'action "keep" first, and close out from the directory it returns you to.')
 
 INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
-    {launcher} --reset compact '<handoff message>'
+    {launcher} '<handoff message>'
 {exit_hint}
-`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
+Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
 
 def resolve_ceiling(hook):
     """The ceiling in force for the session this payload belongs to.
