@@ -143,14 +143,19 @@ def starts_a_turn(record):
     return record.get("type") == "user" and not any(
         isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks)
 
-def result_text(block):
-    """A tool result's text. The content is a plain string or a list of blocks depending on how
-    the tool returned, and a close-out is credited off what it says, so both shapes are read."""
-    content = block.get("content")
+def text_of(content):
+    """The text of a record's or block's `content`, which is a plain string or a list of blocks
+    depending on how it was written. [LAW:one-source-of-truth] both readers of a content field -
+    a tool result credited as a close-out and the opener a turn is escalated on - read it here, so
+    a list-shaped content is never mistaken for one with no text."""
     if isinstance(content, str):
         return content
-    return " ".join(part.get("text", "") for part in content or []
-                    if isinstance(part, dict))
+    return " ".join(block.get("text", "") for block in content or []
+                    if isinstance(block, dict))
+
+def result_text(block):
+    """A tool result's text, off which a close-out is credited."""
+    return text_of(block.get("content"))
 
 def launcher_ran(command):
     """Whether a Bash command invokes the launcher rather than reproducing its report.
@@ -241,11 +246,11 @@ def turn_opening(transcript_path):
 
     A block reaches the agent as a user record reading `Stop hook feedback:` and the reason, which
     is a record `starts_a_turn` counts. So for a stop that follows a block, this is what that block
-    said: the harness wrote it, and it is the one account of what the agent was told."""
+    said: the harness wrote it, and it is the one account of what the agent was told. `starts_a_turn`
+    admits a list-shaped opener as readily as a string one, so the text is read from either shape."""
     opener = next((record for record in records_newest_first(transcript_path)
                    if starts_a_turn(record)), {})
-    content = opener.get("message", {}).get("content")
-    return content if isinstance(content, str) else ""
+    return text_of(opener.get("message", {}).get("content"))
 
 def stop(hook, tokens, ceiling):
     """At most one close-out block per turn: a second one spends more context on the problem that

@@ -223,6 +223,16 @@ code, out, _ = run([user, assistant(OVER), fed_back(finishing), assistant(PAST_L
                     fed_back(closing), assistant(PAST_LIMIT + 5_000)], stop_hook_active=True)
 check("and the escalation happens once, not at every stop past the limit",
       code == 0 and out and "decision" not in out, str(out))
+# A user record's content is a string or a list of text blocks; the finishing block reaches the
+# transcript as either, and the band is read off its text the same way, so the escalation fires
+# whichever shape the harness wrote.
+def fed_back_blocks(verdict):
+    return {"type": "user", "isSidechain": False, "message": {"role": "user",
+            "content": [{"type": "text", "text": f"Stop hook feedback:\n{verdict['reason']}"}]}}
+code, out, _ = run([user, assistant(OVER), fed_back_blocks(finishing), assistant(PAST_LIMIT)],
+                   stop_hook_active=True)
+check("a finishing block fed back as list content still escalates at the limit",
+      out and out.get("decision") == "block" and "Close it out now" in out["reason"], str(out))
 
 # The limit rides on the ceiling rather than being set beside it, so a ceiling switched off has none.
 code, out, _ = run([user, assistant(5_000_000)], user_conf="ceiling = off\n")
