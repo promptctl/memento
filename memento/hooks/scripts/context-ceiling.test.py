@@ -730,6 +730,16 @@ gate_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
 check("and the malformed payload that stopped the gate is recorded in the log, not only stderr",
       "-> stopped" in gate_log and "cwd" in gate_log, gate_log)
 
+# stdin that parses but is not an object has no session to gate. It must stop loudly, and the stop
+# must still be recorded - the log names a session from a dict, so a non-dict payload reaching the
+# log call unguarded would raise inside the handler and skip the very line it exists to write.
+for raw in ("42", "null", "[]", "not json at all"):
+    env = dict(isolated, MEMENTO_CEILING_LOG=os.path.join(scratch_dir(), "log"))
+    done = subprocess.run([sys.executable, HOOK], input=raw, text=True, capture_output=True, env=env)
+    recorded = open(env["MEMENTO_CEILING_LOG"]).read()
+    check(f"a stdin payload {raw!r} that is not a Stop object fails loudly and is still recorded",
+          done.returncode == 1 and "-> stopped" in recorded, f"{done.returncode} | {recorded!r}")
+
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
 # only exit from the block fails to execute. The shared config module is copied in beside the
 # hook because a plugin root is the whole directory: the hook resolves `lib/` relative to

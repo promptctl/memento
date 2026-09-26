@@ -295,20 +295,25 @@ def stop(hook, tokens, ceiling):
         exit_hint=EXIT_HINT)}
 
 # The ceiling is read from the payload's session and project, so it is resolved here rather
-# than at import: what it depends on does not exist until stdin has been read. The transcript
-# is measured first so a payload missing it is named by the field it is missing.
-hook = json.load(sys.stdin)
-# [LAW:no-silent-failure] every way the hook can stop before it gates leaves the same wound - a
-# drifted hooks.json calling it off Stop, an unreadable transcript, a config the layer rejects
-# (SystemExit, its documented failure arm), a payload missing cwd or session_id (KeyError). Each
-# exits nonzero, which Claude Code treats as non-blocking, so the gate is then off and stderr
-# scrolls away. Everything after the payload is parsed runs inside the guard, so the error is
-# re-raised unchanged - still surfacing loudly, nothing swallowed - but first the log records that
-# the gate stopped and why, the only place a gate-off session differs from an allowed one. tokens
-# is unknown until measured, so a stop before or during measurement records that rather than a
-# stale count, and the count off a non-Stop event is never true anyway.
+# than at import: what it depends on does not exist until stdin has been read.
+# [LAW:no-silent-failure] every way the hook can stop before it gates leaves the same wound - stdin
+# that is not a JSON object, a drifted hooks.json calling it off Stop, an unreadable transcript, a
+# config the layer rejects (SystemExit, its documented failure arm), a payload missing cwd or
+# session_id (KeyError). Each exits nonzero, which Claude Code treats as non-blocking, so the gate
+# is then off and stderr scrolls away. Everything from reading stdin on runs inside the guard, so
+# the error is re-raised unchanged - still surfacing loudly, nothing swallowed - but first the log
+# records that the gate stopped and why, the only place a gate-off session differs from an allowed
+# one. tokens and ceiling hold their unknown sentinels until each is computed, so a stop records
+# whatever was already established rather than a stale value; the count off a non-Stop event is
+# never true anyway.
+hook = None
 tokens = "unknown"
+ceiling = "unresolved"
 try:
+    hook = json.load(sys.stdin)
+    if not isinstance(hook, dict):
+        sys.exit(f"memento context ceiling: stdin must be a JSON object, got "
+                 f"{type(hook).__name__}.")
     if hook["hook_event_name"] != "Stop":
         sys.exit(f"memento context ceiling: registered on Stop, called on "
                  f"{hook['hook_event_name']}. Fix hooks.json.")
@@ -317,10 +322,11 @@ try:
     label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
 except (Exception, SystemExit) as unresolved:
     # SystemExit carries its curated message in `code`; other errors carry type and args, so a
-    # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
+    # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`. `hook` is whatever parsed, or
+    # None/non-dict when the failure came before it was one - log needs a dict to name a session.
     reason = (unresolved.code if isinstance(unresolved, SystemExit)
               else f"{type(unresolved).__name__}: {unresolved}")
-    log(hook, tokens, "unresolved", f"stopped: {reason}")
+    log(hook if isinstance(hook, dict) else {}, tokens, ceiling, f"stopped: {reason}")
     raise
 log(hook, tokens, ceiling, label)
 if verdict:
