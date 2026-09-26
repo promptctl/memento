@@ -304,7 +304,16 @@ if hook["hook_event_name"] != "Stop":
     sys.exit(f"memento context ceiling: registered on Stop, called on "
              f"{hook['hook_event_name']}. Fix hooks.json.")
 tokens = context_tokens(hook["transcript_path"])
-ceiling = resolve_ceiling(hook)
+try:
+    ceiling = resolve_ceiling(hook)
+except SystemExit as unreadable:
+    # [LAW:no-silent-failure] the config layer's failure arm is the process (ceiling_config
+    # docstring), and Claude Code treats a stopped Stop hook as non-blocking - so the gate is now
+    # off for this session. The exit is re-raised unchanged: the key stays rejected, loudly on
+    # stderr. What is added is the one durable record that the gate stopped and why, since the log
+    # is the only place a session running with no ceiling differs from one under it.
+    log(hook, tokens, "unresolved", f"stopped: {unreadable.code}")
+    raise
 
 label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
 log(hook, tokens, ceiling, label)

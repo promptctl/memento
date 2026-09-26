@@ -461,6 +461,10 @@ code, out, err = run([user, assistant(400_000)], config_home=home,
                      user_conf="ceilling = 350000\n", session="s-into-breakage")
 check("while a session starting into that broken file still fails loudly",
       code == 1 and "ceilling" in err, f"{code} {err}")
+# The loud stderr is not enough: a stopped Stop hook is non-blocking, so this session now runs
+# with no ceiling, and stderr scrolls away. The log is where that has to be legible after.
+check("and the stopped gate leaves a durable log line, not only stderr",
+      "-> stopped" in run.log and "ceilling" in run.log, run.log)
 
 # Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
 # and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
@@ -539,6 +543,11 @@ code, out, err = run([user, assistant(OVER)], user_conf="context_ceiling = 35000
 check("the retired key is refused rather than read as a synonym",
       code == 1 and "context_ceiling" in err and "It reads: ceiling" in err and "line 1" in err,
       f"{code} {err}")
+# Every upgrade path from a machine that ever set a ceiling runs through this key, and rejecting it
+# stops the hook before the ceiling is resolved. The log has to record that stop and name the key,
+# or a machine gated off by a stale config looks exactly like one no session has crossed.
+check("a session stopped by a rejected key records the stop and the key in the log",
+      "-> stopped" in run.log and "context_ceiling" in run.log, run.log)
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling 350000\n")
 check("a line with no `=` fails loudly",
       code == 1 and "key = value" in err, f"{code} {err}")
