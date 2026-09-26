@@ -180,14 +180,19 @@ the gate, and never wrote a handoff. The record is made at the first stop rather
 the first token because `Stop` is the only event this hook is given — one turn of drift,
 spent where a session is still far below any ceiling.
 
-The record is keyed on the session id and is never rewritten, so a session that closes
-out and carries on keeps the ceiling it started under.
-On the tmux transport `finalize-session` sends `/clear` as keystrokes into
-the same running process: the process survives and the session id with it, so the context
-after the reset is a new context under an old record. A later change to a shared file
-never reaches it, however much it looks from the pane like a session that started
-afterwards. Its own layer still applies immediately, so a session in that position can
-still give itself room.
+The record is keyed on the session id, which outlives a reset in place: on the tmux
+transport `finalize-session` sends `/clear` or `/compact` as keystrokes into the same
+running process, so the process and its id survive and the context after the reset is a new
+one under the old record. Left there, that record would freeze the first context's ceiling
+onto every context the pane runs after it. So a credited close-out notes the context size
+at that moment beside the record, and the next stop decides by it. A context that has
+fallen below that size is the reset's fresh, smaller one, and the record is re-derived from
+the shared files as they now stand — a session that closes out and carries on picks up a
+change made to a shared file while it ran. A context that has not fallen is the same one
+still running — a reset scheduled but not yet landed, or one that never will — and the
+record stands, so a session still mid-work is never re-frozen from a file that moved under
+it. Its own layer applies immediately either way, so a session in that position can still
+give itself room.
 
 The session's own layer is read live at every stop and applies immediately in both
 directions, raising and lowering alike. `ceiling set session +100_000` writes that layer

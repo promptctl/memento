@@ -36,8 +36,8 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import (GRACE, SHARED_AT_START, anchored, in_force,  # noqa: E402
-                            mark_seen, session_directory, shared_at_start,
-                            sweep_sessions)
+                            mark_reset_pending, mark_seen, session_directory,
+                            session_shared, sweep_sessions)
 
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
@@ -105,7 +105,7 @@ CLOSING = Band("block",
     "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
     "session starts with nothing.")
 
-def resolve_ceiling(hook):
+def resolve_ceiling(hook, tokens, close_out):
     """The ceiling in force for the session this payload belongs to.
 
     The project is anchored at the directory the session belongs to rather than wherever a Bash
@@ -113,21 +113,32 @@ def resolve_ceiling(hook):
     layers. Reading the shared layers is also what records them for this session, which is why this
     runs at a stop and nowhere else.
 
-    A stop is also the one moment memento observes this session, so the two things that keep the
-    sessions tree from growing without bound hang off it. The first stop - the one that creates the
-    record - is the occasion to sweep every other session gone stale past the cutoff; the record it
-    just wrote is already young, so it needs no touch. Every later stop instead touches the record, so
-    it stays young for as long as the session keeps stopping. The sweep is paid once per session, not
-    once per stop, and never removes the directory just created."""
+    A stop is also the one moment memento observes this session, so the session bookkeeping that no
+    other event can do hangs off it. `session_shared` reads the recorded shared value, re-deriving it
+    once a credited close-out's reset has actually landed - a session reset in place keeps its id and
+    its record, so a stop is where that record is refreshed for the new context or kept for the old
+    one. The two things that keep the sessions tree from growing without bound hang off the same stop:
+    the first stop - the one that creates the record - sweeps every other session gone stale past the
+    cutoff; the record it just wrote is already young, so it needs no touch. Every later stop instead
+    touches the record, so it stays young for as long as the session keeps stopping. The sweep is paid
+    once per session, not once per stop, and never removes the directory just created.
+
+    A close-out credited this turn leaves the marker `session_shared` reads at a later stop, holding
+    the context size now so that stop can tell the reset landed. It is written after the read above, so
+    this turn's own close-out never reads as its own landed reset - the reset is scheduled with a delay
+    and lands at a future stop, not this one. [LAW:no-ambient-temporal-coupling] It is recorded whether
+    or not the session is past its ceiling, because a session closes out at the end of any unit of
+    work, not only when the ceiling forces it."""
     anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
-    record = directory / SHARED_AT_START
-    shared, first_stop = shared_at_start(record, anchor)
+    shared, first_stop = session_shared(directory, anchor, tokens)
     ceiling = in_force(directory, shared)
     if first_stop:
         sweep_sessions(directory)
     else:
-        mark_seen(record)
+        mark_seen(directory / SHARED_AT_START)
+    if close_out:
+        mark_reset_pending(directory, tokens)
     return ceiling
 
 def records_newest_first(transcript_path):
@@ -274,7 +285,7 @@ def turn_opening(transcript_path):
                    if starts_a_turn(record)), {})
     return text_of(opener.get("message", {}).get("content"))
 
-def stop(hook, tokens, ceiling):
+def stop(hook, tokens, ceiling, close_out):
     """At most one close-out block per turn: a second one spends more context on the problem that
     IS too much context, and an agent that cannot run the close-out would be blocked forever.
 
@@ -290,7 +301,7 @@ def stop(hook, tokens, ceiling):
     escalation sends then opens the next turn, and it is not a finishing block, so the chain ends."""
     limit = ceiling + GRACE
     band = CLOSING if tokens >= limit else FINISHING
-    if closed_out(hook["transcript_path"]):
+    if close_out:
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
                                                f"tokens, past the {ceiling:,} ceiling, so "
                                                f"the stop proceeds."}
@@ -333,8 +344,14 @@ try:
         sys.exit(f"memento context ceiling: registered on Stop, called on "
                  f"{hook['hook_event_name']}. Fix hooks.json.")
     tokens = context_tokens(hook["transcript_path"])
-    ceiling = resolve_ceiling(hook)
-    label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
+    # Read once and threaded through both readers: resolve_ceiling records the marker a later stop
+    # reads to tell a landed reset from a stranded one, and stop credits the close-out that lets this
+    # stop proceed. It is asked at every stop, not only past the ceiling, because a session closes out
+    # at the end of any unit of work. [LAW:one-source-of-truth]
+    close_out = closed_out(hook["transcript_path"])
+    ceiling = resolve_ceiling(hook, tokens, close_out)
+    label, verdict = (("allow-under", None) if tokens < ceiling
+                      else stop(hook, tokens, ceiling, close_out))
 except (Exception, SystemExit) as unresolved:
     # SystemExit carries its curated message in `code`; other errors carry type and args, so a
     # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`. `hook` is whatever parsed, or

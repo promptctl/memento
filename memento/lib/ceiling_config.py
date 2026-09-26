@@ -60,6 +60,14 @@ PROJECT_CONFIG_DIR = ".promptctl"
 # from being two clocks. [LAW:one-source-of-truth] The name says what it holds rather than what
 # it sets, because a file called `shared.conf` invites the hand-edit that would defeat it.
 SHARED_AT_START = "shared-at-start.conf"
+# The context size a session measured when its close-out was credited, kept beside the record so a
+# later stop can tell a reset that landed from one that was scheduled and never did. The tmux
+# transport resets a session in place, keeping its id and so its record, which would otherwise freeze
+# the first context's shared ceiling onto every context after it. A later stop whose context has
+# fallen below this number is running the reset's fresh, smaller context and re-derives; one that has
+# not is still running the original context and must keep the value it froze. The name says what its
+# presence means - a reset awaiting confirmation - rather than what it holds. [LAW:one-source-of-truth]
+RESET_PENDING = "reset-pending"
 CEILING_KEY = "ceiling"
 DISABLING_WORD = "off"
 PROJECT_VARIABLE = "CLAUDE_PROJECT_DIR"
@@ -416,7 +424,9 @@ def shared_at_start(path, anchor):
     The record is made at the session's first stop rather than at its first token, because a
     stop is the only event the hook is given. That is one turn of drift, spent where a session
     is still far below any ceiling. Nothing here overwrites a record that already stands: the
-    write is reached only for a path `ceiling_in` read nothing from.
+    write is reached only for a path `ceiling_in` read nothing from. The one thing that does
+    replace a standing record is `session_shared`, and only once a reset in place has landed - a
+    lifecycle event, not the mid-run re-read this freeze exists to refuse.
 
     Returns the record and whether this call created it. The one caller maintaining the sessions tree
     needs to know if this was the session's first stop, and this function already knows - it just chose
@@ -426,6 +436,64 @@ def shared_at_start(path, anchor):
     if existing:
         return existing, False
     return write_ceiling(path, live_shared(anchor)), True
+
+
+def mark_reset_pending(directory, tokens):
+    """Record the context size at a credited close-out, so a later stop can tell whether the reset it
+    scheduled actually landed (the context is now smaller) or never did (it is not).
+
+    [LAW:effects-at-boundaries] Best-effort like `mark_seen`: a marker that fails to write costs the
+    session one shared refresh until its next close-out, never the gate, so the failure is reported and
+    not raised. [LAW:no-silent-failure] A torn write can only shorten the number, which lowers the
+    threshold and so can only *miss* a re-derive, never force a wrong one - the safe direction - which
+    is why this needs none of the record's staged-then-replaced care."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / RESET_PENDING).write_text(f"{tokens}\n")
+    except OSError as failure:
+        print(f"memento config: cannot mark reset pending in {directory}: {failure}", file=sys.stderr)
+
+
+def reset_pending_tokens(marker):
+    """The context size recorded when this session's close-out was credited, or None if no reset is
+    pending.
+
+    The marker is memento's own file holding one integer; a missing or unreadable one is treated as no
+    pending reset, healing at the next close-out, because a stale marker must never take the gate down
+    the way a raise from here would. [LAW:no-silent-failure]"""
+    try:
+        return int(marker.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+    except OSError as failure:
+        print(f"memento config: cannot read {marker}: {failure}", file=sys.stderr)
+        return None
+
+
+def session_shared(directory, anchor, tokens):
+    """The shared ceiling this session holds now, re-derived once a credited close-out's reset lands.
+
+    `shared_at_start` freezes the shared layers for a session's life, so a file a stranger edits cannot
+    move a running session's ceiling mid-run. The tmux transport resets a session in place, keeping its
+    id and so that record, which would freeze the *first* context's ceiling onto every context after it
+    - the staleness this ticket is about. A close-out leaves `mark_reset_pending` holding the context
+    size at that moment; a later stop whose context has fallen below it is running the reset's fresh,
+    smaller context, so the record is re-derived from the shared layers as they now stand and the marker
+    is spent. A context that has NOT fallen - a reset scheduled but never landed - keeps the record, so a
+    session still running its original large context is never re-frozen from files that moved under it,
+    which is the very thing the record exists to prevent. [LAW:no-ambient-temporal-coupling]
+
+    The test is conservative on purpose. A fresh context grown back past the close-out size before its
+    first stop reads as 'not landed' and keeps the frozen value, healing at a later close-out rather
+    than risking a re-freeze of a live context: a missed refresh is the mild original bug, a wrong one
+    is the dangerous one. A re-derive is not the session's first stop - the record and the sessions-tree
+    sweep both stand from the real first stop - so it reports `False`."""
+    record = directory / SHARED_AT_START
+    frozen_at = reset_pending_tokens(directory / RESET_PENDING)
+    if frozen_at is not None and tokens < frozen_at:
+        (directory / RESET_PENDING).unlink(missing_ok=True)
+        return write_ceiling(record, live_shared(anchor)), False
+    return shared_at_start(record, anchor)
 
 
 def shared_unrecorded(path, anchor):
