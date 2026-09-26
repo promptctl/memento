@@ -303,25 +303,26 @@ hook = json.load(sys.stdin)
 if hook["hook_event_name"] != "Stop":
     sys.exit(f"memento context ceiling: registered on Stop, called on "
              f"{hook['hook_event_name']}. Fix hooks.json.")
-tokens = context_tokens(hook["transcript_path"])
+# [LAW:no-silent-failure] every way of reaching a verdict can fail - an unreadable transcript, a
+# config the layer rejects (SystemExit, its documented failure arm), a payload missing cwd or
+# session_id (KeyError) - and each stops the hook before it gates. Claude Code treats the nonzero
+# Stop exit as non-blocking, so the gate is then off for this session and stderr scrolls away. The
+# error is re-raised unchanged, so it still surfaces loudly and nothing is swallowed; what is added
+# is the one durable record that the gate stopped and why - the only place a gate-off session
+# differs from an allowed one. tokens is unknown until measured, so a failure to measure records
+# that rather than a stale count.
+tokens = "unknown"
 try:
+    tokens = context_tokens(hook["transcript_path"])
     ceiling = resolve_ceiling(hook)
+    label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
 except (Exception, SystemExit) as unresolved:
-    # [LAW:no-silent-failure] every way resolving a ceiling can fail leaves the same wound: a
-    # config the layer rejects (SystemExit, its documented failure arm), a payload missing cwd or
-    # session_id (KeyError) - each stops the hook before it can gate, and Claude Code treats the
-    # nonzero Stop exit as non-blocking, so the gate is now off for this session. The error is
-    # re-raised unchanged, so it still surfaces loudly - the config message on stderr, the
-    # traceback for a malformed payload - and nothing is swallowed. What is added is the one
-    # durable record that the gate stopped and why, the only place a gate-off session differs from
-    # an allowed one. SystemExit carries its curated message in `code`; other errors carry their
-    # type and args, so a KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
+    # SystemExit carries its curated message in `code`; other errors carry type and args, so a
+    # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
     reason = (unresolved.code if isinstance(unresolved, SystemExit)
               else f"{type(unresolved).__name__}: {unresolved}")
     log(hook, tokens, "unresolved", f"stopped: {reason}")
     raise
-
-label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
 log(hook, tokens, ceiling, label)
 if verdict:
     print(json.dumps(verdict))

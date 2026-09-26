@@ -698,6 +698,12 @@ done = subprocess.run([sys.executable, HOOK], input='{"hook_event_name": "Stop"}
                       capture_output=True, env=isolated)
 check("a payload with no transcript_path fails loudly",
       done.returncode == 1 and "transcript_path" in done.stderr, str(done)[:200])
+# The transcript is read before the ceiling is resolved, so a payload the hook stops on here dies
+# even earlier than the no-cwd one - and it must leave the same durable record, or the gate goes
+# off with only a traceback that scrolls away. Nothing before this writes the isolated log.
+stopped_early = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and a stop before the transcript is even read is recorded, not only on stderr",
+      "-> stopped" in stopped_early and "transcript_path" in stopped_early, stopped_early)
 # The project config is resolved from it, so a payload without it is a hook that would
 # silently read no project config at all.
 empty_transcript = write_conf(os.path.join(scratch_dir(), "t.jsonl"), "")
