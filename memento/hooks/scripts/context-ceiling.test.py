@@ -689,18 +689,28 @@ done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_out
                       env=isolated)
 check("a payload with no event fails loudly",
       done.returncode == 1 and "hook_event_name" in done.stderr, str(done)[:200])
+# Even a payload too malformed to name its event stops inside the guard, so the gate-off is
+# recorded, not only thrown. This is the first isolated-env call, so the log holds just its line.
+no_event_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and the stop on an unrecognisable payload is recorded, not only on stderr",
+      "-> stopped" in no_event_log and "hook_event_name" in no_event_log, no_event_log)
 # The count is only true at a stop, so being called anywhere else means hooks.json has drifted
 # from this file. Measuring anyway is how a session gets denied on a number that is not its own.
 code, out, err = run([user, assistant(OVER)], event="PreToolUse")
 check("an event that is not Stop stops the hook rather than measuring",
       code == 1 and "PreToolUse" in err and "hooks.json" in err, f"{code} {err[:200]}")
+# A drifted hooks.json fires this hook off Stop on every call, silently ungating every session; the
+# stop belongs in the log for the same reason a rejected config does.
+check("and a hook fired off Stop records the stop, not only on stderr",
+      "-> stopped" in run.log and "PreToolUse" in run.log, run.log)
 done = subprocess.run([sys.executable, HOOK], input='{"hook_event_name": "Stop"}', text=True,
                       capture_output=True, env=isolated)
 check("a payload with no transcript_path fails loudly",
       done.returncode == 1 and "transcript_path" in done.stderr, str(done)[:200])
 # The transcript is read before the ceiling is resolved, so a payload the hook stops on here dies
 # even earlier than the no-cwd one - and it must leave the same durable record, or the gate goes
-# off with only a traceback that scrolls away. Nothing before this writes the isolated log.
+# off with only a traceback that scrolls away. The log is cumulative across the isolated env's
+# earlier calls, so `transcript_path` - unique to this run - identifies its line.
 stopped_early = open(isolated["MEMENTO_CEILING_LOG"]).read()
 check("and a stop before the transcript is even read is recorded, not only on stderr",
       "-> stopped" in stopped_early and "transcript_path" in stopped_early, stopped_early)
@@ -714,7 +724,8 @@ check("a payload with no cwd fails loudly",
       done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
 # A malformed payload stops the hook before it can gate, exactly as a rejected config does, and a
 # stopped Stop hook is non-blocking - so this too must leave the durable record, not only a
-# traceback that scrolls away. Nothing else writes this log, so the stopped line is the no-cwd one.
+# traceback that scrolls away. This log is cumulative across the isolated env's earlier calls (the
+# no-transcript_path one above wrote to it too), so `cwd`, unique to this run, identifies its line.
 gate_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
 check("and the malformed payload that stopped the gate is recorded in the log, not only stderr",
       "-> stopped" in gate_log and "cwd" in gate_log, gate_log)
