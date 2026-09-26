@@ -107,7 +107,7 @@ Returns every pending finding on the PR in canonical form.
             "line_end":        42,                  # nullable
             "body":            "...",               # required; first comment body
             "author":          "github-actions",    # required
-            "thread_id":       "PRRT_xyz...",       # nullable if resolve=False
+            "thread_id":       "PRRT_xyz...",       # null for a body finding, or when resolve=False
             "is_resolved":     False,               # required
             "thread_comments": [                    # required; may be one element
                 {"author": "...", "body": "..."}
@@ -117,8 +117,15 @@ Returns every pending finding on the PR in canonical form.
 }
 ```
 
-`thread_id` MUST be non-null for every finding when `CAPABILITIES["resolve"]`
-is `True`. It is null-safe to omit when `resolve` is `False`.
+`fetch` returns two kinds of finding in one list. An **inline-thread finding**
+has a real `thread_id` and — when `CAPABILITIES["resolve"]` is `True` — resolves
+through `resolve`. A **body finding** is one the reviewer could not anchor to a
+diff line, so it rendered it in the `CHANGES_REQUESTED` review body instead; it
+carries `thread_id` null **even when `resolve` is `True`**, has no thread, and is
+unresolvable — its disposition is the dismissal of the blocking review it lives in
+(`change_requests` / `dismiss_review`), never a `resolve` call. So `thread_id` is
+non-null for an inline-thread finding under `resolve: True`, and null for a body
+finding and for every finding when `resolve` is `False`. `[LAW:one-source-of-truth]`
 
 The skill treats `is_resolved: false` findings as unresolved. The loop exits
 when this list is empty. Providers must not filter findings server-side — the

@@ -334,6 +334,16 @@ check("change_requests: only the blocking reviews, in the contract's projection"
 check("change_requests: its own gh call walks every page",
       len(fake.calls) == 2 and "--paginate" in fake.calls[1], f"got {fake.calls}")
 
+# [LAW:single-enforcer] the one blocking-review rule change_requests and
+# action_provider.body_findings both route through — so the dismiss set and the
+# body-finding read cannot disagree about which reviews block.
+check("is_blocking_review: CHANGES_REQUESTED blocks, no other state does",
+      gt.is_blocking_review({"state": "CHANGES_REQUESTED"})
+      and not gt.is_blocking_review({"state": "COMMENTED"})
+      and not gt.is_blocking_review({"state": "DISMISSED"})
+      and not gt.is_blocking_review({"state": "APPROVED"}),
+      "predicate")
+
 
 # --- the jq filter itself, through a real jq -------------------------------
 # A fake gh hands back whatever the test wrote, so nothing above can see the
