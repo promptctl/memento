@@ -21,7 +21,9 @@ import functools
 import math
 import os
 import re
+import shutil
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_CEILING = 350_000
@@ -40,6 +42,14 @@ XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl")
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
+# How long a session directory may go unseen before the sweep removes it. A session's record is
+# touched at every stop (`mark_seen`), so this measures time since its last stop, not since it
+# started: a session still stopping keeps its record younger than this and cannot be swept, which is
+# what makes removing a live session's record impossible rather than merely unlikely.
+# [LAW:parse-dont-validate] Any record this old belongs to a session whose frozen ceiling is staler
+# than any resume could want, so the next stop re-reading the shared layers is the correct behaviour,
+# not the staleness the record exists to prevent. Comfortably beyond any real resume.
+STALE_SESSION_AGE_SECONDS = 30 * 24 * 60 * 60
 PROJECT_CONFIG_DIR = ".promptctl"
 # What the shared layers resolved to when a session started, in the same `key = value` shape
 # every other layer uses, so one parser reads them all. The hook writes this file and the agent
@@ -183,6 +193,64 @@ def session_directory(session_id):
                  f"a session directory under {SESSION_CONFIGS}. Memento cannot tell which "
                  f"session's settings it was meant to read.")
     return directory
+
+
+def mark_seen(record):
+    """Refresh a session record's mtime, so its age measures the time since this session's last stop
+    rather than since it started.
+
+    [LAW:effects-at-boundaries] the sweep reads this mtime as the session's sign of life, and a
+    session that keeps stopping keeps it young - which is what turns "a live session's record was
+    removed" from unlikely into impossible. Best-effort, for the same reason `log` is: this is
+    bookkeeping the sweep consumes, not the gate, so a failure to touch is reported and never fatal -
+    raising here would take the whole gate down with the bookkeeping. [LAW:no-silent-failure]"""
+    try:
+        os.utime(record)
+    except OSError as failure:
+        print(f"memento config: cannot refresh {record}: {failure}", file=sys.stderr)
+
+
+def _last_seen(entry):
+    """The newest mtime among a directory and the files in it, or a file's own mtime. A session's
+    record is touched in place at every stop, so the directory's own mtime (which moves only when a
+    file is added or removed) is not the whole story - the newest entry inside it is. Taking the max
+    of both answers "when did anything here last happen" for a directory and for a stray file with
+    one rule."""
+    times = [entry.stat().st_mtime]
+    if entry.is_dir():
+        times += [child.stat().st_mtime for child in entry.iterdir()]
+    return max(times)
+
+
+def sweep_sessions(keep):
+    """Remove every finished session's directory from the sessions tree, and with it the stray
+    `.<pid>` partial a killed record write leaves behind.
+
+    Run once per session - at the stop that first records this one - so the scan is paid per session
+    rather than per stop, and a tree that has stopped growing has stopped being swept. `keep` is the
+    caller's own directory, brand new this stop; it is skipped by name rather than left to the cutoff,
+    so a future reader need not reason about whether now-precedes-the-cutoff protects it.
+    [LAW:no-ambient-temporal-coupling]
+
+    [LAW:effects-at-boundaries][LAW:no-silent-failure] best-effort per entry and non-fatal overall,
+    like the sweep's sibling `mark_seen` and `log`: housekeeping must not take the gate down, so a
+    directory that will not remove is reported and the rest are still swept."""
+    cutoff = time.time() - STALE_SESSION_AGE_SECONDS
+    keep = keep.resolve()
+    try:
+        entries = list(SESSION_CONFIGS.iterdir())
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        try:
+            if entry.resolve() == keep or _last_seen(entry) >= cutoff:
+                continue
+            # A directory carries its own partials; a stray partial at the tree root has none to
+            # carry. [LAW:dataflow-not-control-flow] the staleness decision above is one rule for
+            # both, and only the removal splits on what the filesystem needs to remove each shape.
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        except OSError as failure:
+            print(f"memento config: cannot sweep {entry}: {failure}", file=sys.stderr)
 
 
 def folded(layers, beneath=lambda: DEFAULT_CEILING):

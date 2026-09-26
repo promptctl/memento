@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # One scratch root for every mkdtemp() below, removed on exit - each call still gets its own
 # subdirectory, but the suite no longer abandons one per case in the system temp dir.
@@ -792,6 +793,59 @@ command = registered["Stop"][0]["hooks"][0]["command"]
 check("the Stop registration runs this script, from the plugin root",
       os.path.basename(HOOK) in command and "${CLAUDE_PLUGIN_ROOT}" in command, command)
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
+
+# --- the sessions tree does not grow without bound ----------------------------------------
+# Driven through the hook the way the harness drives it: a stop writes and ages records; the sweep
+# and the touch that keep the tree bounded are read off the filesystem afterwards, never off the
+# internals. [LAW:behavior-not-structure]
+
+def aged_session(home, sid, age_days, extra=()):
+    """A session directory as it would stand `age_days` after it was last seen: its record, any extra
+    files, and the directory itself all stamped that far in the past. The directory's own mtime is set
+    last, because writing a file into it bumps that mtime back to now."""
+    directory = os.path.join(home, "sessions", sid)
+    os.makedirs(directory, exist_ok=True)
+    when = time.time() - age_days * 86_400
+    for name, text in ((SHARED_AT_START, f"ceiling = {DEFAULT_CEILING}\n"), *extra):
+        stamped = write_conf(os.path.join(directory, name), text)
+        os.utime(stamped, (when, when))
+    os.utime(directory, (when, when))
+    return directory
+
+
+def survives(home, sid):
+    return os.path.exists(os.path.join(home, "sessions", sid, SHARED_AT_START))
+
+
+# A session unseen well past the cutoff is finished; its whole directory goes, and the stray `.<pid>`
+# partial a killed record write would have orphaned inside it goes with it.
+swept = scratch_dir()
+aged_session(swept, "ancient", 40, extra=[(f"{SHARED_AT_START}.9999", "ceiling = 1\n")])
+run([user, assistant(UNDER)], config_home=swept, session="fresh-1")
+check("a session unseen past the cutoff is swept, partial and all",
+      not os.path.exists(os.path.join(swept, "sessions", "ancient")),
+      os.listdir(os.path.join(swept, "sessions")))
+check("the session doing the sweeping does not sweep its own fresh record",
+      survives(swept, "fresh-1"), os.listdir(os.path.join(swept, "sessions")))
+
+# A session seen within the cutoff is still in play - a pane resumed days later is still that session
+# - so it is left exactly where it is.
+kept = scratch_dir()
+aged_session(kept, "recent", 0)
+run([user, assistant(UNDER)], config_home=kept, session="fresh-2")
+check("a session seen within the cutoff is left alone",
+      survives(kept, "recent"), os.listdir(os.path.join(kept, "sessions")))
+
+# The stop condition itself: a session that keeps stopping cannot be swept, however long ago it
+# started. The record starts 40 days old; the session stops once, which touches it back to now; a
+# brand-new session then runs the sweep, and the touched record is what saves the running one. Remove
+# the touch and this is the case that deletes a live session's record.
+running = scratch_dir()
+aged_session(running, "old-runner", 40)
+run([user, assistant(UNDER)], config_home=running, session="old-runner")
+run([user, assistant(UNDER)], config_home=running, session="fresh-3")
+check("a session that keeps stopping is never swept, however long ago it started",
+      survives(running, "old-runner"), os.listdir(os.path.join(running, "sessions")))
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)
