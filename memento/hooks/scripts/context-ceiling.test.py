@@ -706,6 +706,12 @@ done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, en
                                         "transcript_path": empty_transcript}))
 check("a payload with no cwd fails loudly",
       done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
+# A malformed payload stops the hook before it can gate, exactly as a rejected config does, and a
+# stopped Stop hook is non-blocking - so this too must leave the durable record, not only a
+# traceback that scrolls away. Nothing else writes this log, so the stopped line is the no-cwd one.
+gate_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and the malformed payload that stopped the gate is recorded in the log, not only stderr",
+      "-> stopped" in gate_log and "cwd" in gate_log, gate_log)
 
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
 # only exit from the block fails to execute. The shared config module is copied in beside the

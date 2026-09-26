@@ -306,13 +306,19 @@ if hook["hook_event_name"] != "Stop":
 tokens = context_tokens(hook["transcript_path"])
 try:
     ceiling = resolve_ceiling(hook)
-except SystemExit as unreadable:
-    # [LAW:no-silent-failure] the config layer's failure arm is the process (ceiling_config
-    # docstring), and Claude Code treats a stopped Stop hook as non-blocking - so the gate is now
-    # off for this session. The exit is re-raised unchanged: the key stays rejected, loudly on
-    # stderr. What is added is the one durable record that the gate stopped and why, since the log
-    # is the only place a session running with no ceiling differs from one under it.
-    log(hook, tokens, "unresolved", f"stopped: {unreadable.code}")
+except (Exception, SystemExit) as unresolved:
+    # [LAW:no-silent-failure] every way resolving a ceiling can fail leaves the same wound: a
+    # config the layer rejects (SystemExit, its documented failure arm), a payload missing cwd or
+    # session_id (KeyError) - each stops the hook before it can gate, and Claude Code treats the
+    # nonzero Stop exit as non-blocking, so the gate is now off for this session. The error is
+    # re-raised unchanged, so it still surfaces loudly - the config message on stderr, the
+    # traceback for a malformed payload - and nothing is swallowed. What is added is the one
+    # durable record that the gate stopped and why, the only place a gate-off session differs from
+    # an allowed one. SystemExit carries its curated message in `code`; other errors carry their
+    # type and args, so a KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
+    reason = (unresolved.code if isinstance(unresolved, SystemExit)
+              else f"{type(unresolved).__name__}: {unresolved}")
+    log(hook, tokens, "unresolved", f"stopped: {reason}")
     raise
 
 label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
