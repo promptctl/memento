@@ -1,5 +1,10 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## Unreleased
+
+- feat(ceiling): the default context ceiling is 350,000 tokens, up from 250,000. Close-outs at 250,000 were landing while agents were still mid-task, so the next session had to reread everything.
+- feat(ceiling): a session past its ceiling can finish the unit of work it is in the middle of. Up to 100,000 tokens past the ceiling, the Stop hook's block tells the agent to finish that unit, start nothing new, and then close out. From the ceiling plus that grace onward, it says what it always said: close out now. The limit is the ceiling plus a fixed grace rather than a second setting, so every layer that moves the ceiling moves the limit too, and `off` still means no ceiling. The band comes from the token count at the stop, so nothing is recorded and nothing outlives a reset in place. A second stop in the finishing band is let through with a message naming the limit rather than the breach alarm. If the unit carried that turn past the limit, the stop is blocked once more, with the close-out, and never a third time. The log labels finishing-band blocks `finish`.
+
 ## v0.8.0 - 2026-09-21
 
 - feat!(message-in-a-bottle): `finalize-session` always resets the session into the handoff. The `--reset clear|compact` flag is gone: a handoff hands off, and a launcher that could record the message and leave the session running was a "handoff" that handed nothing to anyone. Every transport now starts the next session blank; tmux sends `/clear`, the other two already relaunched a fresh process. The ceiling hook's instruction drops the flag too. Owner decision 2026-09-21. Known caller outside this repo: the dotfiles skill something-just-came-up still passes `--reset clear` and is refused until dotfiles-claude-skills-niy lands.

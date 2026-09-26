@@ -24,7 +24,14 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_CEILING = 250_000
+DEFAULT_CEILING = 350_000
+# How far past its ceiling a session may run to finish the unit of work it is in the middle of.
+# A close-out forced mid-unit hands the next session a half-done task to reread from scratch, so the
+# ceiling is where a close-out falls due at the next unit boundary and the ceiling plus this is
+# where it is due regardless. A distance rather than a second number, so every layer that moves the
+# ceiling moves the limit with it and the two cannot be set into disagreeing.
+# [LAW:one-source-of-truth]
+GRACE = 100_000
 # One filename at every layer, so a second setting is a new key rather than a new file, a new
 # lookup and a new precedence chain. [LAW:composability]
 CONFIG_NAME = "memento.conf"

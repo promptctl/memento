@@ -46,7 +46,11 @@ SESSION = "s-1"
 # The file names come from the module the hook itself reads them from, so a fixture here cannot
 # drift from the files the hook looks for. [LAW:one-source-of-truth]
 sys.path.insert(0, LIB)
-from ceiling_config import CONFIG_NAME, SHARED_AT_START  # noqa: E402
+from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE, SHARED_AT_START  # noqa: E402
+
+# Past the ceiling and past the limit the grace sets beyond it: the two bands a stop can block in.
+LIMIT = TEST_CEILING + GRACE
+PAST_LIMIT = LIMIT + 20_000
 
 failures = []
 
@@ -153,7 +157,7 @@ check("the reason names the launcher, the count and the ceiling",
 check("the reason tells a worktree session how to reach a directory it can run from",
       out and "ExitWorktree" in out["reason"], str(out))
 
-code, out, _ = run([user, assistant(OVER)], stop_hook_active=True)
+code, out, _ = run([user, assistant(PAST_LIMIT)], stop_hook_active=True)
 check("a stop already blocked once is not blocked again",
       code == 0 and out and "decision" not in out, f"{code} {out}")
 check("giving up is loud rather than silent",
@@ -161,6 +165,86 @@ check("giving up is loud rather than silent",
 check("giving up does not claim the close-out failed",
       out and "If the close-out did not run" in out.get("systemMessage", "")
       and "was NOT closed out" not in out.get("systemMessage", ""), str(out))
+check("a spent forced close-out is logged apart from a spent finishing continuation",
+      "-> spent-block" in run.log, run.log)
+
+# --- the grace: a unit in progress is finished before the close-out ---------------------------
+
+# Between the ceiling and the limit the stop is still blocked once, because the agent has to be told;
+# what it is told is to finish the unit it is in and close out after, not to drop it where it stands.
+code, out, _ = run([user, assistant(OVER)])
+check("past the ceiling but under the limit, the agent may finish its unit",
+      out and out.get("decision") == "block" and "finish" in out["reason"].lower()
+      and f"{LIMIT:,}" in out["reason"] and "Close it out now" not in out["reason"], str(out))
+check("and a unit already finished is still closed out through the same command",
+      out and LAUNCHER in out["reason"] and "ExitWorktree" in out["reason"], str(out))
+check("the finishing block forbids raising the ceiling to make room",
+      out and "move the ceiling" in out["reason"], str(out))
+check("the finishing band is logged apart from the forced close-out", "-> finish" in run.log, run.log)
+code, out, _ = run([user, assistant(PAST_LIMIT)])
+check("past the limit, the close-out is due now whatever is in progress",
+      out and out.get("decision") == "block" and "Close it out now" in out["reason"], str(out))
+check("the forced close-out block forbids raising the ceiling too",
+      out and "move the ceiling" in out["reason"], str(out))
+code, out, _ = run([user, assistant(LIMIT)])
+check("a session at exactly the limit is past it",
+      out and "Close it out now" in out["reason"], str(out))
+code, out, _ = run([user, assistant(LIMIT - 1)])
+check("a session one token below the limit is still finishing",
+      out and "Close it out now" not in out["reason"], str(out))
+# An agent mid-unit that ends its turn to wait on something is let through the second stop, and the
+# person watching is not told the next session starts with nothing, because nothing was forced.
+code, out, _ = run([user, assistant(OVER)], stop_hook_active=True)
+check("a second stop while finishing is let through without a breach alarm",
+      code == 0 and out and "decision" not in out
+      and "context ceiling breached" not in out.get("systemMessage", "")
+      and f"{LIMIT:,}" in out.get("systemMessage", ""), str(out))
+check("a spent finishing continuation is logged under its own label",
+      "-> spent-finish" in run.log, run.log)
+# A finishing block restarts the turn, and the agent then works through its unit inside that turn, so
+# the stop that ends it arrives marked as following a block. Past the limit, that stop is the one
+# the limit exists for. The block reaches the transcript as the harness writes it, and the case below
+# builds it from the hook's own output.
+_, finishing, _ = run([user, assistant(OVER)])
+_, closing, _ = run([user, assistant(PAST_LIMIT)])
+
+
+def fed_back(verdict):
+    return {"type": "user", "isSidechain": False,
+            "message": {"role": "user", "content": f"Stop hook feedback:\n{verdict['reason']}"}}
+
+
+code, out, _ = run([user, assistant(OVER), fed_back(finishing), assistant(PAST_LIMIT)],
+                   stop_hook_active=True)
+check("a turn a finishing block started is still stopped at the limit",
+      out and out.get("decision") == "block" and "Close it out now" in out["reason"], str(out))
+code, out, _ = run([user, assistant(OVER), fed_back(finishing), assistant(OVER + 10_000)],
+                   stop_hook_active=True)
+check("while under the limit that turn's stop is let through",
+      code == 0 and out and "decision" not in out, str(out))
+code, out, _ = run([user, assistant(PAST_LIMIT), fed_back(closing), assistant(PAST_LIMIT + 5_000)],
+                   stop_hook_active=True)
+check("a closing block is never followed by a second one",
+      code == 0 and out and "decision" not in out
+      and "context ceiling breached" in out.get("systemMessage", ""), str(out))
+code, out, _ = run([user, assistant(OVER), fed_back(finishing), assistant(PAST_LIMIT),
+                    fed_back(closing), assistant(PAST_LIMIT + 5_000)], stop_hook_active=True)
+check("and the escalation happens once, not at every stop past the limit",
+      code == 0 and out and "decision" not in out, str(out))
+# A user record's content is a string or a list of text blocks; the finishing block reaches the
+# transcript as either, and the band is read off its text the same way, so the escalation fires
+# whichever shape the harness wrote.
+def fed_back_blocks(verdict):
+    return {"type": "user", "isSidechain": False, "message": {"role": "user",
+            "content": [{"type": "text", "text": f"Stop hook feedback:\n{verdict['reason']}"}]}}
+code, out, _ = run([user, assistant(OVER), fed_back_blocks(finishing), assistant(PAST_LIMIT)],
+                   stop_hook_active=True)
+check("a finishing block fed back as list content still escalates at the limit",
+      out and out.get("decision") == "block" and "Close it out now" in out["reason"], str(out))
+
+# The limit rides on the ceiling rather than being set beside it, so a ceiling switched off has none.
+code, out, _ = run([user, assistant(5_000_000)], user_conf="ceiling = off\n")
+check("a ceiling switched off has no limit either", code == 0 and out is None, f"{code} {out}")
 
 ran_closeout = [user, assistant(OVER),
                 tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}),
@@ -258,7 +342,10 @@ check("a close-out from an earlier turn does not excuse a later breach",
 # --- the ceiling is configurable while sessions run --------------------------------------
 
 def blocked_at(out, ceiling):
-    return bool(out) and out.get("decision") == "block" and f"{ceiling:,}" in out.get("reason", "")
+    """Blocked on this ceiling, matched as the phrase naming it: the reason also states the limit, and
+    a bare number would let a wrong ceiling whose limit happens to be this number pass."""
+    return (bool(out) and out.get("decision") == "block"
+            and f"past the {ceiling:,} ceiling" in out.get("reason", ""))
 
 
 _, out, _ = run([user, assistant(60_000)], user_conf="ceiling = 50000\n")
@@ -288,9 +375,10 @@ check("a session adjustment moves the ceiling the project pinned", blocked_at(ou
 _, out, _ = run([user, assistant(400_000)], project_conf="ceiling = 250000\n",
                 session_conf="ceiling = -50000\n")
 check("an adjustment can lower the ceiling too", blocked_at(out, 200_000), str(out))
-_, out, _ = run([user, assistant(400_000)], user_conf="ceiling = +30000\n",
+_, out, _ = run([user, assistant(DEFAULT_CEILING + 60_000)], user_conf="ceiling = +30000\n",
                 project_conf="ceiling = +20000\n")
-check("adjustments at two layers both apply, in order", blocked_at(out, 300_000), str(out))
+check("adjustments at two layers both apply, in order",
+      blocked_at(out, DEFAULT_CEILING + 50_000), str(out))
 code, out, _ = run([user, assistant(5_000_000)], user_conf="ceiling = off\n",
                    session_conf="ceiling = +10000\n")
 check("adjusting a ceiling that is switched off leaves it off", code == 0 and out is None, f"{code} {out}")
@@ -328,7 +416,7 @@ code, out, _ = run([user, assistant(400_000)], project=shared,
                    config_home=os.path.join(shared, ".promptctl"),
                    user_conf="ceiling = +10000\n")
 check("the user config is not applied a second time as the project config",
-      blocked_at(out, 260_000), str(out))
+      blocked_at(out, DEFAULT_CEILING + 10_000), str(out))
 
 # --- a running session keeps the ceiling it started under ----------------------------------
 
@@ -465,7 +553,8 @@ check("one key set twice in one file fails loudly",
 # resolve negative: `-50000` recorded is `-50000` read back as an *adjustment*, which resolves to
 # a positive 200,000 nobody set and never trips the check below. Caught in review; the exit had
 # stopped firing for this input entirely, on the recording stop as well as every later one.
-code, out, err = run([user, assistant(OVER)], user_conf="ceiling = -300000\n")
+code, out, err = run([user, assistant(OVER)],
+                     user_conf=f"ceiling = -{DEFAULT_CEILING + 50_000}\n")
 check("a shared fold that resolves below zero fails loudly rather than being recorded",
       code == 1 and "never negative" in err and "-50,000" in err, f"{code} {err}")
 check("and it names the shared file that caused it, not the record derived from it",
@@ -576,7 +665,7 @@ check("a transcript with no assistant record reads as zero", code == 0 and out i
 
 run([user, assistant(UNDER)])
 check("an allowed call is logged too", "allow-under" in run.log, run.log)
-run([user, assistant(OVER)])
+run([user, assistant(PAST_LIMIT)])
 check("a block is logged", "-> block" in run.log, run.log)
 run([user, assistant(UNDER)], log_seed="old\n" * 600_000)
 check("the log is truncated once it passes its cap",
