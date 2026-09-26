@@ -7,7 +7,7 @@ description: Address open PR review findings with judgment — read every findin
 
 Read every pending review finding on the PR, **post your plan on each thread first**, then implement, push (which re-runs the reviewer), confirm-and-resolve the threads you fixed, and dismiss the reviewer's now-stale change request. Repeat until clean. Same model people use at a real company: handle reviewer findings AND human-reviewer threads in one pass, push back with reasoning when you disagree, resolve, dismiss, re-review.
 
-[LAW:one-source-of-truth] `provider.fetch` is the single source of pending findings for this loop — every open finding on the PR, keyed by `thread_id` (when available). There is no second stream.
+[LAW:one-source-of-truth] `provider.fetch` is the single source of pending findings for this loop — every open finding on the PR, keyed by `thread_id` when it has one. There is no second stream: a finding the reviewer could not anchor to a diff line (a **body finding**, `thread_id` null) rides the same `fetch`, and is disposed by dismissing the blocking review it lives in, not by `resolve`.
 
 **Provider** — the active review backend is loaded from `provider.json` in the skill directory (or `PR_REVIEW_PROVIDER` env var). The provider contract is in `PROVIDER_CONTRACT.md`. To switch providers, change `provider.json`; the loop below does not change.
 
@@ -102,7 +102,7 @@ if provider.CAPABILITIES["dismiss_review"]:
     pending_reviews = provider.change_requests(PR_URL)["reviews"]
 ```
 
-`fetch` returns canonical JSON: every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding.
+`fetch` returns canonical JSON: every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the empty-`fetch` done-signal now accounts for them too.
 
 `change_requests` returns the automated reviewer's `CHANGES_REQUESTED` reviews — `[{"review_id", "author", "commit_id"}]` — captured **now, before any push**, so step 8 dismisses exactly the reviews this round addressed and never the fresh re-review your push triggers. [LAW:one-source-of-truth] the dismiss set is what you read here, not what is blocking after you mutate the PR. It is scoped to Bot authors: a human's `CHANGES_REQUESTED` is theirs to clear, never auto-dismissed. [LAW:no-silent-failure]
 
@@ -128,7 +128,7 @@ Schema:
 }
 ```
 
-**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null when the provider declares `resolve: True`. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed *and reviewed the head*, so empty is unambiguous. Proceed to **Finalize** below.
+**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null for a thread finding when the provider declares `resolve: True`; a **body finding carries `thread_id` null even under `resolve: True`** — it has no thread and cannot be resolved. If the unresolved list is empty, **the loop is done** — step 1 already guaranteed the run completed *and reviewed the head*, so empty is unambiguous. Proceed to **Finalize** below.
 
 [LAW:verifiable-goals] this empty `fetch` is the **only** thing that establishes done. Never infer doneness from "I pushed my fixes" or "I addressed everything" — re-run `fetch` and read zero unresolved. A fixed-but-unresolved finding still counts as unresolved here, which is the safety net: it re-surfaces as `already_fixed`, and you resolve it now rather than leaving it open forever.
 
@@ -165,6 +165,8 @@ The classification carries **one discriminator: does addressing this finding req
 - **Change needed (valid, different_fix)** — post the plan comment and **leave the thread unresolved**. It resolves in step 7, after the fix is real. Add its `thread_id` to your change-needed set.
 
 [LAW:dataflow-not-control-flow] resolve-now vs. resolve-later is a value the classification carries, not a side branch — the same plan step runs for every finding; the discriminator picks when resolution happens. [LAW:single-enforcer] resolve only ever goes through `provider.resolve`, never a raw mutation — it's the one path that confirms GitHub accepted the resolution, so a resolve that didn't take can't pass as done.
+
+**A body finding (`thread_id` null)** has no thread — nowhere to post the plan comment, nothing for `provider.resolve` to take. Its disposition is recorded in the dismiss message of the blocking review it rode in on (step 8), and that dismissal is what clears it. Classify it the same way: a change-needed body finding is fixed and pushed like any other (steps 4/6) and the re-review on the new head drops it; a no-change body finding (invalid, already-fixed) needs no push — recording its disposition in the dismiss message is the whole action. Either way there is nothing to `resolve` in step 7.
 
 When `provider.CAPABILITIES["resolve"]` is `False`, findings have no resolvable thread — note each finding's disposition in a reply if the provider supports it. The loop still converges when `fetch` returns zero open findings.
 
@@ -209,25 +211,33 @@ mutation($id:ID!,$body:String!){
 provider.resolve(THREAD_ID)
 ```
 
+`provider.resolve` applies to **thread** findings only. A change-needed body finding rode the same pushed fix here, but it has no thread to comment on or resolve — its resolution is the dismissal of its blocking review in step 8, on the strength of that fix.
+
 [LAW:no-ambient-temporal-coupling] this phase is gated on the push, not deferred past it: you confirm-and-resolve the captured set here, in this round, before step 8. The empty `fetch` in the next round's step 2 is the safety net — a change-needed thread left unresolved re-surfaces and is handled again, never silently dropped.
 
 ### 8. Dismiss the stale change request
 
 When `provider.CAPABILITIES["dismiss_review"]` is `True`, dismiss each review captured in step 2 — the now-addressed `CHANGES_REQUESTED` reviews — with a message explaining the resolution:
 
+Each review's message must **enumerate the body findings that review carried and how each was handled** — fixed in `<sha>`, or rejected with the reason (cite the `[LAW:...]`). There is no thread to hold that record; the dismiss message is the durable audit trail, and dismissing the review is what actually clears its body findings.
+
 ```python
-msg = (f"All findings from this review are addressed (fixes pushed and threads "
-       f"resolved) or responded to on their threads. Dismissing the stale "
-       f"change request; re-review runs on the new commit.")
 for r in pending_reviews:
+    msg = (f"All findings from this review are addressed (fixes pushed and threads "
+           f"resolved) or responded to on their threads. "
+           f"Body findings this review carried and their disposition: <enumerate each — "
+           f"fixed in <sha>, or rejected citing [LAW:...]>. "
+           f"Dismissing the stale change request; re-review runs on the new commit.")
     provider.dismiss_review(PR_URL, r["review_id"], msg)
 ```
+
+**The gate: never dismiss a review while it still carries a body finding this round has not addressed.** That would discard the reviewer's objection unanswered — the exact bug this loop closed. It holds by construction, not vigilance: body findings come back from `fetch` (step 2), so they are classified in the plan phase and fixed-or-rejected before you reach this step. By the time you dismiss, every body finding the review carried has a recorded disposition, and the message above is where it lives.
 
 [LAW:dataflow-not-control-flow] the dismiss runs unconditionally when the capability is present; an empty `pending_reviews` dismisses nothing — there is no "if a review exists" branch. [LAW:single-enforcer] dismissal goes through `provider.dismiss_review`, which verifies GitHub recorded the `DISMISSED` state — an unconfirmed dismissal raises rather than passing as done. [LAW:no-silent-failure]
 
 When `dismiss_review` is `False`, the provider posts no blocking review (it comments rather than requesting changes) — this step is a no-op the capability flag carries, exactly as `resolve` is.
 
-**Round postcondition:** every thread from this round is resolved, and the change request the reviewer raised is dismissed. That is the end state for a single review round.
+**Round postcondition:** every thread from this round is resolved, every body finding's disposition is recorded in its review's dismiss message, and the change request the reviewer raised is dismissed. That is the end state for a single review round.
 
 ### 9. Go to step 1.
 
@@ -318,6 +328,6 @@ Then stop. The loop is finished, the work is shipped, the recap is filed.
 - **A usage-limit failure (`action` provider) is a credential to swap, not a wait to report.** The reviewer's account is one of a pool the setup skill keeps. When the failed job's check-run annotations carry the action's failure-level `rate-limited:` message, propagate its current choice to this repo and rerun the run; if that is limited too, rotate per its *Rotating the reviewer account*, propagate, rerun, and continue. Waiting out a multi-day reset, or reviewing locally instead, is the loop stalling with the fix in reach.
 - **Architectural laws override reviewer authority.** Refuse suggestions that violate `[LAW:...]`. Cite the law in the pushback reply on the thread — that text is the durable record of why the code is the way it is.
 - **Plan on every thread before you touch code.** Each finding gets a plan comment in the plan phase — pushback-with-law for the ones you reject, the intended fix for the ones you accept. The comment is the durable record of the decision; the reviewer doesn't reply, so your comment is the only one.
-- **Resolve every finding you addressed, including pushbacks — through `provider.resolve(thread_id)`, and only on confirmation.** No-change findings resolve in the plan phase; change-needed findings resolve in the confirm phase, after the fix is pushed — never before, because resolving an unfixed thread lies about the code. Open findings accumulate forever; resolution is the step that gets silently dropped, which is why it runs through the provider's verified path, not a raw mutation.
-- **Dismiss the reviewer's stale change request once its findings are handled.** Through `provider.dismiss_review`, scoped to the captured Bot change-requests, with a message explaining the resolution. A human's `CHANGES_REQUESTED` is never auto-dismissed — that one is theirs to clear. The round's end state is zero unresolved threads and no stale change request blocking the PR.
+- **Resolve every thread finding you addressed, including pushbacks — through `provider.resolve(thread_id)`, and only on confirmation.** No-change findings resolve in the plan phase; change-needed findings resolve in the confirm phase, after the fix is pushed — never before, because resolving an unfixed thread lies about the code. Open findings accumulate forever; resolution is the step that gets silently dropped, which is why it runs through the provider's verified path, not a raw mutation. A **body finding** has no thread to resolve — it is disposed by dismissing the blocking review it rode in on (its disposition recorded in that dismiss message), never through `provider.resolve`.
+- **Dismiss the reviewer's stale change request once its findings are handled — including the body findings it carried.** Through `provider.dismiss_review`, scoped to the captured Bot change-requests, with a message that explains the resolution **and enumerates each body finding the review carried and its disposition** (fixed in `<sha>`, or rejected citing the law). Never dismiss a review while it still holds a body finding the round has not addressed — that objection is what this loop exists to answer. A human's `CHANGES_REQUESTED` is never auto-dismissed — that one is theirs to clear. The round's end state is zero unresolved threads, every body finding's disposition recorded, and no stale change request blocking the PR.
 - **Conflicts between findings** — surface to the user before acting. Don't pick a side silently.
