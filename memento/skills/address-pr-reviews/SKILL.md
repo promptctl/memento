@@ -219,25 +219,25 @@ provider.resolve(THREAD_ID)
 
 When `provider.CAPABILITIES["dismiss_review"]` is `True`, dismiss each review captured in step 2 — the now-addressed `CHANGES_REQUESTED` reviews — with a message explaining the resolution:
 
-Each review's message must **enumerate the body findings that review carried and how each was handled** — fixed in `<sha>`, or rejected with the reason (cite the `[LAW:...]`). There is no thread to hold that record; the dismiss message is the durable audit trail, and dismissing the review is what actually clears its body findings.
+Each message must **enumerate this round's body findings and how each was handled** — fixed in `<sha>`, or rejected with the reason (cite the `[LAW:...]`). The disposition is a fact about the finding, not about which review carried it — the canonical finding shape carries no back-link to a review, and one finding can ride several coexisting blocking reviews at once — so the record is round-level, never partitioned per review. Dismiss more than one review this round and each message carries that same round-level list; the audit stays complete. There is no thread to hold that record; the dismiss message is the durable audit trail, and dismissing the review is what actually clears its body findings.
 
 ```python
 for r in pending_reviews:
     msg = (f"All findings from this review are addressed (fixes pushed and threads "
            f"resolved) or responded to on their threads. "
-           f"Body findings this review carried and their disposition: <enumerate each — "
+           f"This round's body findings and their disposition: <enumerate each — "
            f"fixed in <sha>, or rejected citing [LAW:...]>. "
            f"Dismissing the stale change request; re-review runs on the new commit.")
     provider.dismiss_review(PR_URL, r["review_id"], msg)
 ```
 
-**The gate: never dismiss a review while it still carries a body finding this round has not addressed.** That would discard the reviewer's objection unanswered — the exact bug this loop closed. It holds by construction, not vigilance: body findings come back from `fetch` (step 2), so they are classified in the plan phase and fixed-or-rejected before you reach this step. By the time you dismiss, every body finding the review carried has a recorded disposition, and the message above is where it lives.
+**The gate: never dismiss any review while the round still has a body finding it has not addressed.** That would discard the reviewer's objection unanswered — the exact bug this loop closed. It holds by construction, not vigilance: body findings come back from `fetch` (step 2), so they are classified in the plan phase and fixed-or-rejected before you reach this step. By the time you dismiss, every body finding this round has a recorded disposition, and the message above is where it lives.
 
 [LAW:dataflow-not-control-flow] the dismiss runs unconditionally when the capability is present; an empty `pending_reviews` dismisses nothing — there is no "if a review exists" branch. [LAW:single-enforcer] dismissal goes through `provider.dismiss_review`, which verifies GitHub recorded the `DISMISSED` state — an unconfirmed dismissal raises rather than passing as done. [LAW:no-silent-failure]
 
 When `dismiss_review` is `False`, the provider posts no blocking review (it comments rather than requesting changes) — this step is a no-op the capability flag carries, exactly as `resolve` is.
 
-**Round postcondition:** every thread from this round is resolved, every body finding's disposition is recorded in its review's dismiss message, and the change request the reviewer raised is dismissed. That is the end state for a single review round.
+**Round postcondition:** every thread from this round is resolved, every body finding's disposition is recorded in the round's dismiss message(s), and the change request the reviewer raised is dismissed. That is the end state for a single review round.
 
 ### 9. Go to step 1.
 

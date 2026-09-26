@@ -35,9 +35,12 @@ import subprocess
 import time
 from typing import Optional
 
-# [LAW:one-source-of-truth] thread fetch, Finding shape, and verified resolve
-# are the shared GitHub primitives — imported, never copied. Import resolution
-# is owned by provider_loader (loaded path) or script-mode sys.path (direct).
+# [LAW:one-source-of-truth] the Finding shape, thread read, verified resolve, and
+# the blocking-review rule are the shared GitHub primitives — used here, never
+# copied. resolve/change_requests/dismiss_review are re-exported unchanged; `fetch`
+# is not (it is defined below, wrapping github_threads.fetch with body findings).
+# Import resolution is owned by provider_loader (loaded path) or script-mode
+# sys.path (direct).
 import github_threads
 from github_threads import (  # noqa: F401  (contract surface)
     resolve,
@@ -164,7 +167,7 @@ BODY_FINDING_HEADINGS = frozenset({
 # mirror codeSpan exactly.
 #
 # One finding is one physical line: transport.js runs every finding body through
-# flattenBody, which collapses VERTICAL_SEPARATORS (\n \r    ) to spaces
+# flattenBody, which collapses VERTICAL_SEPARATORS (\n \r \u2028 \u2029) to spaces
 # before rendering, so a finding never wraps and there is no continuation line for
 # the scan to drop. What CAN vary is a `- ` item line the reviewer's grammar shifts
 # under us; that is the silent loss this parser refuses, so a `- ` line the regex
