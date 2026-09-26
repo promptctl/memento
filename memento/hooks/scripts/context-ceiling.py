@@ -74,18 +74,25 @@ EXIT_HINT = ('In a worktree that command may be refused where you stand; run Exi
 # transcript which band the block that started its turn was in.
 Band = collections.namedtuple("Band", "label mark reason spent")
 
-FINISHING = Band("finish", "Finish the unit of work you are in the middle of", """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. Finish the unit of work you are in the middle of - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:
+# The close-out mechanics both bands end on - the command, the worktree caveat, and the handoff
+# contract - live here once. [LAW:one-source-of-truth] a change to how the close-out is run or
+# described lands in both reasons at once instead of drifting between two copies. Each band's reason
+# is its own opening plus this, plus the one clause that differs: what not to do while closing out.
+CLOSE_OUT = """
     {launcher} '<handoff message>'
 {exit_hint}
-Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not move the ceiling to make room, and do not ask the user whether to finalize.""",
+Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
+
+FINISHING = Band("finish", "Finish the unit of work you are in the middle of",
+    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. Finish the unit of work you are in the middle of - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:""" + CLOSE_OUT
+    + "Do not move the ceiling to make room, and do not ask the user whether to finalize.",
     "memento: this session is past the {ceiling:,} ceiling at ~{tokens:,} tokens and stopped again "
     "without closing out, so the stop proceeds. It may finish the unit of work it is in; at "
     "{limit:,} it is made to close out.")
 
-CLOSING = Band("block", "Close it out now", """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
-    {launcher} '<handoff message>'
-{exit_hint}
-Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize.""",
+CLOSING = Band("block", "Close it out now",
+    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:""" + CLOSE_OUT
+    + "Do not start new work, and do not ask the user whether to finalize.",
     "memento: context ceiling breached (~{tokens:,} > {ceiling:,}) and this session has spent its "
     "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
     "session starts with nothing.")
