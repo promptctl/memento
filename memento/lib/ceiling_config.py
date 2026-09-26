@@ -286,8 +286,11 @@ def sweep_sessions(keep):
             # both, and only the removal splits on what the filesystem needs to remove each shape.
             shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
         except FileNotFoundError:
-            # Another concurrent sweep, or the entry's own session, already removed it. A lost race is
-            # a no-op here, not the sweep failure the arm below reports. [LAW:no-silent-failure]
+            # The entry, or a file inside it read mid-scan, is already gone: another concurrent sweep
+            # removed it, or its own session is writing and replacing files under it. Either way there
+            # is nothing to reap this pass and nothing wrong to report - the next new session's sweep
+            # revisits whatever remains. A lost race is a no-op, not the failure the arm below reports.
+            # [LAW:no-silent-failure]
             pass
         except OSError as failure:
             print(f"memento config: cannot sweep {entry}: {failure}", file=sys.stderr)
