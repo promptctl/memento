@@ -227,9 +227,9 @@ def body_findings(reviews: list[dict]) -> list[dict]:
     """[LAW:effects-at-boundaries] Pure. Every body finding across the reviewer's
     blocking reviews (the `bot_reviews` shape). [LAW:single-enforcer] the blocking
     test is `github_threads.is_blocking_review` — the very predicate `change_requests`
-    uses — so the reviews whose bodies carry these findings are exactly the reviews
-    step 8 dismisses, by construction rather than by two copies that agree until one
-    is edited. A dismissed review has left that state, so its body findings are
+    uses — so neither applies a different blocking rule than the other (the rule is
+    single-sourced there; see its note on why sharing the predicate, not one snapshot,
+    is sound). A dismissed review has left that state, so its body findings are
     disposed and no longer read. [LAW:one-source-of-truth]"""
     return [
         f

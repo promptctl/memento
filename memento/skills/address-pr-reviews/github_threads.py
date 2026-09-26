@@ -272,11 +272,16 @@ def bot_reviews(pr_url: str) -> list[dict]:
 
 def is_blocking_review(review: dict) -> bool:
     """[LAW:single-enforcer] The one rule for "this automated-reviewer review blocks
-    the PR", over a `bot_reviews` entry. Both consumers of the rule call it — the
-    dismiss set (`change_requests`) and the out-of-diff finding read
-    (`action_provider.body_findings`) — so the reviews a round dismisses and the
-    reviews it reads body findings from are the same set by construction, not by two
-    literals that agree until one is edited. [LAW:one-source-of-truth]"""
+    the PR", over a `bot_reviews` entry. Both consumers call it — the dismiss set
+    (`change_requests`) and the out-of-diff finding read (`action_provider.body_findings`)
+    — so neither can classify a review as blocking that the other would not: the rule
+    is single-sourced, not two literals that agree until one is edited.
+    [LAW:one-source-of-truth]
+
+    This shares the predicate, not the read: each consumer calls `bot_reviews` for
+    its own snapshot. That is sound because the reviewer only changes a PR's reviews
+    on a re-review, which a round triggers by pushing — so within one round, between
+    two adjacent reads with no push, the two snapshots hold the same reviews."""
     return review["state"] == "CHANGES_REQUESTED"
 
 
