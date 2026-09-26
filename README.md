@@ -214,9 +214,9 @@ back to — so the ceiling cannot change because something ran `cd`. Anything el
 a unit suffix, a misspelled key, a key set twice in one file, an adjustment resolving below
 zero — stops the hook with an error naming the file and line the setting came from. It
 never falls back quietly to the default, on the grounds that a ceiling you believe you moved and did not
-is worse than no ceiling. Every decision the hook makes is appended to
-`~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`), which is the only place
-you can tell an allow apart from a hook that never ran.
+is worse than no ceiling. Every decision the hook makes — and every stop that keeps it from
+reaching one — is appended to `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`),
+which is the only place you can tell an allow apart from a hook that never ran.
 
 `ceiling set project` moves the project's ceiling instead, and writes two files to do it.
 The shared layers are frozen per session, so the project file alone would move the ceiling
