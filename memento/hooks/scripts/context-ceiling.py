@@ -256,14 +256,18 @@ def stop(hook, tokens, ceiling):
     escalation sends then opens the next turn, and it is not a finishing block, so the chain ends."""
     limit = ceiling + GRACE
     band = CLOSING if tokens >= limit else FINISHING
-    escalating = band is CLOSING and FINISHING.mark in turn_opening(hook["transcript_path"])
     if closed_out(hook["transcript_path"]):
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
                                                f"tokens, past the {ceiling:,} ceiling, so "
                                                f"the stop proceeds."}
-    if hook.get("stop_hook_active") and not escalating:
-        return "spent", {"systemMessage": band.spent.format(tokens=tokens, ceiling=ceiling,
-                                                            limit=limit)}
+    # [LAW:effects-at-boundaries] the turn opener is a second transcript read, so it is taken
+    # only on the one path that consults it: a repeat stop, where the escalation decides whether
+    # this block is the finishing band's promised second one rather than a spent close-out.
+    if hook.get("stop_hook_active"):
+        escalating = band is CLOSING and FINISHING.mark in turn_opening(hook["transcript_path"])
+        if not escalating:
+            return "spent", {"systemMessage": band.spent.format(tokens=tokens, ceiling=ceiling,
+                                                                limit=limit)}
     return band.label, {"decision": "block", "reason": band.reason.format(
         tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
         exit_hint=EXIT_HINT)}

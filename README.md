@@ -169,8 +169,8 @@ config has always produced.
 
 That split is here because of one afternoon. A shared file held `350000` from 05:18 on
 2026-09-06 until an agent working in an unrelated project removed the line at 14:55, and
-every running session read the default 250,000 from its next tool call onward. One of
-them was at 250,196 tokens, mid-epic, in a different directory. It went from unrestricted
+every running session fell back to the 250,000 that was the default then, from its next
+tool call onward. One of them was at 250,196 tokens, mid-epic, in a different directory. It went from unrestricted
 to fully gated between two consecutive tool calls, could not reach the remedy from inside
 the gate, and never wrote a handoff. The record is made at the first stop rather than at
 the first token because `Stop` is the only event this hook is given — one turn of drift,
@@ -318,10 +318,10 @@ and hands the hook's `reason` back to the agent as its next instruction: commit 
 everything outstanding first, then run the `finalize-session` launcher with a handoff
 message. The launcher writes the handoff to disk and resets the session into it.
 
-What that reason asks for depends on how far past the ceiling the session is. Up to 100,000
-tokens past it (`GRACE` in `memento/lib/ceiling_config.py`), the agent is told to finish the unit
-of work it is in the middle of — the PR, the ticket, the handed task — start nothing new, and
-close out as soon as that unit is done. Forcing the close-out mid-unit makes the next session
+What that reason asks for depends on how far past the ceiling the session is. Until the count
+reaches 100,000 tokens past it (`GRACE` in `memento/lib/ceiling_config.py`), the agent is told to
+finish the unit of work it is in the middle of — the PR, the ticket, the handed task — start
+nothing new, and close out as soon as that unit is done. Forcing the close-out mid-unit makes the next session
 reread everything the last one had already read to get halfway. From the ceiling plus that grace
 onward, the reason is the unconditional one: close out now. A finishing block restarts the turn,
 and the agent works through its unit inside it, so the stop ending that turn can come past the
