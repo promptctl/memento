@@ -128,7 +128,7 @@ away. A payload for any other event stops the hook with an error naming the even
 than measuring anyway. The cost of running on one event is that a session working through
 a very long tool loop is not caught until that turn ends.
 
-The ceiling is 250,000 tokens by default, and three layers can move it. From the least
+The ceiling is 350,000 tokens by default, and three layers can move it. From the least
 specific to the most: `~/.config/promptctl/memento.conf`, then the nearest
 `.promptctl/memento.conf` at or above the project directory, then
 `~/.config/promptctl/sessions/<session-id>/memento.conf`. Same filename everywhere, so a
@@ -188,8 +188,8 @@ still give itself room.
 The session's own layer is read live at every stop and applies immediately in both
 directions, raising and lowering alike. `ceiling set session +100_000` writes that layer
 for the session running right now. Because the value is signed it lands on top of what the
-shared layers resolved to rather than replacing it — a session that started at 250,000
-resolves to 350,000 — and it takes effect the next time the ceiling is checked, when the
+shared layers resolved to rather than replacing it — a session that started at 350,000
+resolves to 450,000 — and it takes effect the next time the ceiling is checked, when the
 turn ends, with nothing to restart, reload or signal, including from a session that is
 already over the ceiling. `ceiling set session -50_000` lowers it the same way: the leading `-`
 is read as part of the value rather than as an unknown option, on every Python the plugin runs
@@ -318,10 +318,26 @@ and hands the hook's `reason` back to the agent as its next instruction: commit 
 everything outstanding first, then run the `finalize-session` launcher with a handoff
 message. The launcher writes the handoff to disk and resets the session into it.
 
-It forces this **once per session**. If the session stops again, the hook sees
-`stop_hook_active` and lets the stop proceed, printing a visible system message saying
-the one forced attempt was spent. A second block would spend more context on the problem
-that *is* too much context.
+What that reason asks for depends on how far past the ceiling the session is. Up to 100,000
+tokens past it (`GRACE` in `memento/lib/ceiling_config.py`), the agent is told to finish the unit
+of work it is in the middle of — the PR, the ticket, the handed task — start nothing new, and
+close out as soon as that unit is done. Forcing the close-out mid-unit makes the next session
+reread everything the last one had already read to get halfway. From the ceiling plus that grace
+onward, the reason is the unconditional one: close out now. A finishing block restarts the turn,
+and the agent works through its unit inside it, so the stop ending that turn can come past the
+limit. That stop is blocked once more, with the close-out. The hook tells which block started the
+turn from the transcript, where the harness writes each block back as `Stop hook feedback:`, so no
+turn ever gets a second close-out block. The limit is always the ceiling plus
+the grace, so a layer that moves the ceiling moves the limit with it, and a ceiling that is `off`
+has no limit. The band comes from the token count alone, so nothing is recorded, and a session
+that resets in place starts its next context under both lines again. The log records a
+finishing-band block as `-> finish` and a forced one as `-> block`.
+
+It blocks **at most once per turn** — the escalation above is the one case a second stop
+is blocked rather than let through. Otherwise, if the session stops again the hook sees
+`stop_hook_active` and lets the stop proceed, printing a visible system message saying the
+forced attempt was spent. A further block would spend more context on the problem that
+*is* too much context.
 
 ## Repo layout
 
