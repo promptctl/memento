@@ -159,9 +159,13 @@ at its first stop, and what they resolve to together is written down as
 `~/.config/promptctl/sessions/<session-id>/shared-at-start.conf`, an ordinary config file
 in the same format holding an absolute number or `off`: `ceiling = 350000`. From then on
 that record is the shared contribution for that session, and neither shared file is read
-again for it. Nothing removes that record. A session that stops even once leaves one
-small file under `~/.config/promptctl/sessions/`, and it stays there after the session is
-gone. Editing a shared file, deleting it, or leaving a syntax error in it does not move a
+again for it. A session that stops even once leaves one small file under
+`~/.config/promptctl/sessions/`; its mtime is refreshed at every later stop, and once a
+session has gone unseen for 30 days the next new session's first stop sweeps its directory
+away, so the tree stays readable rather than growing one entry per session forever. A pane
+that keeps stopping keeps its record young and is never swept; one reaped after a month of
+silence simply re-reads the shared files if it ever resumes. Editing a shared file, deleting
+it, or leaving a syntax error in it does not move a
 running session's ceiling and cannot gate it. A session that starts afterwards reads the
 shared files as they stand: an edit or a deletion gives it the new number, and a syntax
 error stops the hook for that session with an error, the same loud failure a malformed

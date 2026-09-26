@@ -36,7 +36,8 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import (GRACE, SHARED_AT_START, anchored, in_force,  # noqa: E402
-                            session_directory, shared_at_start)
+                            mark_seen, session_directory, shared_at_start,
+                            sweep_sessions)
 
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
@@ -110,10 +111,24 @@ def resolve_ceiling(hook):
     The project is anchored at the directory the session belongs to rather than wherever a Bash
     call last left it, which `anchored` decides for this and for the command that writes these
     layers. Reading the shared layers is also what records them for this session, which is why this
-    runs at a stop and nowhere else."""
+    runs at a stop and nowhere else.
+
+    A stop is also the one moment memento observes this session, so the two things that keep the
+    sessions tree from growing without bound hang off it. The first stop - the one that creates the
+    record - is the occasion to sweep every other session gone stale past the cutoff; the record it
+    just wrote is already young, so it needs no touch. Every later stop instead touches the record, so
+    it stays young for as long as the session keeps stopping. The sweep is paid once per session, not
+    once per stop, and never removes the directory just created."""
     anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
-    return in_force(directory, shared_at_start(directory / SHARED_AT_START, anchor))
+    record = directory / SHARED_AT_START
+    shared, first_stop = shared_at_start(record, anchor)
+    ceiling = in_force(directory, shared)
+    if first_stop:
+        sweep_sessions(directory)
+    else:
+        mark_seen(record)
+    return ceiling
 
 def records_newest_first(transcript_path):
     """This session's records, reading only as far back as the caller consumes. Sidechains are

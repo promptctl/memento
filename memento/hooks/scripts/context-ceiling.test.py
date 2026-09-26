@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # One scratch root for every mkdtemp() below, removed on exit - each call still gets its own
 # subdirectory, but the suite no longer abandons one per case in the system temp dir.
@@ -46,7 +47,8 @@ SESSION = "s-1"
 # The file names come from the module the hook itself reads them from, so a fixture here cannot
 # drift from the files the hook looks for. [LAW:one-source-of-truth]
 sys.path.insert(0, LIB)
-from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE, SHARED_AT_START  # noqa: E402
+from ceiling_config import (CONFIG_NAME, DEFAULT_CEILING, GRACE,  # noqa: E402
+                            SHARED_AT_START, lines_in)
 
 # Past the ceiling and past the limit the grace sets beyond it: the two bands a stop can block in.
 LIMIT = TEST_CEILING + GRACE
@@ -792,6 +794,96 @@ command = registered["Stop"][0]["hooks"][0]["command"]
 check("the Stop registration runs this script, from the plugin root",
       os.path.basename(HOOK) in command and "${CLAUDE_PLUGIN_ROOT}" in command, command)
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
+
+# --- the sessions tree does not grow without bound ----------------------------------------
+# Driven through the hook the way the harness drives it: a stop writes and ages records; the sweep and
+# the touch that keep the tree bounded are read off the filesystem afterwards, not off the internals -
+# with one exception at the end, a direct lines_in call for a race too fine to trigger through the hook
+# deterministically. [LAW:behavior-not-structure]
+
+def aged_session(home, sid, age_days, extra=()):
+    """A session directory as it would stand `age_days` after it was last seen: its record, any extra
+    files, and the directory itself all stamped that far in the past. The directory's own mtime is set
+    last, because writing a file into it bumps that mtime back to now."""
+    directory = os.path.join(home, "sessions", sid)
+    os.makedirs(directory, exist_ok=True)
+    when = time.time() - age_days * 86_400
+    for name, text in ((SHARED_AT_START, f"ceiling = {DEFAULT_CEILING}\n"), *extra):
+        stamped = write_conf(os.path.join(directory, name), text)
+        os.utime(stamped, (when, when))
+    os.utime(directory, (when, when))
+    return directory
+
+
+def survives(home, sid):
+    return os.path.exists(os.path.join(home, "sessions", sid, SHARED_AT_START))
+
+
+# A session unseen well past the cutoff is finished; its whole directory goes, and the stray `.<pid>`
+# partial a killed record write would have orphaned inside it goes with it.
+swept = scratch_dir()
+aged_session(swept, "ancient", 40, extra=[(f"{SHARED_AT_START}.9999", "ceiling = 1\n")])
+run([user, assistant(UNDER)], config_home=swept, session="fresh-1")
+check("a session unseen past the cutoff is swept, partial and all",
+      not os.path.exists(os.path.join(swept, "sessions", "ancient")),
+      os.listdir(os.path.join(swept, "sessions")))
+check("the session doing the sweeping does not sweep its own fresh record",
+      survives(swept, "fresh-1"), os.listdir(os.path.join(swept, "sessions")))
+
+# A session seen within the cutoff is still in play - a pane resumed days later is still that session
+# - so it is left exactly where it is.
+kept = scratch_dir()
+aged_session(kept, "recent", 0)
+run([user, assistant(UNDER)], config_home=kept, session="fresh-2")
+check("a session seen within the cutoff is left alone",
+      survives(kept, "recent"), os.listdir(os.path.join(kept, "sessions")))
+
+# The stop condition itself: a session that keeps stopping cannot be swept, however long ago it
+# started. The record starts 40 days old; the session stops once, which touches it back to now; a
+# brand-new session then runs the sweep, and the touched record is what saves the running one. Remove
+# the touch and this is the case that deletes a live session's record.
+running = scratch_dir()
+aged_session(running, "old-runner", 40)
+run([user, assistant(UNDER)], config_home=running, session="old-runner")
+run([user, assistant(UNDER)], config_home=running, session="fresh-3")
+check("a session that keeps stopping is never swept, however long ago it started",
+      survives(running, "old-runner"), os.listdir(os.path.join(running, "sessions")))
+
+# A fresh `.<pid>` partial is a record or override write still in flight, not litter: the directory is
+# kept, because reaping it out from under the write would make that write fail. (An old partial, like
+# the one aged with the "ancient" case above, ages out with everything else.)
+inflight = scratch_dir()
+mid = aged_session(inflight, "mid-write", 40)
+write_conf(os.path.join(mid, f"{SHARED_AT_START}.9999"), "ceiling = 1\n")  # a write in flight, just now
+run([user, assistant(UNDER)], config_home=inflight, session="fresh-4")
+check("a fresh partial (a write in flight) keeps its directory from being swept",
+      survives(inflight, "mid-write"), os.listdir(os.path.join(inflight, "sessions")))
+
+# A per-session ceiling the user set recently keeps its whole directory alive even when the record is
+# old: _last_seen reads the session's own layer too, so a deliberate override is never swept out from
+# under a session that set it, stopped or not.
+override = scratch_dir()
+kept_dir = aged_session(override, "set-override", 40)
+write_conf(os.path.join(kept_dir, CONFIG_NAME), "ceiling = +100000\n")  # set just now
+run([user, assistant(UNDER)], config_home=override, session="fresh-5")
+check("a freshly-set per-session override keeps its directory from being swept",
+      survives(override, "set-override"), os.listdir(os.path.join(override, "sessions")))
+
+
+# A file that vanishes between lines_in's exists() check and its read - a concurrent sweep deleting a
+# session's files while its own hook reads them - reads as absent, not a crash that would take the
+# reader's Stop gate down. lines_in only calls .exists() and .read_text(), so a stand-in exercises the
+# race deterministically.
+class _VanishedMidRead:
+    def exists(self):
+        return True
+
+    def read_text(self, *args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+
+check("lines_in reads a file that vanished mid-read as absent rather than crashing",
+      lines_in(_VanishedMidRead()) == [], "expected []")
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

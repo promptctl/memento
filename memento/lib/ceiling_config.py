@@ -21,7 +21,9 @@ import functools
 import math
 import os
 import re
+import shutil
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_CEILING = 350_000
@@ -40,6 +42,17 @@ XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl")
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
+# How long a session directory may go unseen before the sweep removes it. A session's record is
+# touched at every stop (`mark_seen`), so this measures time since its last stop, not since it
+# started: a session that keeps stopping within the cutoff keeps its record young and cannot be swept.
+# A session that goes unseen for longer is finished for this purpose: the next new session's sweep
+# removes its directory while it stays dormant, and should it ever resume it re-reads the shared layers
+# - for a frozen value that stale, the correct answer, not the staleness the record exists to prevent.
+# (A pane that instead keeps stopping refreshes its own record and stays; the value it holds frozen
+# across a long resume is value staleness, a separate concern from this growth bound.)
+# [LAW:parse-dont-validate] Set comfortably beyond any real resume, so removal falls only on sessions
+# for which re-reading is right.
+STALE_SESSION_AGE_SECONDS = 30 * 24 * 60 * 60
 PROJECT_CONFIG_DIR = ".promptctl"
 # What the shared layers resolved to when a session started, in the same `key = value` shape
 # every other layer uses, so one parser reads them all. The hook writes this file and the agent
@@ -68,11 +81,19 @@ def lines_in(path):
 
     What the filesystem refuses is deliberately not caught: no permission and no such device are not
     about the format, and the caller that can act on one - the command about to remove the file - is
-    the one that catches it."""
+    the one that catches it.
+
+    The one refusal that IS caught is the file vanishing between the check and the read: `sweep_sessions`
+    can now delete another session's directory while that session's own hook is mid-read, so the
+    exists-then-read here has a real race. A file that is gone reads as absent - the same answer the
+    `exists()` check above gives - rather than a traceback that would take the reader's gate down for a
+    reason nothing states. [LAW:no-silent-failure]"""
     if not path.exists():
         return []
     try:
         return path.read_text().splitlines()
+    except FileNotFoundError:
+        return []
     except UnicodeDecodeError as refusal:
         sys.exit(f"memento config: {path} holds bytes that are not text, so no line of it can set "
                  f"a ceiling: {refusal}. Fix it or remove it.")
@@ -185,6 +206,107 @@ def session_directory(session_id):
     return directory
 
 
+def mark_seen(record):
+    """Refresh a session record's mtime, so its age measures the time since this session's last stop
+    rather than since it started.
+
+    [LAW:effects-at-boundaries] the sweep reads this mtime as the session's sign of life, so a session
+    that keeps stopping keeps its record younger than the cutoff and cannot be swept - the freeze holds
+    for exactly as long as the session is still stopping. (A session that goes dormant past the cutoff
+    is reaped while dormant by the next new session's sweep; if it later resumes it re-reads the shared
+    layers, which for a value that stale is correct.)
+    Best-effort, for the same reason `log` is: this is bookkeeping the sweep consumes, not the gate, so
+    a failure to touch is reported and never fatal - raising here would take the whole gate down with
+    the bookkeeping. [LAW:no-silent-failure]"""
+    try:
+        os.utime(record)
+    except OSError as failure:
+        print(f"memento config: cannot refresh {record}: {failure}", file=sys.stderr)
+
+
+def _last_seen(entry):
+    """When anything last happened in a session directory - the newest mtime among the directory and
+    everything in it - or, for a stray file, its own mtime.
+
+    A stop touches the record, the `ceiling` command writes the session's own layer, and either write
+    stages a `.<pid>` partial before it lands; each of those is a real event at a real time, so the
+    newest mtime in the directory is the session's last sign of life. A partial counts too, and must:
+    a fresh one is a write still in flight, and a directory reaped out from under it would fail that
+    write. An abandoned partial is simply old, and ages out with everything else a full cutoff after
+    the write that left it - which is when that write, the directory's last activity, actually happened.
+    So there is nothing to special-case: the newest mtime is the answer either way."""
+    if entry.is_dir():
+        return max([entry.stat().st_mtime] + [child.stat().st_mtime for child in entry.iterdir()])
+    return entry.stat().st_mtime
+
+
+def sweep_sessions(keep):
+    """Remove every finished session's directory from the sessions tree, and with it the stray
+    `.<pid>` partial a killed record write leaves behind.
+
+    A finished session's directory can hold more than the record: a per-session ceiling the user set
+    with the `ceiling` command lives beside it as CONFIG_NAME, and it is removed too. That is intended,
+    not a leak - `_last_seen` counts every file's mtime, so a session layer written recently keeps the
+    whole directory alive whether or not the session has stopped since. Only an override left untouched
+    past the cutoff, on a session also unseen that long, is swept, and by then it is as stale as the
+    frozen shared value beside it.
+
+    Run once per new session - at the stop that first records it - not on every stop: the pass stats
+    each session directory, so its cost is proportional to how many exist, and paying that once per
+    session is the cheapest cadence that still reaps every session that goes stale. That count is what
+    the sweep itself bounds; a busy machine that keeps resuming sessions within the cutoff carries all
+    of them and pays for all of them each new session, which is the price of never reaping a live one.
+    `keep` is the caller's own directory, brand new this stop; it is skipped by name rather than left
+    to the cutoff, so a future reader need not reason about whether now-precedes-the-cutoff protects
+    it. [LAW:no-ambient-temporal-coupling]
+
+    [LAW:effects-at-boundaries][LAW:no-silent-failure] best-effort per entry and non-fatal overall,
+    like the sweep's sibling `mark_seen` and `log`: housekeeping must not take the gate down, so a
+    directory that will not remove is reported and the rest are still swept. The one refusal not
+    reported is the entry already being gone: two new sessions can sweep at once, and the one that
+    loses the race to remove a given entry finds it missing - a no-op, not a failure to announce.
+
+    The mirror of `lines_in`'s read-side race is a write-side one, and it is accepted here, not guarded.
+    A session whose record aged past the cutoff can resume and write into its own directory in the
+    window between this pass judging it stale and removing it. The hook's own write - `mark_seen`'s
+    `os.utime` - already catches the directory vanishing and carries on, so it is untouched. The
+    `ceiling` command re-creates the directory with `mkdir(parents=True)` before it stages, healing the
+    common case; only a delete landing inside its sub-millisecond stage-then-replace window makes it
+    fail, and that is a loud, retryable command error - never a wrong or absent gate. The precondition
+    (a session unseen for a month yet active enough to be writing, and a second new session sweeping at
+    that instant) is vanishingly rare, and a loud retryable failure is the safe direction to err; a lock
+    spanning every write to a session directory is not worth its carrying cost for it. [LAW:carrying-cost]"""
+    cutoff = time.time() - STALE_SESSION_AGE_SECONDS
+    keep = keep.resolve()
+    try:
+        entries = list(SESSION_CONFIGS.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as failure:
+        # A tree that is not readable at all - permissions, a dead mount - is nothing this pass can
+        # sweep, but it is also not a reason to take the gate down. Report and leave, like every other
+        # arm here. [LAW:no-silent-failure]
+        print(f"memento config: cannot sweep {SESSION_CONFIGS}: {failure}", file=sys.stderr)
+        return
+    for entry in entries:
+        try:
+            if entry.resolve() == keep or _last_seen(entry) >= cutoff:
+                continue
+            # A directory carries its own partials; a stray partial at the tree root has none to
+            # carry. [LAW:dataflow-not-control-flow] the staleness decision above is one rule for
+            # both, and only the removal splits on what the filesystem needs to remove each shape.
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        except FileNotFoundError:
+            # The entry, or a file inside it read mid-scan, is already gone: another concurrent sweep
+            # removed it, or its own session is writing and replacing files under it. Either way there
+            # is nothing to reap this pass and nothing wrong to report - the next new session's sweep
+            # revisits whatever remains. A lost race is a no-op, not the failure the arm below reports.
+            # [LAW:no-silent-failure]
+            pass
+        except OSError as failure:
+            print(f"memento config: cannot sweep {entry}: {failure}", file=sys.stderr)
+
+
 def folded(layers, beneath=lambda: DEFAULT_CEILING):
     """Every written layer's move applied to the ceiling beneath it, in order.
 
@@ -294,8 +416,16 @@ def shared_at_start(path, anchor):
     The record is made at the session's first stop rather than at its first token, because a
     stop is the only event the hook is given. That is one turn of drift, spent where a session
     is still far below any ceiling. Nothing here overwrites a record that already stands: the
-    write is reached only for a path `ceiling_in` read nothing from."""
-    return ceiling_in(path) or write_ceiling(path, live_shared(anchor))
+    write is reached only for a path `ceiling_in` read nothing from.
+
+    Returns the record and whether this call created it. The one caller maintaining the sessions tree
+    needs to know if this was the session's first stop, and this function already knows - it just chose
+    whether to write. Reporting it here is one existence question answered once, rather than the caller
+    asking the filesystem the same thing a second time. [LAW:one-source-of-truth]"""
+    existing = ceiling_in(path)
+    if existing:
+        return existing, False
+    return write_ceiling(path, live_shared(anchor)), True
 
 
 def shared_unrecorded(path, anchor):
