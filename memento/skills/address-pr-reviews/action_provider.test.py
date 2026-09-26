@@ -237,6 +237,12 @@ find_body(
     [one("a.py", 1, "**[S1]** real")])
 
 find_body(
+    "a heading of any level ends the section: bullets under a later ## are not findings",
+    "### Findings outside the reviewed diff\nexpl\n\n- `a.py:1` — **[S1]** real\n\n"
+    "## Notes\n\n- a trailing note bullet, not a finding",
+    [one("a.py", 1, "**[S1]** real")])
+
+find_body(
     "a path bearing colons keeps them; the numeric tail is the line",
     "### Findings outside the reviewed diff\nx\n\n- `a:b.py:10` — **[S1]** t",
     [one("a:b.py", 10, "**[S1]** t")])

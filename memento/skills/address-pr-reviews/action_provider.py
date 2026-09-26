@@ -191,7 +191,11 @@ def parse_body_findings(body: str, author: str) -> list[dict]:
     findings: list[dict] = []
     in_section = False
     for line in body.splitlines():
-        if line.startswith("### "):
+        # A section runs from its heading until the next heading of ANY level, so
+        # any ATX heading ends it — the reviewer's own tail (verdict, footer,
+        # markers) carries no `- ` items, and matching only `### ` would let a
+        # bullet under a later `##`/`#` heading read as a phantom finding.
+        if re.match(r"#{1,6} ", line):
             in_section = line.rstrip() in BODY_FINDING_HEADINGS
             continue
         if not (in_section and line.startswith("- ")):
