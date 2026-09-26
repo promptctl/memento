@@ -796,9 +796,10 @@ check("the Stop registration runs this script, from the plugin root",
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
 
 # --- the sessions tree does not grow without bound ----------------------------------------
-# Driven through the hook the way the harness drives it: a stop writes and ages records; the sweep
-# and the touch that keep the tree bounded are read off the filesystem afterwards, never off the
-# internals. [LAW:behavior-not-structure]
+# Driven through the hook the way the harness drives it: a stop writes and ages records; the sweep and
+# the touch that keep the tree bounded are read off the filesystem afterwards, not off the internals -
+# with one exception at the end, a direct lines_in call for a race too fine to trigger through the hook
+# deterministically. [LAW:behavior-not-structure]
 
 def aged_session(home, sid, age_days, extra=()):
     """A session directory as it would stand `age_days` after it was last seen: its record, any extra
