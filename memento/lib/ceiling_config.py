@@ -489,10 +489,23 @@ def session_shared(directory, anchor, tokens):
     is the dangerous one. A re-derive is not the session's first stop - the record and the sessions-tree
     sweep both stand from the real first stop - so it reports `False`."""
     record = directory / SHARED_AT_START
-    frozen_at = reset_pending_tokens(directory / RESET_PENDING)
+    marker = directory / RESET_PENDING
+    frozen_at = reset_pending_tokens(marker)
     if frozen_at is not None and tokens < frozen_at:
-        (directory / RESET_PENDING).unlink(missing_ok=True)
-        return write_ceiling(record, live_shared(anchor)), False
+        # Re-derive first, spend the marker second. `write_ceiling` and `live_shared` can fail - a
+        # shared file broken at this moment exits here, exactly as it does for any fresh start into a
+        # broken config - and a marker unlinked before that write would lose the landing to the
+        # failure, leaving the stale value with nothing to retry it. Spending it only after the record
+        # is rewritten makes the re-derive idempotent across a retry: a stop that fails leaves the
+        # marker standing, so the next one tries again. The unlink is bookkeeping, so its own failure
+        # is reported and not raised - a marker that will not clear costs repeated harmless re-derives,
+        # never the gate. [LAW:no-silent-failure]
+        written = write_ceiling(record, live_shared(anchor))
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError as failure:
+            print(f"memento config: cannot clear {marker}: {failure}", file=sys.stderr)
+        return written, False
     return shared_at_start(record, anchor)
 
 

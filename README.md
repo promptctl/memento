@@ -181,8 +181,8 @@ the first token because `Stop` is the only event this hook is given — one turn
 spent where a session is still far below any ceiling.
 
 The record is keyed on the session id, which outlives a reset in place: on the tmux
-transport `finalize-session` sends `/clear` or `/compact` as keystrokes into the same
-running process, so the process and its id survive and the context after the reset is a new
+transport `finalize-session` sends `/clear` as keystrokes into the same running process, so
+the process and its id survive and the context after the reset is a new
 one under the old record. Left there, that record would freeze the first context's ceiling
 onto every context the pane runs after it. So a credited close-out notes the context size
 at that moment beside the record, and the next stop decides by it. A context that has

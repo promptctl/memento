@@ -575,6 +575,20 @@ _, out, _ = run([user, assistant(280_000)], config_home=home, user_conf="ceiling
 check("a close-out under the ceiling still re-freezes the next context from the current shared layers",
       blocked_at(out, 250_000), str(out))
 
+# Repeated close-outs before any reset lands: each records the size the context had, so the marker
+# tracks the latest, and the conservative test still waits for the context to fall below it. A context
+# that only grows between close-outs never reads as a landed reset and keeps what it froze.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(380_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a context still growing after a close-out is not read as a landed reset",
+      blocked_at(out, 350_000), str(out))
+run([user, assistant(420_000)] + closeout, config_home=home, user_conf="ceiling = 250000\n")
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a reset landing below the latest close-out size is what finally re-derives",
+      blocked_at(out, 250_000), str(out))
+
 # --- a setting nobody can misspell into silence -------------------------------------------
 
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 350k\n")
