@@ -81,11 +81,19 @@ def lines_in(path):
 
     What the filesystem refuses is deliberately not caught: no permission and no such device are not
     about the format, and the caller that can act on one - the command about to remove the file - is
-    the one that catches it."""
+    the one that catches it.
+
+    The one refusal that IS caught is the file vanishing between the check and the read: `sweep_sessions`
+    can now delete another session's directory while that session's own hook is mid-read, so the
+    exists-then-read here has a real race. A file that is gone reads as absent - the same answer the
+    `exists()` check above gives - rather than a traceback that would take the reader's gate down for a
+    reason nothing states. [LAW:no-silent-failure]"""
     if not path.exists():
         return []
     try:
         return path.read_text().splitlines()
+    except FileNotFoundError:
+        return []
     except UnicodeDecodeError as refusal:
         sys.exit(f"memento config: {path} holds bytes that are not text, so no line of it can set "
                  f"a ceiling: {refusal}. Fix it or remove it.")
@@ -217,22 +225,18 @@ def mark_seen(record):
 
 
 def _last_seen(entry):
-    """When a session directory last showed a legitimate sign of life - or, for a stray file, its own
-    mtime.
+    """When anything last happened in a session directory - the newest mtime among the directory and
+    everything in it - or, for a stray file, its own mtime.
 
-    The record is touched at every stop and the session's own layer is written when it is set, so the
-    newer of those two named files is the session's last real activity. A `.<pid>` partial a killed
-    write left behind is litter, not life: with a real record present, counting the partial - or the
-    directory's own mtime, which a partial write also bumps - would keep a dead directory alive until
-    the litter aged past the cutoff, so only the two real names count. A directory holding neither yet
-    falls back to its own mtime, and that a partial write bumps that mtime is deliberate: it is exactly
-    the window in which a first record is staged but not yet in place, and reaping a write in progress
-    is the one outcome worse than reaping late. A directory abandoned in that state waits out the full
-    cutoff - the safe direction to err."""
+    A stop touches the record, the `ceiling` command writes the session's own layer, and either write
+    stages a `.<pid>` partial before it lands; each of those is a real event at a real time, so the
+    newest mtime in the directory is the session's last sign of life. A partial counts too, and must:
+    a fresh one is a write still in flight, and a directory reaped out from under it would fail that
+    write. An abandoned partial is simply old, and ages out with everything else a full cutoff after
+    the write that left it - which is when that write, the directory's last activity, actually happened.
+    So there is nothing to special-case: the newest mtime is the answer either way."""
     if entry.is_dir():
-        live = [(entry / name).stat().st_mtime
-                for name in (SHARED_AT_START, CONFIG_NAME) if (entry / name).exists()]
-        return max(live) if live else entry.stat().st_mtime
+        return max([entry.stat().st_mtime] + [child.stat().st_mtime for child in entry.iterdir()])
     return entry.stat().st_mtime
 
 
@@ -242,10 +246,10 @@ def sweep_sessions(keep):
 
     A finished session's directory can hold more than the record: a per-session ceiling the user set
     with the `ceiling` command lives beside it as CONFIG_NAME, and it is removed too. That is intended,
-    not a leak - `_last_seen` reads CONFIG_NAME's own mtime, so an override set recently keeps the whole
-    directory alive whether or not the session has stopped since. Only an override left untouched past
-    the cutoff, on a session also unseen that long, is swept, and by then it is as stale as the frozen
-    shared value beside it.
+    not a leak - `_last_seen` counts every file's mtime, so a session layer written recently keeps the
+    whole directory alive whether or not the session has stopped since. Only an override left untouched
+    past the cutoff, on a session also unseen that long, is swept, and by then it is as stale as the
+    frozen shared value beside it.
 
     Run once per new session - at the stop that first records it - not on every stop: the pass stats
     each session directory, so its cost is proportional to how many exist, and paying that once per
@@ -258,7 +262,9 @@ def sweep_sessions(keep):
 
     [LAW:effects-at-boundaries][LAW:no-silent-failure] best-effort per entry and non-fatal overall,
     like the sweep's sibling `mark_seen` and `log`: housekeeping must not take the gate down, so a
-    directory that will not remove is reported and the rest are still swept."""
+    directory that will not remove is reported and the rest are still swept. The one refusal not
+    reported is the entry already being gone: two new sessions can sweep at once, and the one that
+    loses the race to remove a given entry finds it missing - a no-op, not a failure to announce."""
     cutoff = time.time() - STALE_SESSION_AGE_SECONDS
     keep = keep.resolve()
     try:
@@ -279,6 +285,10 @@ def sweep_sessions(keep):
             # carry. [LAW:dataflow-not-control-flow] the staleness decision above is one rule for
             # both, and only the removal splits on what the filesystem needs to remove each shape.
             shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        except FileNotFoundError:
+            # Another concurrent sweep, or the entry's own session, already removed it. A lost race is
+            # a no-op here, not the sweep failure the arm below reports. [LAW:no-silent-failure]
+            pass
         except OSError as failure:
             print(f"memento config: cannot sweep {entry}: {failure}", file=sys.stderr)
 
