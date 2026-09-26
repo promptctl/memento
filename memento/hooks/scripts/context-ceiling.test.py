@@ -178,10 +178,14 @@ check("past the ceiling but under the limit, the agent may finish its unit",
       and f"{LIMIT:,}" in out["reason"] and "Close it out now" not in out["reason"], str(out))
 check("and a unit already finished is still closed out through the same command",
       out and LAUNCHER in out["reason"] and "ExitWorktree" in out["reason"], str(out))
+check("the finishing block forbids raising the ceiling to make room",
+      out and "move the ceiling" in out["reason"], str(out))
 check("the finishing band is logged apart from the forced close-out", "-> finish" in run.log, run.log)
 code, out, _ = run([user, assistant(PAST_LIMIT)])
 check("past the limit, the close-out is due now whatever is in progress",
       out and out.get("decision") == "block" and "Close it out now" in out["reason"], str(out))
+check("the forced close-out block forbids raising the ceiling too",
+      out and "move the ceiling" in out["reason"], str(out))
 code, out, _ = run([user, assistant(LIMIT)])
 check("a session at exactly the limit is past it",
       out and "Close it out now" in out["reason"], str(out))
