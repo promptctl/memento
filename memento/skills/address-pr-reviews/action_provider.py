@@ -161,9 +161,14 @@ BODY_FINDING_HEADINGS = frozenset({
 # `- ` + codeSpan(`path:line`) + ` — ` + severity-tagged body (transport.js
 # renderFindingSection). The fence is one-or-more backticks with an optional pad
 # space when the path itself contains a backtick, so `+ and the optional spaces
-# mirror codeSpan exactly. A line that does not match is not silently dropped
-# (that would recreate the very silent loss this parser exists to end) — it is
-# surfaced with a null anchor below.
+# mirror codeSpan exactly.
+#
+# One finding is one physical line: transport.js runs every finding body through
+# flattenBody, which collapses VERTICAL_SEPARATORS (\n \r    ) to spaces
+# before rendering, so a finding never wraps and there is no continuation line for
+# the scan to drop. What CAN vary is a `- ` item line the reviewer's grammar shifts
+# under us; that is the silent loss this parser refuses, so a `- ` line the regex
+# rejects is surfaced with a null anchor below, never skipped.
 _BODY_ITEM_RE = re.compile(r"^-\s+(`+) ?(.*?) ?\1 — (.*)$")
 
 
@@ -220,15 +225,15 @@ def parse_body_findings(body: str, author: str) -> list[dict]:
 
 def body_findings(reviews: list[dict]) -> list[dict]:
     """[LAW:effects-at-boundaries] Pure. Every body finding across the reviewer's
-    blocking reviews (the `bot_reviews` shape). Scoped to CHANGES_REQUESTED by the
-    same predicate `change_requests` uses, so the reviews whose bodies carry these
-    findings are exactly the reviews step 8 dismisses — one predicate, and the
-    finding set and the dismiss set cannot disagree. A dismissed review has left
-    that state, so its body findings are disposed and no longer read.
-    [LAW:one-source-of-truth]"""
+    blocking reviews (the `bot_reviews` shape). [LAW:single-enforcer] the blocking
+    test is `github_threads.is_blocking_review` — the very predicate `change_requests`
+    uses — so the reviews whose bodies carry these findings are exactly the reviews
+    step 8 dismisses, by construction rather than by two copies that agree until one
+    is edited. A dismissed review has left that state, so its body findings are
+    disposed and no longer read. [LAW:one-source-of-truth]"""
     return [
         f
-        for r in reviews if r.get("state") == "CHANGES_REQUESTED"
+        for r in reviews if github_threads.is_blocking_review(r)
         for f in parse_body_findings(r["body"], r["author"])
     ]
 
