@@ -45,10 +45,13 @@ SESSION_CONFIGS = CONFIG_HOME / "sessions"
 # How long a session directory may go unseen before the sweep removes it. A session's record is
 # touched at every stop (`mark_seen`), so this measures time since its last stop, not since it
 # started: a session that keeps stopping within the cutoff keeps its record young and cannot be swept.
-# A session unseen for longer - dormant, or a pane resumed after more than a month - is reaped and
-# re-reads the shared layers on its next stop instead; for a frozen value that stale that is the
-# correct answer, not the staleness the record exists to prevent. [LAW:parse-dont-validate] Set
-# comfortably beyond any real resume, so removal falls only on sessions for which re-reading is right.
+# A session that goes unseen for longer is finished for this purpose: the next new session's sweep
+# removes its directory while it stays dormant, and should it ever resume it re-reads the shared layers
+# - for a frozen value that stale, the correct answer, not the staleness the record exists to prevent.
+# (A pane that instead keeps stopping refreshes its own record and stays; the value it holds frozen
+# across a long resume is value staleness, a separate concern from this growth bound.)
+# [LAW:parse-dont-validate] Set comfortably beyond any real resume, so removal falls only on sessions
+# for which re-reading is right.
 STALE_SESSION_AGE_SECONDS = 30 * 24 * 60 * 60
 PROJECT_CONFIG_DIR = ".promptctl"
 # What the shared layers resolved to when a session started, in the same `key = value` shape
@@ -201,8 +204,9 @@ def mark_seen(record):
 
     [LAW:effects-at-boundaries] the sweep reads this mtime as the session's sign of life, so a session
     that keeps stopping keeps its record younger than the cutoff and cannot be swept - the freeze holds
-    for exactly as long as the session is still stopping. (A session dormant past the cutoff is reaped
-    and re-reads the shared layers on its next stop, which for a value that stale is correct.)
+    for exactly as long as the session is still stopping. (A session that goes dormant past the cutoff
+    is reaped while dormant by the next new session's sweep; if it later resumes it re-reads the shared
+    layers, which for a value that stale is correct.)
     Best-effort, for the same reason `log` is: this is bookkeeping the sweep consumes, not the gate, so
     a failure to touch is reported and never fatal - raising here would take the whole gate down with
     the bookkeeping. [LAW:no-silent-failure]"""
@@ -218,10 +222,13 @@ def _last_seen(entry):
 
     The record is touched at every stop and the session's own layer is written when it is set, so the
     newer of those two named files is the session's last real activity. A `.<pid>` partial a killed
-    write left behind is litter, not life: counting it - or the directory's own mtime, which a partial
-    write also bumps - would keep a dead directory alive until the litter itself aged past the cutoff,
-    the opposite of reaping the partial with the directory. So only the two real names count, with the
-    directory's own mtime as the fallback for one that holds neither yet."""
+    write left behind is litter, not life: with a real record present, counting the partial - or the
+    directory's own mtime, which a partial write also bumps - would keep a dead directory alive until
+    the litter aged past the cutoff, so only the two real names count. A directory holding neither yet
+    falls back to its own mtime, and that a partial write bumps that mtime is deliberate: it is exactly
+    the window in which a first record is staged but not yet in place, and reaping a write in progress
+    is the one outcome worse than reaping late. A directory abandoned in that state waits out the full
+    cutoff - the safe direction to err."""
     if entry.is_dir():
         live = [(entry / name).stat().st_mtime
                 for name in (SHARED_AT_START, CONFIG_NAME) if (entry / name).exists()]
@@ -250,6 +257,12 @@ def sweep_sessions(keep):
     try:
         entries = list(SESSION_CONFIGS.iterdir())
     except FileNotFoundError:
+        return
+    except OSError as failure:
+        # A tree that is not readable at all - permissions, a dead mount - is nothing this pass can
+        # sweep, but it is also not a reason to take the gate down. Report and leave, like every other
+        # arm here. [LAW:no-silent-failure]
+        print(f"memento config: cannot sweep {SESSION_CONFIGS}: {failure}", file=sys.stderr)
         return
     for entry in entries:
         try:
@@ -372,8 +385,16 @@ def shared_at_start(path, anchor):
     The record is made at the session's first stop rather than at its first token, because a
     stop is the only event the hook is given. That is one turn of drift, spent where a session
     is still far below any ceiling. Nothing here overwrites a record that already stands: the
-    write is reached only for a path `ceiling_in` read nothing from."""
-    return ceiling_in(path) or write_ceiling(path, live_shared(anchor))
+    write is reached only for a path `ceiling_in` read nothing from.
+
+    Returns the record and whether this call created it. The one caller maintaining the sessions tree
+    needs to know if this was the session's first stop, and this function already knows - it just chose
+    whether to write. Reporting it here is one existence question answered once, rather than the caller
+    asking the filesystem the same thing a second time. [LAW:one-source-of-truth]"""
+    existing = ceiling_in(path)
+    if existing:
+        return existing, False
+    return write_ceiling(path, live_shared(anchor)), True
 
 
 def shared_unrecorded(path, anchor):

@@ -122,8 +122,8 @@ def resolve_ceiling(hook):
     anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
     record = directory / SHARED_AT_START
-    first_stop = not record.exists()
-    ceiling = in_force(directory, shared_at_start(record, anchor))
+    shared, first_stop = shared_at_start(record, anchor)
+    ceiling = in_force(directory, shared)
     if first_stop:
         sweep_sessions(directory)
     else:
