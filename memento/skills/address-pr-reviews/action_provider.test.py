@@ -247,6 +247,11 @@ find_body(
     "### Findings outside the reviewed diff\nx\n\n- `a:b.py:10` — **[S1]** t",
     [one("a:b.py", 10, "**[S1]** t")])
 
+find_body(
+    "a file-level body finding (bare path, no line) parses with a null line",
+    "### Findings outside the reviewed diff\nx\n\n- `README.md` — **[S1]** whole-file note",
+    [one("README.md", None, "**[S1]** whole-file note")])
+
 # [LAW:no-silent-failure] an item the grammar does not recognize is surfaced with a
 # null anchor, never dropped — dropping it would be the exact silent loss this closes.
 find_body(
