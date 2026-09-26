@@ -264,7 +264,18 @@ def sweep_sessions(keep):
     like the sweep's sibling `mark_seen` and `log`: housekeeping must not take the gate down, so a
     directory that will not remove is reported and the rest are still swept. The one refusal not
     reported is the entry already being gone: two new sessions can sweep at once, and the one that
-    loses the race to remove a given entry finds it missing - a no-op, not a failure to announce."""
+    loses the race to remove a given entry finds it missing - a no-op, not a failure to announce.
+
+    The mirror of `lines_in`'s read-side race is a write-side one, and it is accepted here, not guarded.
+    A session whose record aged past the cutoff can resume and write into its own directory in the
+    window between this pass judging it stale and removing it. The hook's own write - `mark_seen`'s
+    `os.utime` - already catches the directory vanishing and carries on, so it is untouched. The
+    `ceiling` command re-creates the directory with `mkdir(parents=True)` before it stages, healing the
+    common case; only a delete landing inside its sub-millisecond stage-then-replace window makes it
+    fail, and that is a loud, retryable command error - never a wrong or absent gate. The precondition
+    (a session unseen for a month yet active enough to be writing, and a second new session sweeping at
+    that instant) is vanishingly rare, and a loud retryable failure is the safe direction to err; a lock
+    spanning every write to a session directory is not worth its carrying cost for it. [LAW:carrying-cost]"""
     cutoff = time.time() - STALE_SESSION_AGE_SECONDS
     keep = keep.resolve()
     try:
