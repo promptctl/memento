@@ -44,11 +44,11 @@ USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 SESSION_CONFIGS = CONFIG_HOME / "sessions"
 # How long a session directory may go unseen before the sweep removes it. A session's record is
 # touched at every stop (`mark_seen`), so this measures time since its last stop, not since it
-# started: a session still stopping keeps its record younger than this and cannot be swept, which is
-# what makes removing a live session's record impossible rather than merely unlikely.
-# [LAW:parse-dont-validate] Any record this old belongs to a session whose frozen ceiling is staler
-# than any resume could want, so the next stop re-reading the shared layers is the correct behaviour,
-# not the staleness the record exists to prevent. Comfortably beyond any real resume.
+# started: a session that keeps stopping within the cutoff keeps its record young and cannot be swept.
+# A session unseen for longer - dormant, or a pane resumed after more than a month - is reaped and
+# re-reads the shared layers on its next stop instead; for a frozen value that stale that is the
+# correct answer, not the staleness the record exists to prevent. [LAW:parse-dont-validate] Set
+# comfortably beyond any real resume, so removal falls only on sessions for which re-reading is right.
 STALE_SESSION_AGE_SECONDS = 30 * 24 * 60 * 60
 PROJECT_CONFIG_DIR = ".promptctl"
 # What the shared layers resolved to when a session started, in the same `key = value` shape
@@ -199,11 +199,13 @@ def mark_seen(record):
     """Refresh a session record's mtime, so its age measures the time since this session's last stop
     rather than since it started.
 
-    [LAW:effects-at-boundaries] the sweep reads this mtime as the session's sign of life, and a
-    session that keeps stopping keeps it young - which is what turns "a live session's record was
-    removed" from unlikely into impossible. Best-effort, for the same reason `log` is: this is
-    bookkeeping the sweep consumes, not the gate, so a failure to touch is reported and never fatal -
-    raising here would take the whole gate down with the bookkeeping. [LAW:no-silent-failure]"""
+    [LAW:effects-at-boundaries] the sweep reads this mtime as the session's sign of life, so a session
+    that keeps stopping keeps its record younger than the cutoff and cannot be swept - the freeze holds
+    for exactly as long as the session is still stopping. (A session dormant past the cutoff is reaped
+    and re-reads the shared layers on its next stop, which for a value that stale is correct.)
+    Best-effort, for the same reason `log` is: this is bookkeeping the sweep consumes, not the gate, so
+    a failure to touch is reported and never fatal - raising here would take the whole gate down with
+    the bookkeeping. [LAW:no-silent-failure]"""
     try:
         os.utime(record)
     except OSError as failure:
@@ -211,26 +213,34 @@ def mark_seen(record):
 
 
 def _last_seen(entry):
-    """The newest mtime among a directory and the files in it, or a file's own mtime. A session's
-    record is touched in place at every stop, so the directory's own mtime (which moves only when a
-    file is added or removed) is not the whole story - the newest entry inside it is. Taking the max
-    of both answers "when did anything here last happen" for a directory and for a stray file with
-    one rule."""
-    times = [entry.stat().st_mtime]
+    """When a session directory last showed a legitimate sign of life - or, for a stray file, its own
+    mtime.
+
+    The record is touched at every stop and the session's own layer is written when it is set, so the
+    newer of those two named files is the session's last real activity. A `.<pid>` partial a killed
+    write left behind is litter, not life: counting it - or the directory's own mtime, which a partial
+    write also bumps - would keep a dead directory alive until the litter itself aged past the cutoff,
+    the opposite of reaping the partial with the directory. So only the two real names count, with the
+    directory's own mtime as the fallback for one that holds neither yet."""
     if entry.is_dir():
-        times += [child.stat().st_mtime for child in entry.iterdir()]
-    return max(times)
+        live = [(entry / name).stat().st_mtime
+                for name in (SHARED_AT_START, CONFIG_NAME) if (entry / name).exists()]
+        return max(live) if live else entry.stat().st_mtime
+    return entry.stat().st_mtime
 
 
 def sweep_sessions(keep):
     """Remove every finished session's directory from the sessions tree, and with it the stray
     `.<pid>` partial a killed record write leaves behind.
 
-    Run once per session - at the stop that first records this one - so the scan is paid per session
-    rather than per stop, and a tree that has stopped growing has stopped being swept. `keep` is the
-    caller's own directory, brand new this stop; it is skipped by name rather than left to the cutoff,
-    so a future reader need not reason about whether now-precedes-the-cutoff protects it.
-    [LAW:no-ambient-temporal-coupling]
+    Run once per new session - at the stop that first records it - not on every stop: the pass stats
+    each session directory, so its cost is proportional to how many exist, and paying that once per
+    session is the cheapest cadence that still reaps every session that goes stale. That count is what
+    the sweep itself bounds; a busy machine that keeps resuming sessions within the cutoff carries all
+    of them and pays for all of them each new session, which is the price of never reaping a live one.
+    `keep` is the caller's own directory, brand new this stop; it is skipped by name rather than left
+    to the cutoff, so a future reader need not reason about whether now-precedes-the-cutoff protects
+    it. [LAW:no-ambient-temporal-coupling]
 
     [LAW:effects-at-boundaries][LAW:no-silent-failure] best-effort per entry and non-fatal overall,
     like the sweep's sibling `mark_seen` and `log`: housekeeping must not take the gate down, so a

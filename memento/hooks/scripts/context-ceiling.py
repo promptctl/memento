@@ -114,18 +114,20 @@ def resolve_ceiling(hook):
     runs at a stop and nowhere else.
 
     A stop is also the one moment memento observes this session, so the two things that keep the
-    sessions tree from growing without bound hang off it: `mark_seen` keeps this session's record
-    young for as long as the session keeps stopping, and the first stop - the one that creates the
-    record - sweeps every session that has gone unseen past the staleness cutoff. The sweep is paid
-    once per session, not once per stop, and never touches the directory just created."""
+    sessions tree from growing without bound hang off it. The first stop - the one that creates the
+    record - is the occasion to sweep every other session gone stale past the cutoff; the record it
+    just wrote is already young, so it needs no touch. Every later stop instead touches the record, so
+    it stays young for as long as the session keeps stopping. The sweep is paid once per session, not
+    once per stop, and never removes the directory just created."""
     anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
     record = directory / SHARED_AT_START
     first_stop = not record.exists()
     ceiling = in_force(directory, shared_at_start(record, anchor))
-    mark_seen(record)
     if first_stop:
         sweep_sessions(directory)
+    else:
+        mark_seen(record)
     return ceiling
 
 def records_newest_first(transcript_path):

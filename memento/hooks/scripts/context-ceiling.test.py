@@ -847,5 +847,15 @@ run([user, assistant(UNDER)], config_home=running, session="fresh-3")
 check("a session that keeps stopping is never swept, however long ago it started",
       survives(running, "old-runner"), os.listdir(os.path.join(running, "sessions")))
 
+# A `.<pid>` partial a killed write leaves behind is litter, not a sign of life: a dead session whose
+# record is old is still swept even when a fresher partial lingers beside it, so the partial cannot
+# keep the directory alive until it too ages out.
+littered = scratch_dir()
+dead = aged_session(littered, "died-mid-write", 40)
+write_conf(os.path.join(dead, f"{SHARED_AT_START}.9999"), "ceiling = 1\n")  # left just now
+run([user, assistant(UNDER)], config_home=littered, session="fresh-4")
+check("a fresh partial does not keep a dead session's directory alive",
+      not os.path.exists(dead), os.listdir(os.path.join(littered, "sessions")))
+
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)
