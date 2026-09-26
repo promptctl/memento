@@ -529,6 +529,81 @@ _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling
                 session_conf="ceiling = 300000\n")
 check("and its own layer can still put a number back", blocked_at(out, 300_000), str(out))
 
+# --- a session reset in place re-freezes only when the reset lands -------------------------
+
+# The tmux transport resets a session in place, so it keeps its id and its record. Without a refresh
+# it would hold its first context's shared ceiling forever; refreshing unconditionally would re-freeze
+# a session whose reset never landed from files that moved under it. The close-out marks the size the
+# context had; the next stop below it is the fresh context and re-derives, one above it is the same
+# context still running and keeps what it froze. Same session and config home across runs, because a
+# second run seeing what the first recorded is the whole of what is under test.
+
+closeout = [tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}), tool_result(content=SCHEDULED)]
+
+# The reset landed: the context after the close-out is smaller than it was at the close-out, so the
+# next context picks up the shared change made while the first one ran.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a session that closed out and carried on picks up a shared change made while it ran",
+      blocked_at(out, 250_000), str(out))
+# And the re-derived record is itself frozen: the refresh happens once, at the landing, not at every
+# later stop, so a further shared change does not move the new context either.
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 150000\n")
+check("the re-derived record is frozen in turn - a later shared change does not move it again",
+      blocked_at(out, 250_000), str(out))
+
+# The reset never landed: the context after the close-out is no smaller (the scheduled reset failed,
+# or the session carried on before it fired), so the original ceiling stands rather than being
+# re-frozen from a shared file that has since moved.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(450_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a session whose reset never landed is not re-frozen from a shared file that moved under it",
+      blocked_at(out, 350_000), str(out))
+
+# The common path: a close-out at the end of a unit of work happens under the ceiling, not only when
+# the ceiling forces one, so the marker is recorded on an allowed stop too and the next context still
+# re-freezes from the current shared layers.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+code, out, _ = run([user, assistant(300_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+check("a close-out under the ceiling is an allowed stop", code == 0 and out is None, f"{code} {out}")
+_, out, _ = run([user, assistant(280_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a close-out under the ceiling still re-freezes the next context from the current shared layers",
+      blocked_at(out, 250_000), str(out))
+
+# Repeated close-outs before any reset lands: each records the size the context had, so the marker
+# tracks the latest, and the conservative test still waits for the context to fall below it. A context
+# that only grows between close-outs never reads as a landed reset and keeps what it froze.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(380_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a context still growing after a close-out is not read as a landed reset",
+      blocked_at(out, 350_000), str(out))
+run([user, assistant(420_000)] + closeout, config_home=home, user_conf="ceiling = 250000\n")
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a reset landing below the latest close-out size is what finally re-derives",
+      blocked_at(out, 250_000), str(out))
+
+# The marker lives one stop. A close-out whose reset never lands is spent at the next stop, so a
+# *later* context shrink - an auto-compaction, which drops the token count exactly as a /clear does -
+# is not mistaken for the landing. Without the one-stop life the lingering marker would re-freeze this
+# still-running session from a shared file that moved under it: the dangerous direction the freeze
+# forbids.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(410_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a non-landed reset is spent at the next stop and keeps the frozen ceiling",
+      blocked_at(out, 350_000), str(out))
+code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a compaction after a non-landed reset is not read as the landing, so the frozen ceiling stands",
+      code == 0 and out is None, f"{code} {out}")
+
 # --- a setting nobody can misspell into silence -------------------------------------------
 
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 350k\n")
