@@ -857,5 +857,15 @@ run([user, assistant(UNDER)], config_home=littered, session="fresh-4")
 check("a fresh partial does not keep a dead session's directory alive",
       not os.path.exists(dead), os.listdir(os.path.join(littered, "sessions")))
 
+# A per-session ceiling the user set recently keeps its whole directory alive even when the record is
+# old: _last_seen reads the session's own layer too, so a deliberate override is never swept out from
+# under a session that set it, stopped or not.
+override = scratch_dir()
+kept_dir = aged_session(override, "set-override", 40)
+write_conf(os.path.join(kept_dir, CONFIG_NAME), "ceiling = +100000\n")  # set just now
+run([user, assistant(UNDER)], config_home=override, session="fresh-5")
+check("a freshly-set per-session override keeps its directory from being swept",
+      survives(override, "set-override"), os.listdir(os.path.join(override, "sessions")))
+
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

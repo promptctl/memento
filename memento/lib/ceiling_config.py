@@ -240,6 +240,13 @@ def sweep_sessions(keep):
     """Remove every finished session's directory from the sessions tree, and with it the stray
     `.<pid>` partial a killed record write leaves behind.
 
+    A finished session's directory can hold more than the record: a per-session ceiling the user set
+    with the `ceiling` command lives beside it as CONFIG_NAME, and it is removed too. That is intended,
+    not a leak - `_last_seen` reads CONFIG_NAME's own mtime, so an override set recently keeps the whole
+    directory alive whether or not the session has stopped since. Only an override left untouched past
+    the cutoff, on a session also unseen that long, is swept, and by then it is as stale as the frozen
+    shared value beside it.
+
     Run once per new session - at the stop that first records it - not on every stop: the pass stats
     each session directory, so its cost is proportional to how many exist, and paying that once per
     session is the cheapest cadence that still reaps every session that goes stale. That count is what
