@@ -461,6 +461,10 @@ code, out, err = run([user, assistant(400_000)], config_home=home,
                      user_conf="ceilling = 350000\n", session="s-into-breakage")
 check("while a session starting into that broken file still fails loudly",
       code == 1 and "ceilling" in err, f"{code} {err}")
+# The loud stderr is not enough: a stopped Stop hook is non-blocking, so this session now runs
+# with no ceiling, and stderr scrolls away. The log is where that has to be legible after.
+check("and the stopped gate leaves a durable log line, not only stderr",
+      "-> stopped" in run.log and "ceilling" in run.log, run.log)
 
 # Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
 # and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
@@ -539,6 +543,11 @@ code, out, err = run([user, assistant(OVER)], user_conf="context_ceiling = 35000
 check("the retired key is refused rather than read as a synonym",
       code == 1 and "context_ceiling" in err and "It reads: ceiling" in err and "line 1" in err,
       f"{code} {err}")
+# Every upgrade path from a machine that ever set a ceiling runs through this key, and rejecting it
+# stops the hook before the ceiling is resolved. The log has to record that stop and name the key,
+# or a machine gated off by a stale config looks exactly like one no session has crossed.
+check("a session stopped by a rejected key records the stop and the key in the log",
+      "-> stopped" in run.log and "context_ceiling" in run.log, run.log)
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling 350000\n")
 check("a line with no `=` fails loudly",
       code == 1 and "key = value" in err, f"{code} {err}")
@@ -680,15 +689,31 @@ done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_out
                       env=isolated)
 check("a payload with no event fails loudly",
       done.returncode == 1 and "hook_event_name" in done.stderr, str(done)[:200])
+# Even a payload too malformed to name its event stops inside the guard, so the gate-off is
+# recorded, not only thrown. This is the first isolated-env call, so the log holds just its line.
+no_event_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and the stop on an unrecognisable payload is recorded, not only on stderr",
+      "-> stopped" in no_event_log and "hook_event_name" in no_event_log, no_event_log)
 # The count is only true at a stop, so being called anywhere else means hooks.json has drifted
 # from this file. Measuring anyway is how a session gets denied on a number that is not its own.
 code, out, err = run([user, assistant(OVER)], event="PreToolUse")
 check("an event that is not Stop stops the hook rather than measuring",
       code == 1 and "PreToolUse" in err and "hooks.json" in err, f"{code} {err[:200]}")
+# A drifted hooks.json fires this hook off Stop on every call, silently ungating every session; the
+# stop belongs in the log for the same reason a rejected config does.
+check("and a hook fired off Stop records the stop, not only on stderr",
+      "-> stopped" in run.log and "PreToolUse" in run.log, run.log)
 done = subprocess.run([sys.executable, HOOK], input='{"hook_event_name": "Stop"}', text=True,
                       capture_output=True, env=isolated)
 check("a payload with no transcript_path fails loudly",
       done.returncode == 1 and "transcript_path" in done.stderr, str(done)[:200])
+# The transcript is read before the ceiling is resolved, so a payload the hook stops on here dies
+# even earlier than the no-cwd one - and it must leave the same durable record, or the gate goes
+# off with only a traceback that scrolls away. The log is cumulative across the isolated env's
+# earlier calls, so `transcript_path` - unique to this run - identifies its line.
+stopped_early = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and a stop before the transcript is even read is recorded, not only on stderr",
+      "-> stopped" in stopped_early and "transcript_path" in stopped_early, stopped_early)
 # The project config is resolved from it, so a payload without it is a hook that would
 # silently read no project config at all.
 empty_transcript = write_conf(os.path.join(scratch_dir(), "t.jsonl"), "")
@@ -697,6 +722,23 @@ done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, en
                                         "transcript_path": empty_transcript}))
 check("a payload with no cwd fails loudly",
       done.returncode == 1 and "cwd" in done.stderr, str(done)[:200])
+# A malformed payload stops the hook before it can gate, exactly as a rejected config does, and a
+# stopped Stop hook is non-blocking - so this too must leave the durable record, not only a
+# traceback that scrolls away. This log is cumulative across the isolated env's earlier calls (the
+# no-transcript_path one above wrote to it too), so `cwd`, unique to this run, identifies its line.
+gate_log = open(isolated["MEMENTO_CEILING_LOG"]).read()
+check("and the malformed payload that stopped the gate is recorded in the log, not only stderr",
+      "-> stopped" in gate_log and "cwd" in gate_log, gate_log)
+
+# stdin that parses but is not an object has no session to gate. It must stop loudly, and the stop
+# must still be recorded - the log names a session from a dict, so a non-dict payload reaching the
+# log call unguarded would raise inside the handler and skip the very line it exists to write.
+for raw in ("42", "null", "[]", "not json at all"):
+    env = dict(isolated, MEMENTO_CEILING_LOG=os.path.join(scratch_dir(), "log"))
+    done = subprocess.run([sys.executable, HOOK], input=raw, text=True, capture_output=True, env=env)
+    recorded = open(env["MEMENTO_CEILING_LOG"]).read()
+    check(f"a stdin payload {raw!r} that is not a Stop object fails loudly and is still recorded",
+          done.returncode == 1 and "-> stopped" in recorded, f"{done.returncode} | {recorded!r}")
 
 # A plugin root can contain a space (~/Library/Application Support/...), and unquoted the
 # only exit from the block fails to execute. The shared config module is copied in beside the
