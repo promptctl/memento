@@ -477,35 +477,47 @@ def session_shared(directory, anchor, tokens):
     move a running session's ceiling mid-run. The tmux transport resets a session in place, keeping its
     id and so that record, which would freeze the *first* context's ceiling onto every context after it
     - the staleness this ticket is about. A close-out leaves `mark_reset_pending` holding the context
-    size at that moment; a later stop whose context has fallen below it is running the reset's fresh,
-    smaller context, so the record is re-derived from the shared layers as they now stand and the marker
-    is spent. A context that has NOT fallen - a reset scheduled but never landed - keeps the record, so a
-    session still running its original large context is never re-frozen from files that moved under it,
-    which is the very thing the record exists to prevent. [LAW:no-ambient-temporal-coupling]
+    size at that moment. The `/clear` is typed as type-ahead and runs when the closing turn ends, so the
+    very next stop is the reset's outcome: a context fallen below the recorded size is the reset's fresh,
+    smaller one, and the record is re-derived from the shared layers as they now stand; a context no
+    smaller is the same one still running - the reset did not land - and keeps the value it froze, so a
+    session still running its original large context is never re-frozen from files that moved under it.
+    [LAW:no-ambient-temporal-coupling]
 
-    The test is conservative on purpose. A fresh context grown back past the close-out size before its
-    first stop reads as 'not landed' and keeps the frozen value, healing at a later close-out rather
-    than risking a re-freeze of a live context: a missed refresh is the mild original bug, a wrong one
-    is the dangerous one. A re-derive is not the session's first stop - the record and the sessions-tree
-    sweep both stand from the real first stop - so it reports `False`."""
+    The marker lives exactly that one stop and is spent whichever way it read. A reset that never landed
+    must not leave it lying in wait, because the token count is a *proxy* for a reset - a later
+    auto-compaction shrinks the same context just as a `/clear` does - and a lingering marker would read
+    the next compaction as the landing and re-freeze a live session from files that have since moved,
+    the dangerous direction this freeze exists to forbid. Spending it at the next stop bounds that
+    confusion to the single stop right after the close-out; a compaction that lands exactly there is the
+    narrow residue, tracked for the authoritative fix (the worker that verifies `/clear` recording the
+    landing directly) rather than papered over with a threshold. The read stays conservative: a fresh
+    context grown back past the recorded size before its first stop reads as 'not landed' and keeps the
+    frozen value, healing at a later close-out - a missed refresh is the mild original bug, a wrong
+    re-freeze is the dangerous one. A re-derive is not the session's first stop - the record and the
+    sessions-tree sweep both stand from the real first stop - so it reports `False`."""
     record = directory / SHARED_AT_START
     marker = directory / RESET_PENDING
     frozen_at = reset_pending_tokens(marker)
-    if frozen_at is not None and tokens < frozen_at:
+    if frozen_at is not None:
+        landed = tokens < frozen_at
         # Re-derive first, spend the marker second. `write_ceiling` and `live_shared` can fail - a
-        # shared file broken at this moment exits here, exactly as it does for any fresh start into a
-        # broken config - and a marker unlinked before that write would lose the landing to the
-        # failure, leaving the stale value with nothing to retry it. Spending it only after the record
-        # is rewritten makes the re-derive idempotent across a retry: a stop that fails leaves the
-        # marker standing, so the next one tries again. The unlink is bookkeeping, so its own failure
-        # is reported and not raised - a marker that will not clear costs repeated harmless re-derives,
-        # never the gate. [LAW:no-silent-failure]
-        written = write_ceiling(record, live_shared(anchor))
+        # shared file broken at the landing exits here, exactly as it does for any fresh start into a
+        # broken config - and a marker unlinked before that write would lose the landing to the failure,
+        # leaving the stale value with nothing to retry it. Spending it only after the record is
+        # rewritten makes the re-derive idempotent across a retry: a stop that fails leaves the marker
+        # standing, so the next one tries again. A marker that read 'not landed' has nothing to write
+        # and is simply spent, so it cannot linger for a later compaction to misread. The unlink is
+        # bookkeeping - its own failure is reported, not raised, so a marker that will not clear costs
+        # repeated harmless re-reads, never the gate. [LAW:no-silent-failure]
+        if landed:
+            written = write_ceiling(record, live_shared(anchor))
         try:
             marker.unlink(missing_ok=True)
         except OSError as failure:
             print(f"memento config: cannot clear {marker}: {failure}", file=sys.stderr)
-        return written, False
+        if landed:
+            return written, False
     return shared_at_start(record, anchor)
 
 

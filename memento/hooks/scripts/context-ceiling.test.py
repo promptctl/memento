@@ -589,6 +589,21 @@ _, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling
 check("a reset landing below the latest close-out size is what finally re-derives",
       blocked_at(out, 250_000), str(out))
 
+# The marker lives one stop. A close-out whose reset never lands is spent at the next stop, so a
+# *later* context shrink - an auto-compaction, which drops the token count exactly as a /clear does -
+# is not mistaken for the landing. Without the one-stop life the lingering marker would re-freeze this
+# still-running session from a shared file that moved under it: the dangerous direction the freeze
+# forbids.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+_, out, _ = run([user, assistant(410_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a non-landed reset is spent at the next stop and keeps the frozen ceiling",
+      blocked_at(out, 350_000), str(out))
+code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a compaction after a non-landed reset is not read as the landing, so the frozen ceiling stands",
+      code == 0 and out is None, f"{code} {out}")
+
 # --- a setting nobody can misspell into silence -------------------------------------------
 
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 350k\n")
