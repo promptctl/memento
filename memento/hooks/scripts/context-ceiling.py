@@ -70,9 +70,14 @@ EXIT_HINT = ('In a worktree that command may be refused where you stand; run Exi
 # What a block past the ceiling says, by how far past it the session is. A close-out forced in the
 # middle of a unit hands the next session half a task to reread from the start, so up to the limit
 # the agent finishes the unit it is in, and from the limit on it closes out wherever it stands.
-# `mark` is a phrase only that band's reason carries, which is how a later stop reads off the
-# transcript which band the block that started its turn was in.
-Band = collections.namedtuple("Band", "label mark reason spent")
+Band = collections.namedtuple("Band", "label reason spent")
+
+# The phrase that identifies a finishing block when a later stop reads its turn opener back off the
+# transcript (the harness echoes each block as `Stop hook feedback:`). [LAW:one-source-of-truth] it
+# is spliced into FINISHING's reason below, so the phrase the escalation matches is the phrase the
+# agent was shown and the two cannot drift. Only a finishing opener is ever matched - a closing
+# opener is the default the escalation need not name - so CLOSING carries no such phrase.
+FINISHING_MARK = "Finish the unit of work you are in the middle of"
 
 # The close-out mechanics both bands end on - the command, the worktree caveat, and the handoff
 # contract - live here once. [LAW:one-source-of-truth] a change to how the close-out is run or
@@ -83,16 +88,18 @@ CLOSE_OUT = """
 {exit_hint}
 Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
 
-FINISHING = Band("finish", "Finish the unit of work you are in the middle of",
-    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. Finish the unit of work you are in the middle of - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:""" + CLOSE_OUT
+FINISHING = Band("finish",
+    "CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. "
+    + FINISHING_MARK
+    + """ - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:""" + CLOSE_OUT
     + "Do not move the ceiling to make room, and do not ask the user whether to finalize.",
     "memento: this session is past the {ceiling:,} ceiling at ~{tokens:,} tokens and stopped again "
     "without closing out, so the stop proceeds. It may finish the unit of work it is in; at "
     "{limit:,} it is made to close out.")
 
-CLOSING = Band("block", "Close it out now",
+CLOSING = Band("block",
     """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:""" + CLOSE_OUT
-    + "Do not start new work, and do not ask the user whether to finalize.",
+    + "Do not start new work, do not move the ceiling to make room, and do not ask the user whether to finalize.",
     "memento: context ceiling breached (~{tokens:,} > {ceiling:,}) and this session has spent its "
     "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
     "session starts with nothing.")
@@ -276,10 +283,13 @@ def stop(hook, tokens, ceiling):
     # only on the one path that consults it: a repeat stop, where the escalation decides whether
     # this block is the finishing band's promised second one rather than a spent close-out.
     if hook.get("stop_hook_active"):
-        escalating = band is CLOSING and FINISHING.mark in turn_opening(hook["transcript_path"])
+        escalating = band is CLOSING and FINISHING_MARK in turn_opening(hook["transcript_path"])
         if not escalating:
-            return "spent", {"systemMessage": band.spent.format(tokens=tokens, ceiling=ceiling,
-                                                                limit=limit)}
+            # The log keeps the two spent outcomes apart: spent-finish is a harmless continuation
+            # under the grace, spent-block a hard-limit session that just used its one forced
+            # close-out and, per the message, leaves the next session nothing.
+            return f"spent-{band.label}", {"systemMessage": band.spent.format(
+                tokens=tokens, ceiling=ceiling, limit=limit)}
     return band.label, {"decision": "block", "reason": band.reason.format(
         tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
         exit_hint=EXIT_HINT)}

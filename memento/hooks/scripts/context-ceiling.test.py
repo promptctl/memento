@@ -165,6 +165,8 @@ check("giving up is loud rather than silent",
 check("giving up does not claim the close-out failed",
       out and "If the close-out did not run" in out.get("systemMessage", "")
       and "was NOT closed out" not in out.get("systemMessage", ""), str(out))
+check("a spent forced close-out is logged apart from a spent finishing continuation",
+      "-> spent-block" in run.log, run.log)
 
 # --- the grace: a unit in progress is finished before the close-out ---------------------------
 
@@ -193,6 +195,8 @@ check("a second stop while finishing is let through without a breach alarm",
       code == 0 and out and "decision" not in out
       and "context ceiling breached" not in out.get("systemMessage", "")
       and f"{LIMIT:,}" in out.get("systemMessage", ""), str(out))
+check("a spent finishing continuation is logged under its own label",
+      "-> spent-finish" in run.log, run.log)
 # A finishing block restarts the turn, and the agent then works through its unit inside that turn, so
 # the stop that ends it arrives marked as following a block. Past the limit, that stop is the one
 # the limit exists for. The block reaches the transcript as the harness writes it, and the case below
