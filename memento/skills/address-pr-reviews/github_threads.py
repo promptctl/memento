@@ -270,6 +270,21 @@ def bot_reviews(pr_url: str) -> list[dict]:
     return paginated(f"repos/{owner}/{repo}/pulls/{pr_num}/reviews", _BOT_REVIEWS_JQ)
 
 
+def is_blocking_review(review: dict) -> bool:
+    """[LAW:single-enforcer] The one rule for "this automated-reviewer review blocks
+    the PR", over a `bot_reviews` entry. Both consumers call it — the dismiss set
+    (`change_requests`) and the out-of-diff finding read (`action_provider.body_findings`)
+    — so neither can classify a review as blocking that the other would not: the rule
+    is single-sourced, not two literals that agree until one is edited.
+    [LAW:one-source-of-truth]
+
+    This shares the predicate, not the read: each consumer calls `bot_reviews` for
+    its own snapshot. That is sound because the reviewer only changes a PR's reviews
+    on a re-review, which a round triggers by pushing — so within one round, between
+    two adjacent reads with no push, the two snapshots hold the same reviews."""
+    return review["state"] == "CHANGES_REQUESTED"
+
+
 def change_requests(pr_url: str) -> dict:
     """Return the automated reviewer's blocking reviews — the CHANGES_REQUESTED
     reviews this round must dismiss once its findings are addressed.
@@ -284,7 +299,7 @@ def change_requests(pr_url: str) -> dict:
     """
     return {"reviews": [
         {"review_id": r["review_id"], "author": r["author"], "commit_id": r["commit_id"]}
-        for r in bot_reviews(pr_url) if r["state"] == "CHANGES_REQUESTED"
+        for r in bot_reviews(pr_url) if is_blocking_review(r)
     ]}
 
 

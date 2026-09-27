@@ -19,6 +19,7 @@ refusal a worktree session actually meets is the platform's, which no change her
 so EXIT_HINT below carries it into the instruction this hook hands out at a stop.
 """
 
+import collections
 import fcntl
 import json
 import os
@@ -34,8 +35,9 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # writes them. [LAW:one-source-of-truth] A plugin is a directory rather than an installed
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
-from ceiling_config import (SHARED_AT_START, anchored, in_force,  # noqa: E402
-                            session_directory, shared_at_start)
+from ceiling_config import (GRACE, SHARED_AT_START, anchored, in_force,  # noqa: E402
+                            mark_reset_pending, mark_seen, session_directory,
+                            session_shared, sweep_sessions)
 
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
@@ -66,21 +68,78 @@ RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
 EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
              'action "keep" first, and close out from the directory it returns you to.')
 
-INSTRUCTION = """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} hard maximum. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:
-    {launcher} --reset compact '<handoff message>'
-{exit_hint}
-`--reset` is what makes a close-out reset the session; without it the handoff is only recorded and you carry on. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. Do not start new work, and do not ask the user whether to finalize."""
+# What a block past the ceiling says, by how far past it the session is. A close-out forced in the
+# middle of a unit hands the next session half a task to reread from the start, so up to the limit
+# the agent finishes the unit it is in, and from the limit on it closes out wherever it stands.
+Band = collections.namedtuple("Band", "label reason spent")
 
-def resolve_ceiling(hook):
+# The phrase that identifies a finishing block when a later stop reads its turn opener back off the
+# transcript (the harness echoes each block as `Stop hook feedback:`). [LAW:one-source-of-truth] it
+# is spliced into FINISHING's reason below, so the phrase the escalation matches is the phrase the
+# agent was shown and the two cannot drift. Only a finishing opener is ever matched - a closing
+# opener is the default the escalation need not name - so CLOSING carries no such phrase.
+FINISHING_MARK = "Finish the unit of work you are in the middle of"
+
+# The close-out mechanics both bands end on - the command, the worktree caveat, and the handoff
+# contract - live here once. [LAW:one-source-of-truth] a change to how the close-out is run or
+# described lands in both reasons at once instead of drifting between two copies. Each band's reason
+# is its own opening plus this, plus the one clause that differs: what not to do while closing out.
+CLOSE_OUT = """
+    {launcher} '<handoff message>'
+{exit_hint}
+Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
+
+FINISHING = Band("finish",
+    "CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. "
+    + FINISHING_MARK
+    + """ - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:""" + CLOSE_OUT
+    + "Do not move the ceiling to make room, and do not ask the user whether to finalize.",
+    "memento: this session is past the {ceiling:,} ceiling at ~{tokens:,} tokens and stopped again "
+    "without closing out, so the stop proceeds. It may finish the unit of work it is in; at "
+    "{limit:,} it is made to close out.")
+
+CLOSING = Band("block",
+    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:""" + CLOSE_OUT
+    + "Do not start new work, do not move the ceiling to make room, and do not ask the user whether to finalize.",
+    "memento: context ceiling breached (~{tokens:,} > {ceiling:,}) and this session has spent its "
+    "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
+    "session starts with nothing.")
+
+def resolve_ceiling(hook, tokens, close_out):
     """The ceiling in force for the session this payload belongs to.
 
     The project is anchored at the directory the session belongs to rather than wherever a Bash
     call last left it, which `anchored` decides for this and for the command that writes these
     layers. Reading the shared layers is also what records them for this session, which is why this
-    runs at a stop and nowhere else."""
+    runs at a stop and nowhere else.
+
+    A stop is also the one moment memento observes this session, so the session bookkeeping that no
+    other event can do hangs off it. `session_shared` reads the recorded shared value, re-deriving it
+    once a credited close-out's reset has actually landed - a session reset in place keeps its id and
+    its record, so a stop is where that record is refreshed for the new context or kept for the old
+    one. The two things that keep the sessions tree from growing without bound hang off the same stop:
+    the first stop - the one that creates the record - sweeps every other session gone stale past the
+    cutoff; the record it just wrote is already young, so it needs no touch. Every later stop instead
+    touches the record, so it stays young for as long as the session keeps stopping. The sweep is paid
+    once per session, not once per stop, and never removes the directory just created.
+
+    A close-out credited this turn leaves the marker `session_shared` reads at a later stop, holding
+    the context size now so that stop can tell the reset landed. It is written after the read above, so
+    this turn's own close-out never reads as its own landed reset - the reset is scheduled with a delay
+    and lands at a future stop, not this one. [LAW:no-ambient-temporal-coupling] It is recorded whether
+    or not the session is past its ceiling, because a session closes out at the end of any unit of
+    work, not only when the ceiling forces it."""
     anchor = anchored(hook["cwd"])
     directory = session_directory(hook["session_id"])
-    return in_force(directory, shared_at_start(directory / SHARED_AT_START, anchor))
+    shared, first_stop = session_shared(directory, anchor, tokens)
+    ceiling = in_force(directory, shared)
+    if first_stop:
+        sweep_sessions(directory)
+    else:
+        mark_seen(directory / SHARED_AT_START)
+    if close_out:
+        mark_reset_pending(directory, tokens)
+    return ceiling
 
 def records_newest_first(transcript_path):
     """This session's records, reading only as far back as the caller consumes. Sidechains are
@@ -117,14 +176,19 @@ def starts_a_turn(record):
     return record.get("type") == "user" and not any(
         isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks)
 
-def result_text(block):
-    """A tool result's text. The content is a plain string or a list of blocks depending on how
-    the tool returned, and a close-out is credited off what it says, so both shapes are read."""
-    content = block.get("content")
+def text_of(content):
+    """The text of a record's or block's `content`, which is a plain string or a list of blocks
+    depending on how it was written. [LAW:one-source-of-truth] both readers of a content field -
+    a tool result credited as a close-out and the opener a turn is escalated on - read it here, so
+    a list-shaped content is never mistaken for one with no text."""
     if isinstance(content, str):
         return content
-    return " ".join(part.get("text", "") for part in content or []
-                    if isinstance(part, dict))
+    return " ".join(block.get("text", "") for block in content or []
+                    if isinstance(block, dict))
+
+def result_text(block):
+    """A tool result's text, off which a close-out is credited."""
+    return text_of(block.get("content"))
 
 def launcher_ran(command):
     """Whether a Bash command invokes the launcher rather than reproducing its report.
@@ -210,35 +274,92 @@ def log(hook, tokens, ceiling, verdict):
     except OSError as failure:
         print(f"memento context ceiling: cannot write {LOG_FILE}: {failure}", file=sys.stderr)
 
-def stop(hook, tokens, ceiling):
-    """Blocked once, never twice: a second block spends more context on the problem that IS too
-    much context."""
-    if closed_out(hook["transcript_path"]):
+def turn_opening(transcript_path):
+    """The text of the record that started the turn now ending, or "" for one with no text.
+
+    A block reaches the agent as a user record reading `Stop hook feedback:` and the reason, which
+    is a record `starts_a_turn` counts. So for a stop that follows a block, this is what that block
+    said: the harness wrote it, and it is the one account of what the agent was told. `starts_a_turn`
+    admits a list-shaped opener as readily as a string one, so the text is read from either shape."""
+    opener = next((record for record in records_newest_first(transcript_path)
+                   if starts_a_turn(record)), {})
+    return text_of(opener.get("message", {}).get("content"))
+
+def stop(hook, tokens, ceiling, close_out):
+    """At most one close-out block per turn: a second one spends more context on the problem that
+    IS too much context, and an agent that cannot run the close-out would be blocked forever.
+
+    Which band the count falls in decides what the block says: every stop past the ceiling runs the
+    same steps, and the band is the text they carry. [LAW:dataflow-not-control-flow] The band is
+    read off the count and nothing else, so a session reset in place is back under both lines at
+    its next stop with no allowance left over to clear.
+
+    The one second block is the escalation. A finishing block tells the agent to keep working, so
+    the turn it starts can run past the limit, and that turn ends in a stop the harness marks as
+    following a block. Letting that stop through would break the promise the limit makes. So a stop
+    past the limit is blocked once more if a finishing block opened its turn. The closing block that
+    escalation sends then opens the next turn, and it is not a finishing block, so the chain ends."""
+    limit = ceiling + GRACE
+    band = CLOSING if tokens >= limit else FINISHING
+    if close_out:
         return "closed-out", {"systemMessage": f"memento: the close-out ran at ~{tokens:,} "
                                                f"tokens, past the {ceiling:,} ceiling, so "
                                                f"the stop proceeds."}
+    # [LAW:effects-at-boundaries] the turn opener is a second transcript read, so it is taken
+    # only on the one path that consults it: a repeat stop, where the escalation decides whether
+    # this block is the finishing band's promised second one rather than a spent close-out.
     if hook.get("stop_hook_active"):
-        return "spent", {"systemMessage": f"memento: context ceiling breached (~{tokens:,} > "
-                                          f"{ceiling:,}) and this session has spent its one "
-                                          f"forced close-out attempt, so the stop proceeds. "
-                                          f"If the close-out did not run, the next session "
-                                          f"starts with nothing."}
-    return "block", {"decision": "block", "reason": INSTRUCTION.format(
-        tokens=tokens, ceiling=ceiling, launcher=shlex.quote(LAUNCHER), exit_hint=EXIT_HINT)}
+        escalating = band is CLOSING and FINISHING_MARK in turn_opening(hook["transcript_path"])
+        if not escalating:
+            # The log keeps the two spent outcomes apart: spent-finish is a harmless continuation
+            # under the grace, spent-block a hard-limit session that just used its one forced
+            # close-out and, per the message, leaves the next session nothing.
+            return f"spent-{band.label}", {"systemMessage": band.spent.format(
+                tokens=tokens, ceiling=ceiling, limit=limit)}
+    return band.label, {"decision": "block", "reason": band.reason.format(
+        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
+        exit_hint=EXIT_HINT)}
 
 # The ceiling is read from the payload's session and project, so it is resolved here rather
-# than at import: what it depends on does not exist until stdin has been read. The transcript
-# is measured first so a payload missing it is named by the field it is missing.
-hook = json.load(sys.stdin)
-# [LAW:no-silent-failure] any other event is hooks.json having drifted from this file, and the
-# number this reads is only true at a stop - so it says so rather than measuring anyway.
-if hook["hook_event_name"] != "Stop":
-    sys.exit(f"memento context ceiling: registered on Stop, called on "
-             f"{hook['hook_event_name']}. Fix hooks.json.")
-tokens = context_tokens(hook["transcript_path"])
-ceiling = resolve_ceiling(hook)
-
-label, verdict = ("allow-under", None) if tokens < ceiling else stop(hook, tokens, ceiling)
+# than at import: what it depends on does not exist until stdin has been read.
+# [LAW:no-silent-failure] every way the hook can stop before it gates leaves the same wound - stdin
+# that is not a JSON object, a drifted hooks.json calling it off Stop, an unreadable transcript, a
+# config the layer rejects (SystemExit, its documented failure arm), a payload missing cwd or
+# session_id (KeyError). Each exits nonzero, which Claude Code treats as non-blocking, so the gate
+# is then off and stderr scrolls away. Everything from reading stdin on runs inside the guard, so
+# the error is re-raised unchanged - still surfacing loudly, nothing swallowed - but first the log
+# records that the gate stopped and why, the only place a gate-off session differs from an allowed
+# one. tokens and ceiling hold their unknown sentinels until each is computed, so a stop records
+# whatever was already established rather than a stale value; the count off a non-Stop event is
+# never true anyway.
+hook = None
+tokens = "unknown"
+ceiling = "unresolved"
+try:
+    hook = json.load(sys.stdin)
+    if not isinstance(hook, dict):
+        sys.exit(f"memento context ceiling: stdin must be a JSON object, got "
+                 f"{type(hook).__name__}.")
+    if hook["hook_event_name"] != "Stop":
+        sys.exit(f"memento context ceiling: registered on Stop, called on "
+                 f"{hook['hook_event_name']}. Fix hooks.json.")
+    tokens = context_tokens(hook["transcript_path"])
+    # Read once and threaded through both readers: resolve_ceiling records the marker a later stop
+    # reads to tell a landed reset from a stranded one, and stop credits the close-out that lets this
+    # stop proceed. It is asked at every stop, not only past the ceiling, because a session closes out
+    # at the end of any unit of work. [LAW:one-source-of-truth]
+    close_out = closed_out(hook["transcript_path"])
+    ceiling = resolve_ceiling(hook, tokens, close_out)
+    label, verdict = (("allow-under", None) if tokens < ceiling
+                      else stop(hook, tokens, ceiling, close_out))
+except (Exception, SystemExit) as unresolved:
+    # SystemExit carries its curated message in `code`; other errors carry type and args, so a
+    # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`. `hook` is whatever parsed, or
+    # None/non-dict when the failure came before it was one - log needs a dict to name a session.
+    reason = (unresolved.code if isinstance(unresolved, SystemExit)
+              else f"{type(unresolved).__name__}: {unresolved}")
+    log(hook if isinstance(hook, dict) else {}, tokens, ceiling, f"stopped: {reason}")
+    raise
 log(hook, tokens, ceiling, label)
 if verdict:
     print(json.dumps(verdict))

@@ -77,11 +77,11 @@ Every command — `show` and `clear` included — ends with the ceiling in force
 layers behind it:
 
 ```
-this session        350,000 tokens
+this session        450,000 tokens
   shared at start   (not recorded) …/sessions/<id>/shared-at-start.conf
-  session layer     350000         …/sessions/<id>/memento.conf
-a new session here  350,000 tokens
-  project layer     350000         /repo/.promptctl/memento.conf
+  session layer     450000         …/sessions/<id>/memento.conf
+a new session here  450,000 tokens
+  project layer     450000         /repo/.promptctl/memento.conf
   user layer        (unset)        …/memento.conf
 ```
 
@@ -116,12 +116,12 @@ destination sits still. A count or `off` reads no base, so nothing underneath it
 it that way.
 
 The temptation is the easy one: you typed `+100_000`, it exited 0, and you report
-350,000 from arithmetic you did in your head. Read the line instead — a signed move is
+450,000 from arithmetic you did in your head. Read the line instead — a signed move is
 an offset against a layer you deliberately did not look up, so the total is the
 command's to state, not yours.
 
-    WRONG: "Wrote the project ceiling. The ceiling is now 350,000."
-    RIGHT: "Project ceiling set to 350,000 tokens, in force for this session too
+    WRONG: "Wrote the project ceiling. The ceiling is now 450,000."
+    RIGHT: "Project ceiling set to 450,000 tokens, in force for this session too
             (`.promptctl/memento.conf` at the repo root — untracked, yours to commit
             or not)."
 

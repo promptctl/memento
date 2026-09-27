@@ -4,7 +4,7 @@
 # detached worker delivers the handoff after a fixed delay.
 #
 # Three transports, most reliable first:
-#   tmux      — in-place reset (/clear or /compact) verified by reading the pane
+#   tmux      — in-place /clear verified by reading the pane
 #               back, then paste the message. Deterministic; no focus concerns.
 #   iTerm2    — kill the running claude and relaunch it fresh with the message as
 #               its initial prompt, via `write text` to the exact session (no
@@ -27,7 +27,7 @@
 #
 # Modes:
 #   launcher:         its argv is _usage's to state — read it, or run --help
-#   tmux worker:      finalize-session --worker <target> <reset> <msgfile> <goalfile>
+#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile>
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
 
@@ -429,14 +429,12 @@ _mktemp_or_exit() {
 # answer to. The header's Modes block names the worker contracts and defers here.
 _usage() {
   cat <<'USAGE'
-finalize-session — record the session handoff; optionally reset the session too.
+finalize-session — record the session handoff and reset the session into it.
 
-usage: finalize-session [--goal <condition>] [--reset clear|compact] [--] [message...]
+usage: finalize-session [--goal <condition>] [--] [message...]
 
   --goal <condition>      re-issue an active /goal into the reset session, which
                           otherwise wakes with no goal and stops an unattended run
-  --reset clear|compact   reset this session after recording. Without it the
-                          handoff is written and the session carries on
   --                      end flag parsing; every token after it is message text
   message...              what the next agent wakes up holding (default: /next)
 
@@ -465,11 +463,10 @@ case "$MODE" in
   launcher)
     # [LAW:dataflow-not-control-flow] an optional carried goal is a leading
     # --goal <condition> value, stripped here so the remainder is the message.
-    # /clear, /compact, and a fresh relaunch all wipe the session-scoped /goal, so
+    # /clear and a fresh relaunch both wipe the session-scoped /goal, so
     # without this the next agent wakes with no goal and the autonomous run stops.
     # Absent → empty string; the same code path runs, the value decides the effect.
     GOAL=""
-    RESET_ARG=""
     # A literal newline, named so the flag checkpoint below can match one inside a
     # case pattern, where quoting is what keeps it literal against the globs.
     NEWLINE=$'\n'
@@ -478,16 +475,6 @@ case "$MODE" in
         --goal)
           GOAL="${2:-}"
           shift 2 || { echo "--goal requires a condition argument" >&2; exit 2; }
-          ;;
-        # [LAW:parse-dont-validate] the checkpoint for reset mode: an unrecognised
-        # value is refused here, so everything downstream holds one of two words.
-        --reset)
-          RESET_ARG="${2:-}"
-          case "$RESET_ARG" in
-            clear|compact) ;;
-            *) echo "--reset takes 'clear' or 'compact', got '${RESET_ARG}'" >&2; exit 2 ;;
-          esac
-          shift 2 || { echo "--reset requires a mode argument" >&2; exit 2; }
           ;;
         --help)
           _usage; exit 0 ;;
@@ -503,12 +490,11 @@ case "$MODE" in
         # bite at the moment a session has the least context left to work out why.
         --*"$NEWLINE"*)
           break ;;
-        # [LAW:parse-dont-validate] the checkpoint for the flag POSITION, sibling
-        # of --reset's checkpoint for its value. Without it the flag namespace had
-        # no border at all: every unrecognised token fell through to the message,
-        # so `finalize-session --help` recorded a handoff whose entire text was
-        # "--help" and, with --reset, handed that to the next agent as its opening
-        # prompt — which is how one real session woke up holding the string
+        # [LAW:parse-dont-validate] the checkpoint for the flag POSITION. Without
+        # it the flag namespace had no border at all: every unrecognised token fell
+        # through to the message, so `finalize-session --help` recorded a handoff
+        # whose entire text was "--help" and handed that to the next agent as its
+        # opening prompt — which is how one real session woke up holding the string
         # `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
         # silently: `--rest compact` shipped "--rest compact" as the handoff.
         # [LAW:no-silent-failure] a mistyped flag is a fact about the caller's
@@ -532,14 +518,6 @@ case "$MODE" in
     # default — /next, the standard "pull the next ticket" handoff. Omitting argv
     # selects that default; it never yields an empty handoff, so no guard follows.
     AGENT_MESSAGE="${*:-/next}"
-
-    # [LAW:dataflow-not-control-flow] reset mode is one value with one source: the
-    # flag, or empty. Nothing here measures the session — the ceiling hook is the
-    # only clock, and `--reset` is how it says the session is out of room.
-    # [LAW:one-source-of-truth] the only place RESET is assigned. Whether it is empty
-    # decides whether any transport runs at all; only the clear-versus-compact
-    # distinction is tmux's, because the other two relaunch a fresh process regardless.
-    RESET="$RESET_ARG"
 
     # [LAW:dataflow-not-control-flow] the message flows through a file as a value,
     # bypassing every shell-quoting hazard between argv → worker → transport. No
@@ -593,18 +571,11 @@ case "$MODE" in
     printf '%s' "$GOAL" > "$GOALFILE" \
       || _refuse "cannot write the carried goal to $GOALFILE"
 
-    # [LAW:decomposition] recording the handoff and resetting the session are two
-    # jobs with opposite triggers. Recording is cheap and always safe, so it has
-    # already happened. Resetting throws away a live session's context, so it
-    # happens only when asked - by the ceiling hook, which is the one thing that
-    # measures, or by an author who wants a fresh session for its own sake.
-    if [[ -z "$RESET" ]]; then
-      rm -f -- "$GOALFILE"
-      trap - EXIT
-      echo "handoff recorded → $MSGFILE"
-      echo "no reset: this session keeps its context, so carry on with the work. Pass --reset clear|compact when you want the session reset."
-      exit 0
-    fi
+    # [LAW:no-mode-explosion] a handoff hands the session off: recording the
+    # message and resetting into it are one act, on every run. The flag that
+    # once made the reset optional let a "handoff" leave the session running,
+    # which is the one thing a handoff is not. The next session starts blank,
+    # holding the message and nothing else; the message is the only channel.
 
     # Resolve own path for both ./script and PATH-lookup invocations.
     if [[ "$0" == */* ]]; then
@@ -645,15 +616,15 @@ case "$MODE" in
       || TARGET=""
     if [[ -n "$TARGET" ]]; then
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
-        echo "[dry-run] transport=tmux target=$TARGET reset=/$RESET msgfile=$MSGFILE"
+        echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --worker "$TARGET" "$RESET" "$MSGFILE" "$GOALFILE" \
+      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
-      echo "handoff scheduled → tmux $TARGET (/$RESET) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
+      echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
     elif [[ "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
@@ -752,32 +723,29 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   tmux-worker)
-    if [[ $# -ne 4 ]]; then
-      echo "internal error: worker expects exactly 4 args" >&2
+    if [[ $# -ne 3 ]]; then
+      echo "internal error: worker expects exactly 3 args" >&2
       exit 2
     fi
     TARGET="$1"
-    RESET="$2"
-    MSGFILE="$3"
-    GOALFILE="$4"
+    MSGFILE="$2"
+    GOALFILE="$3"
 
     BUFFER="finalize-$$"
     GOALBUF="finalize-goal-$$"
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
-    case "$RESET" in
-      clear)   REGISTERED_RE='Claude Code v[0-9]' ;;
-      compact) REGISTERED_RE='Compacting conversation|Conversation compacted' ;;
-    esac
+    # The banner a fresh session prints; seeing it is what confirms /clear landed.
+    REGISTERED_RE='Claude Code v[0-9]'
 
-    log "waking; target=$TARGET reset=/$RESET"
+    log "waking; target=$TARGET"
     sleep "$HANDOFF_DELAY_SECONDS"
 
     tmux send-keys -t "$TARGET" Escape
     sleep 1
     _clear_box "$TARGET"
-    tmux send-keys -t "$TARGET" "/$RESET"
+    tmux send-keys -t "$TARGET" "/clear"
     sleep 0.5
     tmux send-keys -t "$TARGET" Enter
 
@@ -806,7 +774,7 @@ Nothing on this machine to deliver the close-out into."
     # which is why withholding it was never protection. That was the old misfire
     # arm: it destroyed the handoff to report that it could not confirm a step
     # that had, in every case the logs recorded, already worked.
-    log "/$RESET $OBSERVED; sending handoff (preserved at $MSGFILE)"
+    log "/clear $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
     _clear_box "$TARGET"
     tmux load-buffer -b "$BUFFER" "$MSGFILE"
@@ -817,7 +785,7 @@ Nothing on this machine to deliver the close-out into."
     # [LAW:dataflow-not-control-flow] carry the goal only when the value is
     # present. It goes in as a queued input *after* the handoff prompt, so it
     # never races the handoff turn — Claude type-aheads it and the session-scoped
-    # /goal governs the turns that follow. The /clear or /compact above wiped it.
+    # /goal governs the turns that follow. The /clear above wiped it.
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
       sleep 1
