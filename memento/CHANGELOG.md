@@ -1,5 +1,10 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## Unreleased
+
+- revert(address-pr-reviews): a review that found nothing is a clean review again. `wait` no longer reports `reviewed` / `not_reviewed_reason`, `review wait` no longer exits nonzero on a run that completed without reading the head, and the skill no longer halts the loop on a spent `MAX_REVIEW_ROUNDS` cap. This reverts the behaviour added for the capped-run case: the cap is a cost control the repository sets deliberately, and a loop that treats its own budget being spent as an error stops every PR that reaches the limit — which is the opposite of what a cost control is for. The agent-side cost was worse than the stall: reaching the cap put every session into working around it rather than finishing, which is the failure this removes. A non-success run conclusion still halts, unchanged — a reviewer that errored has absent findings, and that is a different fact from a reviewer that read the diff and had nothing to say. `bot_reviews` stays, since `github_threads.paginated` and the dismiss set both read it.
+- refactor(address-pr-reviews): the adversarial provider is gone — `adversarial_provider.py`, its prompt and its tests. It ran a headless `claude -p` locally as a hostile reviewer and posted findings as a COMMENT review, which is the same review the `action` provider already gets from CI and the same review `/code-review` already runs locally, differing only in where it executes and who pays. Two implementations of one thing is one more than the number that can be right. `provider.json`, `PROVIDER_CONTRACT.md` and the loader are untouched in shape: `action` and `local` remain, and a third provider is still a module plus a name.
+
 ## v0.9.0 - 2026-09-26
 
 - feat(ceiling): the default context ceiling is 350,000 tokens, up from 250,000. Close-outs at 250,000 were landing while agents were still mid-task, so the next session had to reread everything.

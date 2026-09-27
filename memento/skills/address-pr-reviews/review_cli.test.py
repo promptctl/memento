@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Tests for `review wait`'s halt gate in bin/review.
+"""Tests for `review wait` in bin/review.
 
-`cmd_wait` is the enforcement point that turns a run the loop must not trust
-into a nonzero exit: a reviewer that errored, or a run that completed without
-reviewing the head (a spent round cap). The verdict is asserted on the
-(result, failure) pair for each shape a provider can return — never on how
-the branch is spelled. [LAW:behavior-not-structure]
+`cmd_wait` turns a run the loop must not trust — a reviewer that errored —
+into a nonzero exit. The verdict is asserted on the (result, failure) pair
+for each shape a provider can return, never on how the branch is spelled.
+[LAW:behavior-not-structure]
 
 Run: python3 review_cli.test.py
 """
@@ -46,18 +45,12 @@ def wait_with(**fields):
     return cli.cmd_wait(provider_returning(result), ARGS)
 
 
-got, failure = wait_with(conclusion="success", reviewed=True, not_reviewed_reason=None)
-check("success + reviewed: no failure", failure is None and got["reviewed"] is True, f"got {failure!r}")
+got, failure = wait_with(conclusion="success")
+check("success: no failure", failure is None and got["sha"] == "ccc", f"got {failure!r}")
 
-got, failure = wait_with(conclusion="success", reviewed=False, not_reviewed_reason="round-cap")
-check("success + unreviewed head: fails, naming the reason, the sha and the run, and says do not merge",
-      failure is not None and all(s in failure for s in ("round-cap", "ccc", "Do not merge", "https://run/9")),
-      f"got {failure!r}")
-
-got, failure = wait_with(conclusion="failure", reviewed=False, not_reviewed_reason="no-review-for-head")
-check("non-success conclusion: fails naming the conclusion, the more specific cause",
-      failure is not None and "'failure'" in failure and "round-cap" not in failure
-      and "https://run/9" in failure,
+got, failure = wait_with(conclusion="failure")
+check("non-success conclusion: fails naming the conclusion and the run",
+      failure is not None and "'failure'" in failure and "https://run/9" in failure,
       f"got {failure!r}")
 
 print(f"\n{len(failures)} failing" if failures else "\nall passing")

@@ -55,12 +55,11 @@ outcome — push back with reasoning rather than complying with a wrong finding.
 The review backend is pluggable. `memento/skills/address-pr-reviews/provider.json` names
 the active provider (the `PR_REVIEW_PROVIDER` environment variable overrides it), and each
 provider is a Python module declaring a `CAPABILITIES` dict that says which operations
-it supports. Three ship today:
+it supports. Two ship today:
 
 | Provider | What it is | Notes |
 | --- | --- | --- |
 | `action` (default) | the `brandon-fryslie/coding-agent-review` GitHub Action | posts a blocking review; findings are resolvable threads |
-| `adversarial` | a headless Claude agent run as a hostile reviewer | posts COMMENT reviews, so there is nothing to dismiss |
 | `local` | stub for a locally-running agent | raises `NotImplementedError` — not usable yet |
 
 The contract for writing a fourth is in
