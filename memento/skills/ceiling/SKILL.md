@@ -6,7 +6,7 @@ description: Move or lift the context ceiling — for this project or for this s
 # Move the context ceiling
 
 One command does the whole job: it resolves the number, writes every layer the scope
-names, reads each file back, and ends by printing the ceiling in force. Nothing to
+names, reads the file back, and ends by printing the ceiling in force. Nothing to
 hand-write, nothing to go and confirm on a later turn.
 
 ```bash
@@ -50,17 +50,15 @@ Their words settle it. Don't ask which they meant.
 Reach for `show` when you need to know where the ceiling stands before moving it, or
 when the user is only asking.
 
-## `set project` writes two files, and that is the feature
+## `set project` writes one file, and it reaches this session too
 
 It writes `.promptctl/memento.conf` at the repository root — or rewrites whichever
 project config is already in force at or above the anchor: `CLAUDE_PROJECT_DIR` where
-Claude Code sets it, otherwise the working directory — **and** this session's own layer.
+Claude Code sets it, otherwise the working directory. Nothing else.
 
-That second write is what makes the change reach the session that asked for it. Each
-session's user and project layers are frozen at its first stop, into a record the hook
-keeps; so the project file alone moves the ceiling for every session *after* this one
-and leaves this one exactly where it was. Both files receive the same resolved absolute
-number, so they cannot drift into stating different ceilings. [LAW:one-source-of-truth]
+Every layer is read live at each stop, so that one write is in force for this session at
+its next stop and for every later session in the project alike. A session layer already
+standing stays on top of it. [LAW:one-source-of-truth]
 
 Two things to carry into what you tell the user:
 
@@ -78,17 +76,17 @@ layers behind it:
 
 ```
 this session        450,000 tokens
-  shared at start   (not recorded) …/sessions/<id>/shared-at-start.conf
-  session layer     450000         …/sessions/<id>/memento.conf
+  session layer     (unset)        …/sessions/<id>/memento.conf
 a new session here  450,000 tokens
   project layer     450000         /repo/.promptctl/memento.conf
   user layer        (unset)        …/memento.conf
 ```
 
 `this session` is the number this session is gated on; `a new session here` is what the
-next session in this project starts with. Those two lines are the confirmation — the
-command renders only values the hook's own reader accepts and reads each file back
-after writing it, so exit 0 means the files say what it printed.
+next session in this project starts with, and the two differ only by this session's own
+layer. Those lines are the confirmation — the command renders only values the hook's own
+reader accepts and reads the file back after writing it, so exit 0 means the file says
+what it printed.
 [LAW:verifiable-goals]
 
 A nonzero exit does not undo what printed: the `wrote` lines print first, and every one
@@ -127,15 +125,22 @@ command's to state, not yours.
 
 ## `clear` hands a layer back to the one beneath it
 
-`clear session` returns this session to the shared layers it started under.
+`clear session` returns this session to the shared layers as they stand now.
 
-`clear project` removes the project layer and this session's: later sessions fall
-through to the layer beneath the project, and this session returns to the ceiling it
-*started* under — the frozen record still stands, so it does not fall back to whatever
-the files say now. Where no project config stood there was nothing to remove, so only the
-session layer's line prints and `project layer     (none)` in the report is what says so.
+`clear project` removes the project layer: every session in the checkout, this one
+included, falls through to the layer beneath at its next stop, with a session's own layer
+still on top where one stands. Where no project config stood there was nothing to remove,
+and `project layer     (none)` in the report is what says so.
 
-Either way `clear` prints what each file held before removing it — as `set` prints
-`(replacing 900000)`, the only record of a session ceiling that `set project` overwrote —
+Either way `clear` prints what the file held before removing it — as `set` prints
+`(replacing 900000)`, the only record of the number that was there —
 so a ceiling someone meant to keep is recoverable from the output rather than from whoever
 remembers it.
+
+## The session layer ends with the session
+
+A session override lives exactly as long as the session that set it. A reset by
+kill-and-relaunch gets a new session id and so leaves it behind; `/clear` keeps the id,
+so a SessionStart hook drops the file. Either way the successor context runs under the
+user and project layers until it sets its own — so a user who wants headroom across a
+reset wants `project`, not `session`.

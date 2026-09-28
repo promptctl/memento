@@ -153,58 +153,44 @@ handoff without touching — or knowing — the number the project pinned:
 ceiling = +100_000
 ```
 
-The two shared layers — the user file and the project file — are read once per session,
-at its first stop, and what they resolve to together is written down as
-`~/.config/promptctl/sessions/<session-id>/shared-at-start.conf`, an ordinary config file
-in the same format holding an absolute number or `off`: `ceiling = 350000`. From then on
-that record is the shared contribution for that session, and neither shared file is read
-again for it. A session that stops even once leaves one small file under
-`~/.config/promptctl/sessions/`; its mtime is refreshed at every later stop, and once a
-session has gone unseen for 30 days the next new session's first stop sweeps its directory
-away, so the tree stays readable rather than growing one entry per session forever. A pane
-that keeps stopping keeps its record young and is never swept; one reaped after a month of
-silence simply re-reads the shared files if it ever resumes. Editing a shared file, deleting
-it, or leaving a syntax error in it does not move a
-running session's ceiling and cannot gate it. A session that starts afterwards reads the
-shared files as they stand: an edit or a deletion gives it the new number, and a syntax
-error stops the hook for that session with an error, the same loud failure a malformed
-config has always produced.
+All three layers are read live, at every stop, and the ceiling in force is a pure fold of
+them as they stand at that moment. Nothing is frozen per session and nothing is written
+between stops but the log: the only file under `~/.config/promptctl/sessions/` is the
+override `ceiling set session` puts there, and a session that only ever stops leaves that
+tree empty. Editing a shared file, deleting it, or creating one under a running session
+reaches that session at its next stop. Because `Stop` is the only event the hook runs on,
+what a lowered ceiling delivers is the close-out instruction — finish the unit, then hand
+off — never a mid-turn denial. A syntax error in any layer stops the hook for every session
+reading it, loudly, naming the file and line.
 
-That split is here because of one afternoon. A shared file held `350000` from 05:18 on
-2026-09-06 until an agent working in an unrelated project removed the line at 14:55, and
-every running session fell back to the 250,000 that was the default then, from its next
-tool call onward. One of them was at 250,196 tokens, mid-epic, in a different directory. It went from unrestricted
-to fully gated between two consecutive tool calls, could not reach the remedy from inside
-the gate, and never wrote a handoff. The record is made at the first stop rather than at
-the first token because `Stop` is the only event this hook is given — one turn of drift,
-spent where a session is still far below any ceiling.
+That was not always so. Shared layers used to be frozen per session at its first stop, into
+a record the hook kept, because a `PreToolUse` gate then denied tool calls mid-turn and a
+shared line deleted under a running session on 2026-09-06 gated one at 250,196 tokens between
+two tool calls, with no turn left to close out in. That gate is gone, so the harm the freeze
+prevented cannot happen, and the freeze went with it — along with the reset marker and the
+sweep that kept its records from going stale and its tree from growing, since a value read
+fresh each time has nothing to go stale.
 
-The record is keyed on the session id, which outlives a reset in place: on the tmux
-transport `finalize-session` sends `/clear` as keystrokes into the same running process, so
-the process and its id survive and the context after the reset is a new
-one under the old record. Left there, that record would freeze the first context's ceiling
-onto every context the pane runs after it. So a credited close-out notes the context size
-at that moment beside the record, and the next stop decides by it. A context that has
-fallen below that size is the reset's fresh, smaller one, and the record is re-derived from
-the shared files as they now stand — a session that closes out and carries on picks up a
-change made to a shared file while it ran. A context that has not fallen is the same one
-still running — a reset scheduled but not yet landed, or one that never will — and the
-record stands, so a session still mid-work is never re-frozen from a file that moved under
-it. Its own layer applies immediately either way, so a session in that position can still
-give itself room.
+The session's own layer is what is scoped to a session, and it ends with one. A reset by
+kill-and-relaunch gets a new session id and so drops it by construction. `/clear` keeps the
+id, so `memento/hooks/scripts/clear-session-ceiling.py`, registered on `SessionStart` with
+the `clear` matcher, unlinks `sessions/<session-id>/memento.conf`; a compaction is a
+`SessionStart` too, with source `compact`, and the matcher keeps the hook off it. The
+successor context runs under the user and project layers until it sets its own. The hook
+records what it did in the same log the gate writes — `-> dropped` or `-> no-override` —
+and refuses any payload that is not a `/clear`, so a drifted `hooks.json` cannot drop an
+override a session still means to have.
 
-The session's own layer is read live at every stop and applies immediately in both
-directions, raising and lowering alike. `ceiling set session +100_000` writes that layer
-for the session running right now. Because the value is signed it lands on top of what the
-shared layers resolved to rather than replacing it — a session that started at 350,000
-resolves to 450,000 — and it takes effect the next time the ceiling is checked, when the
-turn ends, with nothing to restart, reload or signal, including from a session that is
-already over the ceiling. `ceiling set session -50_000` lowers it the same way: the leading `-`
-is read as part of the value rather than as an unknown option, on every Python the plugin runs
-under. The two help flags are the one exception, so `ceiling set session -h` prints usage rather
-than complaining about a ceiling spelled `-h`. `ceiling clear session` hands the session back to
-the ceiling it started under, not to whatever the shared files say now: `shared-at-start.conf` is
-still standing.
+`ceiling set session +100_000` writes that layer for the session running right now. Because
+the value is signed it lands on top of what the shared layers resolve to rather than
+replacing it — a project at 350,000 resolves to 450,000 — and it takes effect the next time
+the ceiling is checked, when the turn ends, with nothing to restart, reload or signal,
+including from a session that is already over the ceiling. `ceiling set session -50_000`
+lowers it the same way: the leading `-` is read as part of the value rather than as an
+unknown option, on every Python the plugin runs under. The two help flags are the one
+exception, so `ceiling set session -h` prints usage rather than complaining about a ceiling
+spelled `-h`. `ceiling clear session` hands the session back to the shared layers as they
+stand now.
 
 The command is worth going through rather than writing that file yourself, for one reason:
 the write succeeds whatever you put in the file, and a key the hook does not accept does
@@ -226,20 +212,15 @@ is worse than no ceiling. Every decision the hook makes — and every stop that 
 reaching one — is appended to `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`),
 which is the only place you can tell an allow apart from a hook that never ran.
 
-`ceiling set project` moves the project's ceiling instead, and writes two files to do it.
-The shared layers are frozen per session, so the project file alone would move the ceiling
-for every session after this one and not for the session that asked — which is the session
-that wanted headroom. Both files get the same resolved absolute number rather than the same
-adjustment, and that is what keeps them from drifting apart: an absolute ignores the layers
-beneath it. Each is written beside its destination and moved into place only once both are
-staged, so the failures that actually happen — no permission, no space, a parent that cannot be
-made — land before either file is in force and the command exits having moved nothing rather
-than leaving two files stating different ceilings. However that pass ends, the staged files it
-still holds go with it, so a halt part way through leaves no `memento.conf.<pid>` beside a
-project's config that nothing here reads and nobody would notice. Each `wrote` line names what
-that file held before it — `wrote .promptctl/memento.conf line 1 (replacing 900000)` — because
-this session's layer is one of the two, so a project-scoped move can overwrite a ceiling an
-earlier `ceiling set session` pinned, and that parenthetical is the only record of the number
+`ceiling set project` moves the project's ceiling instead, writing the one project file. The
+hook reads it live, so that write reaches the session that asked at its next stop and every
+later session alike; the session's own layer, where one stands, still sits on top of it. The
+file is written beside its destination and moved into place, so the failures that actually
+happen — no permission, no space, a parent that cannot be made — land before it is in force
+and the command exits having moved nothing. However that pass ends, the staged file goes with
+it, so a halt leaves no `memento.conf.<pid>` beside a project's config that nothing here reads
+and nobody would notice. The `wrote` line names what the file held before —
+`wrote .promptctl/memento.conf line 1 (replacing 900000)` — the only record of the number
 that was there. The file it rewrites is whichever project config that walk already finds in
 force, so no second file appears deeper in the tree where the walk would reach it first and
 two files would claim one ceiling. Where none stands it creates one at the repository root,
@@ -293,13 +274,14 @@ no lock. A filesystem that says no — a parent directory you cannot write, a fu
 file whose mode forbids the read — refuses the command too, as a `ceiling:` line naming the path
 and the reason the system gave rather than a Python traceback.
 
-`ceiling clear project` removes the project layer and this session's. Later sessions return
-to the layer beneath the project; this one returns to the ceiling it started under. What
+`ceiling clear project` removes the project layer. Every session in the checkout, this one
+included, returns to the layer beneath it at its next stop, with a session's own layer still
+on top where one stands. What
 each file held is printed as it goes, so a number someone meant to keep is recoverable from
 the output — read an instant before the file goes, since no filesystem offers a
 compare-and-unlink. It removes the project config in force where one stands and nothing where
-none does, so in a project that never set a ceiling it prints this session's layer alone, and the
-report's `project layer     (none)` line is what says the project layer is unset. A layer it
+none does, so in a project that never set a ceiling the report's `project layer     (none)` line
+is all that prints about it. A layer it
 cannot read at all is still one it can take away: it prints what it could not read and removes
 the file. It used to die validating the file it was asked to delete, which left such a layer —
 the gate already off for that session, a stopped Stop hook being non-blocking — removable by
@@ -357,16 +339,19 @@ memento/.claude-plugin/plugin.json
 memento/CHANGELOG.md
 memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
+memento/hooks/scripts/clear-session-ceiling.py
 memento/lib/ceiling_config.py
+memento/lib/ceiling_log.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
 memento/skills/ceiling/
 ```
 
-`memento/lib/` is the one thing two parts of the plugin share: the hook and
-`memento/skills/ceiling/bin/ceiling` both read the config layers through
+`memento/lib/` is the one thing several parts of the plugin share: the hooks and
+`memento/skills/ceiling/bin/ceiling` all read the config layers through
 `ceiling_config.py`, so the program that gates a session on its ceiling and the program
-that moves one cannot disagree about the file format or about which layer wins.
+that moves one cannot disagree about the file format or about which layer wins, and both
+hooks write the ceiling log through `ceiling_log.py`, so their lines read alike.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the
