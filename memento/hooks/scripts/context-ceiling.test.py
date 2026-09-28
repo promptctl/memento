@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 
 # One scratch root for every mkdtemp() below, removed on exit - each call still gets its own
 # subdirectory, but the suite no longer abandons one per case in the system temp dir.
@@ -47,8 +46,9 @@ SESSION = "s-1"
 # The file names come from the module the hook itself reads them from, so a fixture here cannot
 # drift from the files the hook looks for. [LAW:one-source-of-truth]
 sys.path.insert(0, LIB)
-from ceiling_config import (CONFIG_NAME, DEFAULT_CEILING, GRACE,  # noqa: E402
-                            SHARED_AT_START, lines_in)
+from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE  # noqa: E402
+
+CLEAR_HOOK = os.path.join(HERE, "clear-session-ceiling.py")
 
 # Past the ceiling and past the limit the grace sets beyond it: the two bands a stop can block in.
 LIMIT = TEST_CEILING + GRACE
@@ -420,78 +420,53 @@ code, out, _ = run([user, assistant(400_000)], project=shared,
 check("the user config is not applied a second time as the project config",
       blocked_at(out, DEFAULT_CEILING + 10_000), str(out))
 
-# --- a running session keeps the ceiling it started under ----------------------------------
+# --- the ceiling is a live read of the layers at every stop ---------------------------------
 
-# The incident this section exists for. A shared file held 350,000 from 05:18 on 2026-09-06 until
-# an agent working in an unrelated project removed the line at 14:55. Every running session read
-# the default from the next tool call on; one of them was at 250,196 tokens, went from
-# unrestricted to fully gated between two calls, and never wrote a handoff. Each case runs a
-# session more than once against one config home, because a second run seeing what the first one
-# recorded is the whole of what is under test.
+# Nothing is frozen per session. A shared layer edited, deleted or created under a running session is
+# what that session is gated on at its next stop - delivered as a close-out instruction, since Stop is
+# the only event this runs on, never as a denial. Each case runs one session more than once against one
+# config home, because a second stop seeing the change is the whole of what is under test.
 
 home = scratch_dir()
 code, out, _ = run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-check("a session's first stop passes under the shared ceiling it started with",
+check("a session's first stop passes under the shared ceiling as it stands",
       code == 0 and out is None, f"{code} {out}")
-code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a shared ceiling lowered under a running session does not gate it",
-      code == 0 and out is None, f"{code} {out}")
-_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("nor does it move that session's ceiling", blocked_at(out, 350_000), str(out))
-# The other half of the rule: the rewrite is not ignored, it is scoped. Same config home, so the
-# only difference between this case and the one above it is which session is stopping.
-_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n",
-                session="s-after")
-check("a session started after the rewrite does get the new number",
+_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
+check("a shared ceiling lowered under a running session instructs it to close out at its next stop",
       blocked_at(out, 250_000), str(out))
+check("and what it gets is the finishing instruction, not a denial",
+      out and out.get("decision") == "block" and "finish" in out["reason"].lower(), str(out))
+code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 450000\n")
+check("a shared ceiling raised under a running session lets its next stop through",
+      code == 0 and out is None, f"{code} {out}")
 
-# What actually happened in the incident was a deletion, and a file that no longer exists has no
-# mtime to rank against the session's start - so this is the case that decides the design, not a
-# variation on the one above.
-home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-os.unlink(os.path.join(home, CONFIG_NAME))
-_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf=None)
-check("a shared ceiling deleted under a running session leaves that session's ceiling standing",
-      blocked_at(out, 350_000), str(out))
-# A shared file rewritten into something `ceiling_in` exits on is the same class of change, and
-# the hook exiting is how the gate stops running for a session entirely.
-code, out, err = run([user, assistant(400_000)], config_home=home, user_conf="ceilling = 350000\n")
-check("a shared file broken after a session started does not take that session's gate down",
-      code == 0 and blocked_at(out, 350_000), f"{code} {err}")
-code, out, err = run([user, assistant(400_000)], config_home=home,
-                     user_conf="ceilling = 350000\n", session="s-into-breakage")
-check("while a session starting into that broken file still fails loudly",
-      code == 1 and "ceilling" in err, f"{code} {err}")
-# The loud stderr is not enough: a stopped Stop hook is non-blocking, so this session now runs
-# with no ceiling, and stderr scrolls away. The log is where that has to be legible after.
-check("and the stopped gate leaves a durable log line, not only stderr",
-      "-> stopped" in run.log and "ceilling" in run.log, run.log)
-
-# Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
-# and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
-# anywhere stating why.
-bytes_home = scratch_dir()
-with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
-    handle.write(b"ceiling = 35\xff0000\n")
-code, out, err = run([user, assistant(400_000)], config_home=bytes_home, user_conf=None,
-                     session="s-into-bytes")
-check("a shared file of bytes that are not text fails in the parser's own voice",
-      code == 1 and "not text" in err and "Traceback" not in err, f"{code} {err}")
-
-# The rule is about shared layers, so the project layer is frozen on the same terms as the user
-# one - it is shared with every other session anchored at that project.
-home, repo = scratch_dir(), scratch_dir()
-run([user, assistant(1_000)], config_home=home, project=repo, project_conf="ceiling = 350000\n")
-_, out, _ = run([user, assistant(400_000)], config_home=home, project=repo,
-                project_conf="ceiling = 250000\n")
-check("a project ceiling rewritten under a running session is frozen out too",
-      blocked_at(out, 350_000), str(out))
-
-# STOP CONDITION 2: the session's own layer is the one that still moves, immediately, in both
-# directions - which is what makes the block escapable from inside the block.
+# A deletion is a change like any other: the session falls to the layer beneath.
 home = scratch_dir()
 run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 250000\n")
+os.unlink(os.path.join(home, CONFIG_NAME))
+_, out, _ = run([user, assistant(DEFAULT_CEILING + 10_000)], config_home=home, user_conf=None)
+check("a shared ceiling deleted under a running session hands it to the layer beneath",
+      blocked_at(out, DEFAULT_CEILING), str(out))
+# And so is a project file appearing where none stood.
+home, repo = scratch_dir(), scratch_dir()
+run([user, assistant(1_000)], config_home=home, project=repo)
+_, out, _ = run([user, assistant(300_000)], config_home=home, project=repo,
+                project_conf="ceiling = 250000\n")
+check("a project ceiling written under a running session reaches it at its next stop",
+      blocked_at(out, 250_000), str(out))
+
+# Between stops the hook writes nothing but the log: the sessions tree holds only what `ceiling set
+# session` puts there, so there is no per-session record to go stale.
+home = scratch_dir()
+run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
+run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 350000\n")
+check("a session that only stops leaves nothing under the sessions tree",
+      not os.path.exists(os.path.join(home, "sessions")),
+      str(os.path.exists(os.path.join(home, "sessions")) and os.listdir(os.path.join(home, "sessions"))))
+
+# The session's own layer moves the ceiling immediately, in both directions - which is what makes the
+# block escapable from inside the block - and it survives an ordinary stop untouched.
+home = scratch_dir()
 code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n",
                    session_conf="ceiling = +100_000\n")
 check("a session layer written mid-session raises the ceiling on the very next stop",
@@ -500,109 +475,77 @@ _, out, _ = run([user, assistant(200_000)], config_home=home, user_conf="ceiling
                 session_conf="ceiling = -100_000\n")
 check("and lowers it on the next stop too - no direction test, no asymmetry",
       blocked_at(out, 150_000), str(out))
-# The ceiling skill hands a session back by deleting this file, which must leave the record it
-# sits beside untouched. The live shared file is moved to 200,000 so a re-read would show.
-os.unlink(os.path.join(home, "sessions", SESSION, CONFIG_NAME))
+override = os.path.join(home, "sessions", SESSION, CONFIG_NAME)
+check("an ordinary stop leaves the session override standing",
+      open(override).read() == "ceiling = -100_000\n", str(os.path.exists(override)))
+os.unlink(override)
 _, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 200000\n")
-check("deleting the session layer hands the session back to its recorded start, not the live file",
-      blocked_at(out, 250_000), str(out))
+check("deleting the session layer hands the session to the shared layers as they stand now",
+      blocked_at(out, 200_000), str(out))
 
-# A record half-written by a session killed mid-write would exist and parse to nothing, and a
-# record that can neither be read nor replaced is the gate off for that session for good. Written
-# whole and moved into place, so the empty file below is a state only this test can build.
-home = scratch_dir()
-write_conf(os.path.join(home, "sessions", SESSION, SHARED_AT_START), "")
-_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 350000\n")
-check("a record left empty by an interrupted write is completed rather than stopping the gate",
-      blocked_at(out, 350_000), str(out))
-_, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("and the completed record is what the next stop reads", blocked_at(out, 350_000), str(out))
 
-# `off` has to survive the round trip through the record, or a session that started with the gate
-# off would silently get it back the moment the shared file moved.
+# --- a session override resets with the session, /clear included ------------------------------
+
+# A kill-and-relaunch reset gets a new session id and so drops its override by construction. `/clear`
+# keeps the id, so a SessionStart hook matched to it removes the file, and the successor context runs
+# under the user and project layers until it sets its own.
+
+def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None):
+    """Invoke the SessionStart hook as Claude Code does on /clear. Returns (exit code, stderr)."""
+    log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
+    log.close()
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
+    env.update({"MEMENTO_CONFIG_HOME": home, "MEMENTO_CEILING_LOG": log.name})
+    payload = raw if raw is not None else json.dumps(
+        {"session_id": session, "hook_event_name": event, "source": source, "cwd": home})
+    done = subprocess.run([sys.executable, CLEAR_HOOK], text=True, capture_output=True, env=env,
+                          input=payload)
+    cleared.log = open(log.name).read()
+    os.unlink(log.name)
+    return done.returncode, done.stderr
+
+
 home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = off\n")
-code, out, _ = run([user, assistant(5_000_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a session that started with the gate off keeps it off when the shared file turns it back on",
-      code == 0 and out is None, f"{code} {out}")
 _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n",
-                session_conf="ceiling = 300000\n")
-check("and its own layer can still put a number back", blocked_at(out, 300_000), str(out))
-
-# --- a session reset in place re-freezes only when the reset lands -------------------------
-
-# The tmux transport resets a session in place, so it keeps its id and its record. Without a refresh
-# it would hold its first context's shared ceiling forever; refreshing unconditionally would re-freeze
-# a session whose reset never landed from files that moved under it. The close-out marks the size the
-# context had; the next stop below it is the fresh context and re-derives, one above it is the same
-# context still running and keeps what it froze. Same session and config home across runs, because a
-# second run seeing what the first recorded is the whole of what is under test.
-
-closeout = [tool_use("Bash", {"command": f"{LAUNCHER} 'bye'"}), tool_result(content=SCHEDULED)]
-
-# The reset landed: the context after the close-out is smaller than it was at the close-out, so the
-# next context picks up the shared change made while the first one ran.
-home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
-_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a session that closed out and carried on picks up a shared change made while it ran",
-      blocked_at(out, 250_000), str(out))
-# And the re-derived record is itself frozen: the refresh happens once, at the landing, not at every
-# later stop, so a further shared change does not move the new context either.
-_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 150000\n")
-check("the re-derived record is frozen in turn - a later shared change does not move it again",
-      blocked_at(out, 250_000), str(out))
-
-# The reset never landed: the context after the close-out is no smaller (the scheduled reset failed,
-# or the session carried on before it fired), so the original ceiling stands rather than being
-# re-frozen from a shared file that has since moved.
-home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
-_, out, _ = run([user, assistant(450_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a session whose reset never landed is not re-frozen from a shared file that moved under it",
-      blocked_at(out, 350_000), str(out))
-
-# The common path: a close-out at the end of a unit of work happens under the ceiling, not only when
-# the ceiling forces one, so the marker is recorded on an allowed stop too and the next context still
-# re-freezes from the current shared layers.
-home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-code, out, _ = run([user, assistant(300_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
-check("a close-out under the ceiling is an allowed stop", code == 0 and out is None, f"{code} {out}")
-_, out, _ = run([user, assistant(280_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a close-out under the ceiling still re-freezes the next context from the current shared layers",
-      blocked_at(out, 250_000), str(out))
-
-# Repeated close-outs before any reset lands: each records the size the context had, so the marker
-# tracks the latest, and the conservative test still waits for the context to fall below it. A context
-# that only grows between close-outs never reads as a landed reset and keeps what it froze.
-home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-run([user, assistant(380_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
+                session_conf="ceiling = 500000\n")
+check("before the reset, the session override is what gates the session", out is None, str(out))
+code, err = cleared(home)
+check("the /clear hook exits clean", code == 0 and not err, f"{code} {err}")
+check("and the session override is gone, and the directory that held only it",
+      not os.path.exists(os.path.join(home, "sessions", SESSION)),
+      str(os.path.exists(os.path.join(home, "sessions", SESSION))
+          and os.listdir(os.path.join(home, "sessions", SESSION))))
+check("and says so in the ceiling log", "-> dropped" in cleared.log and "SessionStart" in cleared.log,
+      cleared.log)
 _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a context still growing after a close-out is not read as a landed reset",
-      blocked_at(out, 350_000), str(out))
-run([user, assistant(420_000)] + closeout, config_home=home, user_conf="ceiling = 250000\n")
-_, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a reset landing below the latest close-out size is what finally re-derives",
+check("so the post-clear context is gated on the user and project layers",
       blocked_at(out, 250_000), str(out))
+code, err = cleared(home)
+check("a /clear in a session that set no override is not an error", code == 0 and not err, f"{code} {err}")
+check("and the log tells that apart from a dropped override", "-> no-override" in cleared.log, cleared.log)
 
-# The marker lives one stop. A close-out whose reset never lands is spent at the next stop, so a
-# *later* context shrink - an auto-compaction, which drops the token count exactly as a /clear does -
-# is not mistaken for the landing. Without the one-stop life the lingering marker would re-freeze this
-# still-running session from a shared file that moved under it: the dangerous direction the freeze
-# forbids.
+# A drifted hooks.json is the way this hook would fire on the wrong event and drop an override the
+# session still means to have. Any payload that is not a /clear stops it, and the stop is recorded.
 home = scratch_dir()
-run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
-run([user, assistant(400_000)] + closeout, config_home=home, user_conf="ceiling = 350000\n")
-_, out, _ = run([user, assistant(410_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a non-landed reset is spent at the next stop and keeps the frozen ceiling",
-      blocked_at(out, 350_000), str(out))
-code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n")
-check("a compaction after a non-landed reset is not read as the landing, so the frozen ceiling stands",
-      code == 0 and out is None, f"{code} {out}")
+run([user, assistant(1_000)], config_home=home, session_conf="ceiling = 500000\n")
+for event, source in (("SessionStart", "compact"), ("SessionStart", "startup"), ("Stop", "clear")):
+    code, err = cleared(home, event=event, source=source)
+    check(f"a {event} payload with source {source!r} stops the hook rather than dropping the override",
+          code == 1 and "hooks.json" in err
+          and os.path.exists(os.path.join(home, "sessions", SESSION, CONFIG_NAME)), f"{code} {err}")
+    check("and the stop is recorded", "-> stopped" in cleared.log, cleared.log)
+# A real Stop payload carries no `source` at all; the refusal has to be the curated one, not a
+# KeyError raised while composing it.
+code, err = cleared(home, raw=json.dumps({"session_id": SESSION, "hook_event_name": "Stop"}))
+check("a real Stop payload, which has no source, is refused in the hook's own voice",
+      code == 1 and "hooks.json" in err and "Traceback" not in err, f"{code} {err}")
+for raw in ("42", "[]", "not json", "{}"):
+    code, err = cleared(home, raw=raw)
+    check(f"a /clear payload of {raw!r} stops the hook loudly and is recorded",
+          code == 1 and "-> stopped" in cleared.log, f"{code} {err} | {cleared.log!r}")
+code, err = cleared(home, session="../..")
+check("a session id that is not a bare name is refused by the /clear hook too",
+      code == 1 and "session directory" in err, f"{code} {err}")
 
 # --- a setting nobody can misspell into silence -------------------------------------------
 
@@ -612,6 +555,19 @@ check("a ceiling that does not parse fails loudly, naming the file and the line"
 code, out, err = run([user, assistant(OVER)], user_conf="ceilling = 350000\n")
 check("a misspelled key fails loudly rather than reading as a setting nobody made",
       code == 1 and "ceilling" in err and "ceiling" in err, f"{code} {err}")
+# The loud stderr is not enough: a stopped Stop hook is non-blocking, so this session now runs
+# with no ceiling, and stderr scrolls away. The log is where that has to be legible after.
+check("and the stopped gate leaves a durable log line, not only stderr",
+      "-> stopped" in run.log and "ceilling" in run.log, run.log)
+# Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
+# and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
+# anywhere stating why.
+bytes_home = scratch_dir()
+with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
+    handle.write(b"ceiling = 35\xff0000\n")
+code, out, err = run([user, assistant(400_000)], config_home=bytes_home, user_conf=None)
+check("a shared file of bytes that are not text fails in the parser's own voice",
+      code == 1 and "not text" in err and "Traceback" not in err, f"{code} {err}")
 # The key this setting used to be spelled with is a rejection, not a synonym. Every other
 # case here writes the current spelling, so nothing else in the suite would notice an alias
 # readmitted for compatibility. The new key is a substring of the retired one, so the
@@ -643,16 +599,15 @@ code, out, err = run([user, assistant(OVER)],
                      user_conf=f"ceiling = -{DEFAULT_CEILING + 50_000}\n")
 check("a shared fold that resolves below zero fails loudly rather than being recorded",
       code == 1 and "never negative" in err and "-50,000" in err, f"{code} {err}")
-check("and it names the shared file that caused it, not the record derived from it",
-      code == 1 and CONFIG_NAME in err and SHARED_AT_START not in err, f"{code} {err}")
+check("and it names the shared file that caused it",
+      code == 1 and CONFIG_NAME in err, f"{code} {err}")
 
 code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 10000\n",
                      session_conf="ceiling = -50000\n")
-# Both layers by name, not by a count of filenames: the shared side of the fold now reaches the
-# message through the session's recorded start, so the two sources are two different files.
+# Both layers by path: the user file and the session's, which share a filename and nothing else.
 check("adjustments that resolve below zero fail loudly, naming both layers",
-      code == 1 and "never negative" in err and SHARED_AT_START in err and CONFIG_NAME in err,
-      f"{code} {err}")
+      code == 1 and "never negative" in err and f"sessions/{SESSION}/{CONFIG_NAME}" in err
+      and err.count(CONFIG_NAME) >= 2, f"{code} {err}")
 
 # The disabling word is matched on what was written, not on what is left after the digit
 # separators come out - `o_f_f` is a typo, and reading it as `off` would take the gate down
@@ -862,103 +817,23 @@ check("the close-out contract's prose does not match the marker",
       len(prose) >= 2 and not any(marker.search(line) for line in prose), str(prose))
 registered = json.load(open(os.path.join(os.path.dirname(HERE), "hooks.json")))["hooks"]
 # The count is only true of the live context at a stop: a session reset in place keeps its
-# transcript, so on any earlier event the newest record can describe a context already gone.
-check("the hook is registered on Stop alone",
-      sorted(registered) == ["Stop"], str(sorted(registered)))
+# transcript, so on any earlier event the newest record can describe a context already gone. The
+# one other event registered measures nothing: it drops a session override on /clear.
+check("the gate is registered on Stop, and the override reset on SessionStart, and nothing else",
+      sorted(registered) == ["SessionStart", "Stop"], str(sorted(registered)))
 command = registered["Stop"][0]["hooks"][0]["command"]
 check("the Stop registration runs this script, from the plugin root",
       os.path.basename(HOOK) in command and "${CLAUDE_PLUGIN_ROOT}" in command, command)
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
-
-# --- the sessions tree does not grow without bound ----------------------------------------
-# Driven through the hook the way the harness drives it: a stop writes and ages records; the sweep and
-# the touch that keep the tree bounded are read off the filesystem afterwards, not off the internals -
-# with one exception at the end, a direct lines_in call for a race too fine to trigger through the hook
-# deterministically. [LAW:behavior-not-structure]
-
-def aged_session(home, sid, age_days, extra=()):
-    """A session directory as it would stand `age_days` after it was last seen: its record, any extra
-    files, and the directory itself all stamped that far in the past. The directory's own mtime is set
-    last, because writing a file into it bumps that mtime back to now."""
-    directory = os.path.join(home, "sessions", sid)
-    os.makedirs(directory, exist_ok=True)
-    when = time.time() - age_days * 86_400
-    for name, text in ((SHARED_AT_START, f"ceiling = {DEFAULT_CEILING}\n"), *extra):
-        stamped = write_conf(os.path.join(directory, name), text)
-        os.utime(stamped, (when, when))
-    os.utime(directory, (when, when))
-    return directory
-
-
-def survives(home, sid):
-    return os.path.exists(os.path.join(home, "sessions", sid, SHARED_AT_START))
-
-
-# A session unseen well past the cutoff is finished; its whole directory goes, and the stray `.<pid>`
-# partial a killed record write would have orphaned inside it goes with it.
-swept = scratch_dir()
-aged_session(swept, "ancient", 40, extra=[(f"{SHARED_AT_START}.9999", "ceiling = 1\n")])
-run([user, assistant(UNDER)], config_home=swept, session="fresh-1")
-check("a session unseen past the cutoff is swept, partial and all",
-      not os.path.exists(os.path.join(swept, "sessions", "ancient")),
-      os.listdir(os.path.join(swept, "sessions")))
-check("the session doing the sweeping does not sweep its own fresh record",
-      survives(swept, "fresh-1"), os.listdir(os.path.join(swept, "sessions")))
-
-# A session seen within the cutoff is still in play - a pane resumed days later is still that session
-# - so it is left exactly where it is.
-kept = scratch_dir()
-aged_session(kept, "recent", 0)
-run([user, assistant(UNDER)], config_home=kept, session="fresh-2")
-check("a session seen within the cutoff is left alone",
-      survives(kept, "recent"), os.listdir(os.path.join(kept, "sessions")))
-
-# The stop condition itself: a session that keeps stopping cannot be swept, however long ago it
-# started. The record starts 40 days old; the session stops once, which touches it back to now; a
-# brand-new session then runs the sweep, and the touched record is what saves the running one. Remove
-# the touch and this is the case that deletes a live session's record.
-running = scratch_dir()
-aged_session(running, "old-runner", 40)
-run([user, assistant(UNDER)], config_home=running, session="old-runner")
-run([user, assistant(UNDER)], config_home=running, session="fresh-3")
-check("a session that keeps stopping is never swept, however long ago it started",
-      survives(running, "old-runner"), os.listdir(os.path.join(running, "sessions")))
-
-# A fresh `.<pid>` partial is a record or override write still in flight, not litter: the directory is
-# kept, because reaping it out from under the write would make that write fail. (An old partial, like
-# the one aged with the "ancient" case above, ages out with everything else.)
-inflight = scratch_dir()
-mid = aged_session(inflight, "mid-write", 40)
-write_conf(os.path.join(mid, f"{SHARED_AT_START}.9999"), "ceiling = 1\n")  # a write in flight, just now
-run([user, assistant(UNDER)], config_home=inflight, session="fresh-4")
-check("a fresh partial (a write in flight) keeps its directory from being swept",
-      survives(inflight, "mid-write"), os.listdir(os.path.join(inflight, "sessions")))
-
-# A per-session ceiling the user set recently keeps its whole directory alive even when the record is
-# old: _last_seen reads the session's own layer too, so a deliberate override is never swept out from
-# under a session that set it, stopped or not.
-override = scratch_dir()
-kept_dir = aged_session(override, "set-override", 40)
-write_conf(os.path.join(kept_dir, CONFIG_NAME), "ceiling = +100000\n")  # set just now
-run([user, assistant(UNDER)], config_home=override, session="fresh-5")
-check("a freshly-set per-session override keeps its directory from being swept",
-      survives(override, "set-override"), os.listdir(os.path.join(override, "sessions")))
-
-
-# A file that vanishes between lines_in's exists() check and its read - a concurrent sweep deleting a
-# session's files while its own hook reads them - reads as absent, not a crash that would take the
-# reader's Stop gate down. lines_in only calls .exists() and .read_text(), so a stand-in exercises the
-# race deterministically.
-class _VanishedMidRead:
-    def exists(self):
-        return True
-
-    def read_text(self, *args, **kwargs):
-        raise FileNotFoundError(2, "No such file or directory")
-
-
-check("lines_in reads a file that vanished mid-read as absent rather than crashing",
-      lines_in(_VanishedMidRead()) == [], "expected []")
+# A compaction is also a SessionStart, with source "compact", and the context after it is the same
+# session still running - its override must stand. The matcher is what keeps the hook off it.
+starting = registered["SessionStart"]
+check("the /clear hook is matched to source clear alone",
+      len(starting) == 1 and starting[0].get("matcher") == "clear", str(starting))
+check("and runs the clear script, from the plugin root",
+      os.path.basename(CLEAR_HOOK) in starting[0]["hooks"][0]["command"]
+      and "${CLAUDE_PLUGIN_ROOT}" in starting[0]["hooks"][0]["command"], str(starting))
+check("the /clear hook is executable", os.access(CLEAR_HOOK, os.X_OK), CLEAR_HOOK)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

@@ -30,8 +30,7 @@ HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
 # The file-format facts come from the module the command and the hook both read them from, so a
 # fixture here cannot drift from the files production writes. [LAW:one-source-of-truth]
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
-from ceiling_config import (CONFIG_NAME, DEFAULT_CEILING,  # noqa: E402
-                            PROJECT_CONFIG_DIR, SHARED_AT_START)
+from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, PROJECT_CONFIG_DIR  # noqa: E402
 
 # What `+100_000` resolves to from the shipped default, derived so retuning that default moves the
 # expectation with it rather than failing every case built on it. [LAW:one-source-of-truth]
@@ -51,20 +50,18 @@ def scratch_dir():
     return tempfile.mkdtemp(dir=SCRATCH)
 
 
-def world(user_conf=None, project_conf=None, session_conf=None, recorded=None, git=True):
+def world(user_conf=None, project_conf=None, session_conf=None, git=True):
     """A config home and a repo with a subdirectory, each layer written where a person writes it.
 
     Returns (home, repo). Layers are driven through the real files rather than through flags, so
-    these cases exercise the paths the command actually resolves. `recorded` writes the frozen
-    shared record the hook keeps, which is what makes a session one that has already stopped."""
+    these cases exercise the paths the command actually resolves."""
     home, repo = scratch_dir(), scratch_dir()
     os.makedirs(os.path.join(repo, "sub"))
     if git:
         subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
     for path, text in ((os.path.join(home, CONFIG_NAME), user_conf),
                        (os.path.join(repo, PROJECT_CONFIG_DIR, CONFIG_NAME), project_conf),
-                       (os.path.join(home, "sessions", SESSION, CONFIG_NAME), session_conf),
-                       (os.path.join(home, "sessions", SESSION, SHARED_AT_START), recorded)):
+                       (os.path.join(home, "sessions", SESSION, CONFIG_NAME), session_conf)):
         if text is not None:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as handle:
@@ -228,8 +225,8 @@ check("with nothing set, the shipped default is what is in force",
 check("and show says so for this session and for a new one alike",
       out.count(f"{DEFAULT_CEILING:,} tokens") == 2, out)
 check("show lists the layers that are absent rather than omitting them",
-      all(label in out for label in ("shared at start", "session layer", "project layer",
-                                     "user layer")) and out.count("(unset)") == 2, out)
+      all(label in out for label in ("session layer", "project layer", "user layer"))
+      and out.count("(unset)") == 2, out)
 check("show writes nothing", project_conf(repo) is None and session_conf(home) is None,
       f"{project_conf(repo)} {session_conf(home)}")
 
@@ -325,13 +322,13 @@ home, repo = world()
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project-scoped move writes the project layer",
       code == 0 and project_conf(repo) == f"ceiling = {RAISED}\n", str(project_conf(repo)))
-check("and this session's layer as well, because the shared layers were frozen for it",
-      session_conf(home) == f"ceiling = {RAISED}\n", str(session_conf(home)))
-# The invariant the whole design turns on: one number, stated by both files.
+check("and nothing else - this session's layer stays untouched", session_conf(home) is None,
+      str(session_conf(home)))
+# Every layer is read live, so the one file reaches this session and the next alike.
 check("so this session and a new session here run under the same ceiling",
       f"this session        {RAISED:,} tokens" in out
       and f"a new session here  {RAISED:,} tokens" in out, out)
-check("the command names every file it wrote", out.count("wrote ") == 2, out)
+check("the command names the one file it wrote", out.count("wrote ") == 1, out)
 
 # A subdirectory is where the command runs, not where the project is.
 home, repo = world()
@@ -408,35 +405,21 @@ code, out, err = run(home, scratch_dir(), "set", "project", "400_000", anchor=re
 check("and finds the anchored repository from a directory that is no repository at all",
       code == 0 and project_conf(repo) == "ceiling = 400000\n", f"{code} {err}")
 
-# What a move replaces is printed as it goes, the way `clear` prints what it removes. A project
-# move writes this session's layer too, so it is the one that can overwrite a number nobody else
-# knows about.
-home, repo = world(session_conf="ceiling = 900_000\n")
+# What a move replaces is printed as it goes, the way `clear` prints what it removes.
+home, repo = world(project_conf="ceiling = 900_000\n")
 code, out, err = run(home, repo, "set", "project", "400_000")
-check("a move says what each file held, so a session's own ceiling is not lost silently",
+check("a move says what the file held, so the number is not lost silently",
       code == 0 and "replacing 900_000" in out, out)
 
-# A session that has already stopped holds a frozen record; the project move must reach past it.
-home, repo = world(recorded=f"ceiling = {DEFAULT_CEILING}\n")
-code, out, err = run(home, repo, "set", "project", "+100_000")
-check("a session whose shared layers are already frozen still gets the project's new ceiling",
-      code == 0 and f"this session        {RAISED:,} tokens" in out, f"{code} {out}")
-
-# A session that started with no ceiling at all still takes the project's number, because the
-# session layer this writes is absolute and an absolute ignores the record beneath it.
-home, repo = world(recorded="ceiling = off\n")
-code, out, err = run(home, repo, "set", "project", "400_000")
-check("a session that started with no ceiling is brought under the project's new one",
-      code == 0 and "this session        400,000 tokens" in out, f"{code} {out}")
-verdict, enforced = gate(home, repo, 450_000)
-check("and the gate enforces it against a session that was previously ungated",
-      verdict == "block" and enforced == 400_000, f"{verdict} {enforced}")
-
-# A project move does not inherit one session's private allowance.
+# A project move does not inherit one session's private allowance, and does not overwrite it either:
+# the session's own layer still sits on top of whatever the project now says.
 home, repo = world(session_conf="ceiling = 900_000\n")
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project move starts from the project, not from the room one session gave itself",
       code == 0 and project_conf(repo) == f"ceiling = {RAISED}\n", str(project_conf(repo)))
+check("and leaves that session's own layer in force over it",
+      session_conf(home) == "ceiling = 900_000\n" and "this session        900,000 tokens" in out,
+      f"{session_conf(home)} {out}")
 
 # --- one project, and no further ---------------------------------------------------------
 
@@ -468,18 +451,15 @@ check("and returns the session to the ceiling beneath it",
 check("and says what the file had held, so the number is not lost with it",
       "400_000" in out, out)
 
-home, repo = world(project_conf="ceiling = 350_000\n", session_conf="ceiling = 350000\n",
-                   recorded=f"ceiling = {DEFAULT_CEILING}\n")
+home, repo = world(project_conf="ceiling = 350_000\n", session_conf="ceiling = +50_000\n")
 code, out, err = run(home, repo, "clear", "project")
-check("clearing a project ceiling removes the project layer and this session's",
-      code == 0 and project_conf(repo) is None and session_conf(home) is None,
+check("clearing a project ceiling removes the project layer and only that",
+      code == 0 and project_conf(repo) is None and session_conf(home) == "ceiling = +50_000\n",
       f"{code} {project_conf(repo)} {session_conf(home)}")
 check("a new session here returns to the layer beneath the project",
       f"a new session here  {DEFAULT_CEILING:,} tokens" in out, out)
-# The frozen record is the hook's, and clearing a layer does not reach into it.
-check("and this session returns to the ceiling it started under, not to what the files say now",
-      f"this session        {DEFAULT_CEILING:,} tokens" in out and conf(
-          home, "sessions", SESSION, SHARED_AT_START) is not None, out)
+check("and this session's own layer now sits on the layer beneath the project",
+      f"this session        {DEFAULT_CEILING + 50_000:,} tokens" in out, out)
 
 home, repo = world()
 code, out, err = run(home, repo, "clear", "session")
@@ -489,14 +469,15 @@ check("clearing a layer that was never written is not an error",
 home, repo = world()
 code, out, err = run(home, repo, "clear", "project")
 check("clearing a project that never set a ceiling removes nothing and says so",
-      code == 0 and "absent" in out and "project layer     (none)" in out, f"{code} {out}")
+      code == 0 and "absent" not in out and "removed" not in out
+      and "project layer     (none)" in out, f"{code} {out}")
 
 # Nothing stands, so nothing needs creating, so no repository root needs finding. A clear that
 # borrowed the write site would refuse this - and refuse it talking about writing.
 home, repo = world(git=False)
 code, out, err = run(home, repo, "clear", "project")
 check("clearing a project outside a git repository is not an error when nothing is there to clear",
-      code == 0 and "absent" in out, f"{code} {out} {err}")
+      code == 0 and "project layer     (none)" in out, f"{code} {out} {err}")
 
 # The file the hook is dying on is the file `clear` exists to remove, so the reader that refuses it
 # must not be the reader standing between the two.
@@ -612,17 +593,17 @@ check("a count asks for no base, so a change underneath it writes anyway",
 
 # --- nothing staged left behind -----------------------------------------------------------
 
-# The staging pass can fail on its second file, and by then the first file's partial is real. A
-# `memento.conf.<pid>` is read by nothing here, which is exactly why leaving one would be invisible.
+# A `memento.conf.<pid>` is read by nothing here, which is exactly why leaving one would be
+# invisible. The staging write is refused by a directory that cannot be written into.
 home, repo = world()
-sessions = os.path.join(home, "sessions", SESSION)
-os.makedirs(sessions)
-os.chmod(sessions, 0o500)
+holding = os.path.join(repo, PROJECT_CONFIG_DIR)
+os.makedirs(holding)
+os.chmod(holding, 0o500)
 try:
     code, out, err = run(home, repo, "set", "project", "300_000")
 finally:
-    os.chmod(sessions, 0o700)
-left = sorted(os.listdir(os.path.join(repo, PROJECT_CONFIG_DIR)))
+    os.chmod(holding, 0o700)
+left = sorted(os.listdir(holding))
 check("a staging pass that cannot finish leaves nothing of itself behind",
       code != 0 and left == [], f"{code} {left}")
 check("and none of the move is in place", project_conf(repo) is None, str(project_conf(repo)))
@@ -712,16 +693,17 @@ verdict, enforced = gate(home, repo, 350_000, session="sess-3")
 check("and a session under it is allowed",
       verdict == "allow" and enforced == 400_000, f"{verdict} {enforced}")
 
-# The case the design is built around: a project move before this session has ever stopped. The
-# hook's first stop freezes the shared layers, which now include the project file this command
-# just wrote - so a session layer holding an *adjustment* would be applied on top of its own
-# effect and land the session at twice the headroom anyone asked for.
+# A project move made mid-session reaches the session that made it at its next stop: the hook reads
+# the layers live, so a session that has already stopped is in no different position from one that
+# has not.
 home, repo = world()
+verdict, enforced = gate(home, repo, RAISED + 10_000)
+check("a session's stop before the move reads the default", enforced == DEFAULT_CEILING, str(enforced))
 code, out, err = run(home, repo, "set", "project", "+100_000")
-check("a project move reports the headroom asked for, before any stop has happened",
+check("a project move reports the headroom asked for",
       code == 0 and f"this session        {RAISED:,} tokens" in out, f"{code} {out}")
 verdict, enforced = gate(home, repo, RAISED + 10_000)
-check("and the gate's first stop enforces that, not twice the headroom",
+check("and that session's next stop enforces it, to the token",
       enforced == RAISED and verdict == "block", f"{verdict} {enforced}")
 
 # --- the shipped surface ----------------------------------------------------------------

@@ -1,5 +1,5 @@
 {
-  "description": "The context ceiling, enforced at the one event where the number is true. The count comes from the transcript's newest assistant record, which describes the live context only at the moment a turn ends - a session reset in place keeps its transcript, so mid-turn that record can belong to a context that no longer exists. Stop refuses to let a session past the hard token maximum end its turn until it has run the message-in-a-bottle close-out.",
+  "description": "The context ceiling, enforced at the one event where the number is true. The count comes from the transcript's newest assistant record, which describes the live context only at the moment a turn ends - a session reset in place keeps its transcript, so mid-turn that record can belong to a context that no longer exists. Stop refuses to let a session past the hard token maximum end its turn until it has run the message-in-a-bottle close-out. SessionStart on /clear drops the ceiling override the session set for itself, because the session that set it has ended even though its id has not.",
   "hooks": {
     "Stop": [
       {
@@ -7,6 +7,17 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/context-ceiling.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/clear-session-ceiling.py\""
           }
         ]
       }
