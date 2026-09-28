@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER = os.path.join(HERE, "finalize-session")
@@ -170,12 +171,13 @@ fi
 # process of this fixture's own making to find. Re-exec rather than fork: the pid
 # is unchanged, so the pid already published above IS this claude - which is what
 # lets an assertion name the exact process the launcher was supposed to find. The
-# name is the whole of the fixture, because the launcher matches on program name;
-# everything below this hop proceeds as ordinary nest.
+# name is the whole of the fixture, because the launcher matches on argv0, and
+# `exec -a` is what puts a name of this fixture's choosing there - a script run
+# through its shebang is argv0 `/bin/bash` however it is symlinked. Everything
+# below this hop proceeds as ordinary nest.
 if [ "${NEST_CLAUDE_AT:-}" = "$depth" ]; then
   unset NEST_CLAUDE_AT
-  export NEST_SELF="$self"
-  exec "$NEST_AS_CLAUDE" "$depth" "$@"
+  exec -a "$NEST_AS_CLAUDE" /bin/bash "$self" "$depth" "$@"
 fi
 if [ "$depth" -gt 0 ]; then
   if [ "${NEST_REHOST_AT:-}" = "$depth" ]; then
@@ -240,6 +242,23 @@ esac
 """
 
 
+PS_FORGE_COMMAND = r"""#!/bin/bash
+# The real ps, except that the planted claude's command line reads as
+# $FIXTURE_FORGE_COMMAND. A daemon-hosted session is launched with a dozen flags
+# the fixture chain cannot carry in its own argv - `nest` owns every token after
+# argv0 - so the one read that asks what the pid was launched with is answered
+# with the shape the field reports. Only the `-o command= -p <pid>` form, and only
+# for that pid; the identity read and every ancestry hop pass through untouched.
+set -uo pipefail
+if [ "${1:-}" = "-o" ] && [ "${2:-}" = "command=" ] && [ "${3:-}" = "-p" ] \
+   && [ "${4:-}" = "$(cat "$FIXTURE_ROOT_PID")" ]; then
+  printf '%s\n' "$FIXTURE_FORGE_COMMAND"
+  exit 0
+fi
+exec /bin/ps "$@"
+"""
+
+
 PS_MUTE_IDENTITY = r"""#!/bin/bash
 # The real ps everywhere except the one query that asks what a pid is HOLDING:
 # `ps -o lstart=,command= -p <pid>` exits 0 and prints nothing, which is what a
@@ -275,41 +294,39 @@ FIXTURES = tempfile.mkdtemp(prefix="finalize-fixtures.")
 install(FIXTURES, "tmux", TMUX)
 install(FIXTURES, "claude", CLAUDE)
 NEST_BIN = install(FIXTURES, "nest", NEST)
-# `nest` under the one name the launcher's ancestry walk looks for. A symlink and
-# not a copy: there is one nest program, and a second copy of it that could drift
-# from the first is a bug waiting for someone to edit only one of them.
-AS_CLAUDE_DIR = os.path.join(FIXTURES, "as-claude")
-os.mkdir(AS_CLAUDE_DIR)
-NEST_AS_CLAUDE = os.path.join(AS_CLAUDE_DIR, "claude")
-os.symlink(NEST_BIN, NEST_AS_CLAUDE)
+# The argv0 the planted claude hop runs under. Names, not files: `exec -a` needs
+# nothing on disk, and the launcher reads only what ps reports. The first is the
+# one name the ancestry walk always looked for; the second is what a daemon-hosted
+# session actually runs as - `claude` on PATH is a symlink into the versioned
+# install and the daemon execs through the link's target, so the basename is a
+# version number and nothing in argv0 says `claude` except the directory.
+NEST_AS_CLAUDE = os.path.join(FIXTURES, "as-claude", "claude")
+NEST_AS_VERSIONED_CLAUDE = os.path.join(FIXTURES, "claude", "versions", "2.1.270")
 FORGE_DIR = os.path.join(FIXTURES, "forge")
 os.mkdir(FORGE_DIR)
 install(FORGE_DIR, "ps", PS_FORGING)
+FORGE_COMMAND_DIR = os.path.join(FIXTURES, "forge-command")
+os.mkdir(FORGE_COMMAND_DIR)
+install(FORGE_COMMAND_DIR, "ps", PS_FORGE_COMMAND)
 MUTE_DIR = os.path.join(FIXTURES, "mute")
 os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
 
-# The real ps, except that the SECOND `-o command=` read of any one pid fails.
+# The real ps, except that the `-o command=` read of the planted claude fails.
 #
-# The count is not a trick for want of a better key - it IS the condition. The
-# ancestry walk and the flags read ask byte-identical questions of the same pid
-# (`ps -o command= -p <pid>`, launcher lines 97 and 641/665), so no inspection of
-# argv can distinguish them, and the thing being modelled is precisely the gap
-# between them: the walk finds claude alive, and by the time the launcher reads
-# what that process was launched with, it is gone. Failing the second read of a
-# pid places the death exactly in that window and nowhere else.
+# The launcher used to read a found claude's command line twice - once to find it,
+# once to read its flags - and a process gone between the two reads relaunched
+# flagless. There is one read now, so the gap this used to place a death in no
+# longer exists; what is left to pin is that the one read failing is never read
+# as a claude launched with no flags. $FIXTURE_PS_MODE picks which failure,
+# because a process that has just exited has two and only one is visible to an
+# exit-status check: `status` is a nonzero exit, `empty` is exit 0 printing
+# nothing - a live pid whose argv the platform withholds.
 #
 # The identity read (`lstart=,command=`), the ancestry hops (`-o ppid=`) and the
 # whole-table walk (`-eo pid=,ppid=,etime=`) carry different field lists and pass
 # through untouched, the same selectivity discipline the muting ps above keeps.
-#
-# $FIXTURE_PS_MODE picks WHICH answer that second read gives, because a process
-# that has just exited has two of them and only one is visible to an exit-status
-# check: `status` is a nonzero exit, `empty` is exit 0 printing nothing - a live
-# pid whose argv the platform withholds, or a holder gone between the two reads.
-# One fixture rather than two that differ only in their last line; the mode is a
-# value the case passes, not a second copy of the counting.
-PS_SECOND_READ = r"""#!/bin/bash
+PS_ROOT_COMMAND = r"""#!/bin/bash
 set -uo pipefail
 fields=""; want=""; prev=""
 for arg in "$@"; do
@@ -317,20 +334,16 @@ for arg in "$@"; do
   [ "$prev" = "-p" ] && want="$arg"
   prev="$arg"
 done
-if [ "$fields" = "command=" ] && [ -n "$want" ]; then
-  seen="$FIXTURE_PS_SEEN/ps-$want"
-  if [ -e "$seen" ]; then
-    [ "${FIXTURE_PS_MODE:-status}" = "empty" ] && exit 0
-    echo "ps: no such process" >&2
-    exit 1
-  fi
-  : > "$seen"
+if [ "$fields" = "command=" ] && [ "$want" = "$(cat "$FIXTURE_ROOT_PID")" ]; then
+  [ "${FIXTURE_PS_MODE:-status}" = "empty" ] && exit 0
+  echo "ps: no such process" >&2
+  exit 1
 fi
 exec /bin/ps "$@"
 """
-PS_SECOND_READ_DIR = os.path.join(FIXTURES, "pssecondread")
-os.mkdir(PS_SECOND_READ_DIR)
-install(PS_SECOND_READ_DIR, "ps", PS_SECOND_READ)
+PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
+os.mkdir(PS_ROOT_COMMAND_DIR)
+install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
 
 # A `date` that removes a directory on its first call and then behaves normally.
 #
@@ -444,8 +457,9 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
-        log_mktemp_fails=False, cwd_gone=False, ps_second_read=None,
-        self_dir_gone=False):
+        log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
+        self_dir_gone=False, as_claude=None, claude_pid=None,
+        forge_command=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
@@ -463,16 +477,14 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         path.insert(0, FORGE_DIR)
     if mute_identity:
         path.insert(0, MUTE_DIR)
+    if forge_command is not None:
+        path.insert(0, FORGE_COMMAND_DIR)
     if log_mktemp_fails:
         path.insert(0, NO_LOGFILE_BIN)
-    # 'status' or 'empty' - which answer PS_SECOND_READ gives the second read of a
-    # pid; the fixture above says why a process that has just exited has both.
-    if ps_second_read is not None:
-        path.insert(0, PS_SECOND_READ_DIR)
-        # Per-case state, inside the workdir this case already tears down, so two
-        # cases can never see each other's counts.
-        env_ps_seen = os.path.join(workdir, "ps-seen")
-        os.mkdir(env_ps_seen)
+    # 'status' or 'empty' - which answer PS_ROOT_COMMAND gives for the planted
+    # claude; the fixture above says why a process that has just exited has both.
+    if ps_root_command is not None:
+        path.insert(0, PS_ROOT_COMMAND_DIR)
     # The launcher invoked through a directory of its own that the fixture `date`
     # deletes on its first call. A symlink, so what disappears is the path the
     # launcher resolves $0 through and never the file itself - bash holds the script
@@ -497,15 +509,20 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # over-the-bound chains) is refused for the same reason a claude hop that
         # was never planted would be, so nothing has to decide which cases need it.
         "NEST_CLAUDE_AT": str(depth),
-        "NEST_AS_CLAUDE": NEST_AS_CLAUDE,
+        "NEST_AS_CLAUDE": as_claude or NEST_AS_CLAUDE,
     }
-    if ps_second_read is not None:
-        env["FIXTURE_PS_SEEN"] = env_ps_seen
-        env["FIXTURE_PS_MODE"] = ps_second_read
+    # The pid Claude Code hands every tool call as $CLAUDE_PID. Absent by default,
+    # so the walk has to find the planted hop by ancestry alone.
+    if claude_pid is not None:
+        env["CLAUDE_PID"] = str(claude_pid)
+    if ps_root_command is not None:
+        env["FIXTURE_PS_MODE"] = ps_root_command
     if self_dir_gone:
         env["FIXTURE_RM_DIR"] = selfdir
     if forge_age is not None:
         env["FIXTURE_FORGE_AGE"] = forge_age
+    if forge_command is not None:
+        env["FIXTURE_FORGE_COMMAND"] = forge_command
     if panes is not None:
         env["FIXTURE_PANES"] = panes
     if rehost_at is not None:
@@ -723,37 +740,33 @@ check("a give-up with no guard of its own still exits 2 and names the preserved 
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(cwdgone_dir, ignore_errors=True)
 
-# The flags the successor is relaunched under. Nested as an argument, a failing
-# `ps` was discarded by the substitution wrapping it - the flag parser read an
-# empty string and succeeded - so a claude process that exited during the
-# close-out handed its successor no --model, no --permission-mode and no
+# The flags the successor is relaunched under. A failing `ps` used to be
+# discarded by the substitution wrapping it - the flag parser read an empty
+# string and succeeded - so a claude process that exited during the close-out
+# handed its successor no --model, no --permission-mode and no
 # --dangerously-skip-permissions, and reported that as a scheduled handoff at
 # exit 0. A successor silently running under different permissions than the
 # session it replaced is the failure this forbids, so the assertion is the
 # refusal and not merely a non-zero status.
 nocmd_dir = tempfile.mkdtemp(prefix="finalize-nocmd.")
-done = run(panes=None, handoff_dir=nocmd_dir, ps_second_read="status")
+done = run(panes=None, handoff_dir=nocmd_dir, ps_root_command="status")
 recorded = sorted(os.listdir(nocmd_dir))
 check("a claude whose command line cannot be read is refused, not relaunched flagless",
       done.returncode == REFUSED_RC and len(recorded) == 1
-      and "cannot read the command line" in done.stderr
+      and "cannot locate the claude process" in done.stderr
       and os.path.join(nocmd_dir, recorded[0]) in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(nocmd_dir, ignore_errors=True)
 
 # The same fact arriving as success. `ps` exiting 0 with nothing to say is not a
-# claude launched with no flags, and an exit-status check alone cannot tell those
-# apart - which is why the read goes through _process_command, holding the bar
-# _process_identity already holds for the same idiom.
-emptycmd_dir = tempfile.mkdtemp(prefix="finalize-emptycmd.")
-done = run(panes=None, handoff_dir=emptycmd_dir, ps_second_read="empty")
-recorded = sorted(os.listdir(emptycmd_dir))
-check("a claude whose command line reads back empty is refused, not read as flagless",
-      done.returncode == REFUSED_RC and len(recorded) == 1
-      and "cannot read the command line" in done.stderr
-      and os.path.join(emptycmd_dir, recorded[0]) in done.stderr,
-      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
-shutil.rmtree(emptycmd_dir, ignore_errors=True)
+# claude launched with no flags: a pid with no argv is no claude at all, walked
+# past like any other. What the walk meets above is the runner's ancestry - a
+# real claude on a developer's machine, nothing on CI - so the assertion is that
+# the planted pid was not the pick.
+done = run(panes=None, ps_root_command="empty")
+check("a claude whose command line reads back empty is not read as flagless",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The failure that reported success. Resolving the launcher's own path used to
 # concatenate two command substitutions in one assignment, and such an assignment
@@ -887,6 +900,166 @@ check("the launcher captures the old process's identity, not just its pid",
       any(line.startswith("[dry-run] old-process identity: ") and NEST_AS_CLAUDE in line
           for line in done.stdout.splitlines()),
       f"out={done.stdout!r}")
+
+
+def identity_names(done, name):
+    return any(line.startswith("[dry-run] old-process identity: ") and name in line
+               for line in done.stdout.splitlines())
+
+
+# The shape a daemon-hosted session really has (observed 2026-09-13, memento
+# 0.7.0): the process is `.../claude/versions/2.1.270 --session-id ...`, its
+# parent is the same binary as `--bg-pty-host`, and above that is pid 1. Matched
+# by basename, the walk climbs past both and reaches nothing; the naming assertion
+# is what stops a walk that climbs into an ambient claude from passing instead.
+done = run(panes=None, as_claude=NEST_AS_VERSIONED_CLAUDE)
+check("a claude running as the versioned binary path is found, not walked past",
+      picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout
+      and identity_names(done, NEST_AS_VERSIONED_CLAUDE),
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The versioned path is matched as argv0 and nowhere else. The daemon's own
+# `--bg-pty-host` process names that path as an ARGUMENT (`claude --bg-pty-host
+# <sock> -- .../claude/versions/2.1.283 --session-id ...`), and so would a shell
+# whose command text merely mentions the directory; a match on the whole line
+# accepts either as "the claude" and TERMs it - the host, and every session under
+# it. Planted at the top hop under a plain name, with the versioned path in its
+# argv: the launcher must walk past it. What it finds above is the runner's own
+# ancestry - a real claude on a developer's machine, nothing on CI - so the
+# assertion is that the planted pid was not the pick, not what the pick was.
+done = run(panes=None, as_claude=os.path.join(FIXTURES, "not-claude", "zsh"),
+           message=f"ls {NEST_AS_VERSIONED_CLAUDE}; handoff")
+check("a versioned claude path in the arguments, not argv0, is not a claude",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# Claude Code names the session's own pid to every tool call as $CLAUDE_PID, and
+# that named pid wins over anything ancestry would find: here the chain still
+# plants a claude at its top hop, and the launcher must relaunch as the named one
+# instead. A planted process rather than a stranger, because the walk has to match
+# it as a claude too - and it is not in this launcher's ancestry at all, so only
+# the environment can be how it was found. It lives in a session of its own so the
+# whole group can be torn down: nest runs its command as a child, and a terminated
+# nest would leave the sleep behind.
+NAMED_CLAUDE = subprocess.Popen(
+    [NEST_BIN, "0", "sleep", "600"],
+    env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+# The rename happens inside nest's own startup, after Popen returns; the launcher
+# reading argv0 before the `exec -a` lands would see `/bin/bash` and refuse for
+# a reason that is this case's timing, not the launcher's judgement.
+for _ in range(100):
+    if subprocess.run(["ps", "-o", "command=", "-p", str(NAMED_CLAUDE.pid)],
+                      capture_output=True, text=True).stdout.startswith(NEST_AS_CLAUDE + " "):
+        break
+    time.sleep(0.05)
+try:
+    done = run(panes=None, claude_pid=NAMED_CLAUDE.pid)
+    check("$CLAUDE_PID names the claude to relaunch ahead of the ancestry walk",
+          picked(done) == DETACHED and f"claude_pid={NAMED_CLAUDE.pid} " in done.stdout
+          and identity_names(done, NEST_AS_CLAUDE),
+          f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
+          f"out={done.stdout!r} err={done.stderr!r}")
+finally:
+    os.killpg(NAMED_CLAUDE.pid, 15)
+    NAMED_CLAUDE.wait()
+
+# A named pid that is not a claude is a refusal, not a place to start climbing
+# from. STRANGER's ancestry is this test runner's ancestry, which on a developer's
+# machine ends in a real claude session: a walk from the stranger finds that one
+# and the worker kills it. The chain still plants its own claude at the top hop,
+# and that one is not reachable either - the environment named a pid, and the
+# named pid is the whole of the answer.
+done = run(panes=None, claude_pid=STRANGER.pid)
+check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
+      done.returncode == NO_TRANSPORT_RC
+      and "cannot locate the claude process" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# A `--print` claude is an SDK bridge: headless, no input box, nothing a fresh
+# tmux window could stand in for. Relaunching it interactively and TERMing the
+# bridge severs whatever remote client was driving it. The shape is the live one
+# (pid 59899, 2026-09-27), forged onto the planted hop.
+done = run(panes=None, forge_command=(
+    "/x/claude/versions/2.1.283 --print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_1"
+    " --session-id cse_1 --input-format stream-json --model claude-opus-5-5"))
+check("a headless (--print) claude is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The daemon's pty host runs the same binary, and it is what the ancestry walk
+# meets next when it walks past a session it declined. TERMing the host takes
+# every session it hosts with it, so it is declined the same way: by its flags.
+# Both walks continue into the runner's ancestry - a real claude on a developer's
+# machine, nothing on CI - so the assertion is that the planted pid was not the
+# pick, not what the pick was.
+done = run(panes=None, forge_command=(
+    "/x/claude --bg-pty-host /tmp/cc-daemon/pty/a.sock 148 38 --"
+    " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions"))
+check("the daemon's --bg-pty-host process is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The headless test reads the flag region and nothing after it. A session born
+# from a prior handoff carries that handoff as its positional prompt, unquoted in
+# ps output, and a handoff can say `--print` in prose - this one does.
+done = run(panes=None, forge_command=(
+    "/x/claude --permission-mode plan the ceiling hook ignores --print sessions; run /next"))
+check("a prompt that mentions --print does not make the session headless",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The flags a daemon-hosted session is launched with, in the order the daemon
+# writes them: harness flags first, `--permission-mode` last. Every one before it
+# has to be consumed together with its value, or the value reads as the prompt
+# and the scan halts with nothing - the successor relaunched under no permission
+# mode, reported as delivered.
+DAEMON_ARGV = ("/x/claude/versions/2.1.283 --session-id a00eaf96 --fork-session"
+               " --resume /x/p.jsonl --allowed-tools mcp__a --allowed-tools mcp__b"
+               " --permission-mode bypassPermissions")
+done = run(panes=None, forge_command=DAEMON_ARGV)
+check("a daemon-hosted session's harness flags are consumed and its permission mode kept",
+      picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# Every flag claude takes is dropped with the values its arity says it has, so the
+# flag that matters is still reached. Before, `--allowed-tools Read Edit` consumed
+# one value and `Edit` halted the scan as the prompt - the flagless relaunch,
+# reported as delivered. The prompt here is a recap dense with dash tokens, as a
+# handoff flattened onto one line by ps is: none of them may be read as a flag.
+done = run(panes=None, forge_command=(
+    "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug api -w --effort high"
+    " --permission-mode plan === recap === - shipped --print support - fixed"
+    " --permission-mode handling - never --dangerously-skip-permissions"))
+check("variadic and boolean flags are dropped by arity and the scan halts at the prompt",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# A flag the table does not have: whether the token after it is its value or the
+# prompt is unknowable, and both guesses are wrong somewhere. It is refused with
+# the handoff on disk and the flag named, never relaunched under whichever flags
+# the guess left.
+done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
+check("an unknown claude flag is a refusal naming the flag, not a guess at the prompt",
+      done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
+      and "--frobnicate" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The daemon itself: a subcommand where a session's prompt would be. Walked past
+# like the pty host it spawns; the assertion is the same shape, for the same
+# ambient-claude reason.
+done = run(panes=None, forge_command="/x/claude daemon run")
+check("a claude subcommand (daemon run) is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# $CLAUDE_PID holding something that is not a pid at all is a refusal in the
+# launcher's own voice, not the shell's `integer expression expected` diagnostic.
+done = run(panes=None, claude_pid="abc")
+check("a non-numeric $CLAUDE_PID is refused cleanly",
+      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr
+      and "integer expression" not in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An identity read that SUCCEEDS and says nothing. `ps` exits 0 with empty output
 # for a pid whose holder exited between the ancestry lookup and the query, so the

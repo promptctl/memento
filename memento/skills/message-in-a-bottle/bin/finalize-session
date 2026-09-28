@@ -87,16 +87,49 @@ _clear_box() {
   sleep 0.3
 }
 
-# Walk the process ancestry from the launcher's parent up to the interactive
-# `claude` process — the one to kill and relaunch. Matched by program name so it
-# survives whatever flags the user launched with.
-_find_claude_pid() {
-  local pid="${PPID}" cmd i
-  for i in 1 2 3 4 5 6 7 8; do
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+# Walk the process ancestry up to the interactive `claude` process — the one to
+# kill and relaunch. Matched by program name so it survives whatever flags the
+# user launched with.
+#
+# [LAW:one-source-of-truth] Claude Code exports the pid of the session running
+# this tool call as $CLAUDE_PID. When it is set there is nothing to walk: that pid
+# is the answer or there is no answer, so the walk is one hop long and a named
+# pid that is not a claude is a refusal, never a starting point for climbing
+# somebody else's ancestry. Only a launcher no session named a pid for — a hook,
+# a shell — walks up from its own parent. Naming the process by the environment
+# rather than by luck of the ancestry is what makes a background (daemon-hosted)
+# session an ordinary session here.
+#
+# The match is on argv0 alone. A `claude` on PATH is a symlink into the versioned
+# install, and a process the daemon spawns is exec'd through that link's TARGET,
+# so its argv0 is `.../claude/versions/2.1.270` — a basename that is a version
+# number, not `claude`. Matching the versioned path is the same match as matching
+# the name; both spell "the claude binary". Matching the rest of the command line
+# is not: the daemon's own `--bg-pty-host` process names that path as an ARGUMENT,
+# and killing the host takes every session it hosts with it.
+#
+# The binary alone does not make a session. The same binary is also the daemon's
+# `--bg-pty-host` (kill it and every session it hosts dies), the headless `--print`
+# SDK bridge (no input box, nothing a fresh window could stand in for) and every
+# subcommand (`claude daemon run`, `claude mcp serve`). Which of those a claude is
+# can only be read from its argv, and _claude_flags is the one reader of that
+# region [LAW:single-enforcer]: a claude it declines is walked past like any
+# non-claude process, and refused when it is the named pid.
+#
+# Prints the pid and, on the next line, the command line it was judged by. One
+# read: the pid, the argv the flags are parsed from and the argv this decision
+# was made on are the same bytes, so there is no second read for the process to
+# vanish or be reissued between. [LAW:one-source-of-truth]
+_find_claude_session() {
+  local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i rc
+  for ((i = 0; i < ${hops:-8}; i++)); do
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    case "$cmd" in
-      claude|claude\ *|*/claude|*/claude\ *) printf '%s' "$pid"; return 0 ;;
+    case "${cmd%% *}" in
+      claude|*/claude|*/claude/versions/*)
+        rc=0; _claude_flags "$cmd" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
@@ -123,22 +156,6 @@ _process_identity() {
   local pid="${1:-}" raw
   [ -n "$pid" ] || return 1
   raw=$(ps -o lstart=,command= -p "$pid" 2>/dev/null) || return 1
-  [ -n "$raw" ] || return 1
-  printf '%s' "$raw"
-}
-
-# What a pid was launched with, under the same bar `_process_identity` holds for
-# the same `ps -p` idiom: empty output is a failure to read the command line, never
-# a command line of its own. A `ps` that exits 0 printing nothing — a pid whose
-# holder left, a platform withholding another process's argv — would otherwise read
-# as "launched with no flags", and the successor would be relaunched without the
-# --model and --permission-mode the session it replaces was running under.
-# [LAW:single-enforcer] both transports read flags through here, so the invariant
-# is stated once rather than at each of them.
-_process_command() {
-  local pid="${1:-}" raw
-  [ -n "$pid" ] || return 1
-  raw=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
   [ -n "$raw" ] || return 1
   printf '%s' "$raw"
 }
@@ -316,8 +333,8 @@ _pane_target() {
 
 # The flags claude was launched with, reduced to a safe whitelist: permission
 # mode, model, and the skip-permissions toggles — the ones that make the fresh
-# session match the user's setup. Everything else is dropped, and scanning STOPS
-# at the first positional argument.
+# session match the user's setup. Every other flag claude takes is dropped with
+# its values, and scanning STOPS at the first positional argument.
 #
 # [LAW:types-are-the-program] this is load-bearing, not defensive. message-in-a-
 # bottle hands the message off as a positional PROMPT (iTerm2 relaunch does
@@ -325,8 +342,30 @@ _pane_target() {
 # handoff carries a giant multi-word prompt in its own argv. The old "keep every
 # token that isn't argv0/resume" logic then splices that entire prompt into the
 # next relaunch's flag string, corrupting it. Whitelisting and halting at the
-# first positional makes that impossible by construction. [LAW:no-silent-failure]
-# we would rather drop an exotic flag than smuggle a prompt into the flags.
+# first positional makes that impossible by construction.
+#
+# A dropped flag is dropped WITH its values, or a value reads as the first
+# positional and the scan halts there: a daemon-hosted session is launched as
+# `--session-id <id> --fork-session --resume <path> --allowed-tools <t> ...
+# --permission-mode <m>`, and halting at `--session-id` relaunched every such
+# session under no permission mode, reported as delivered. So every flag claude
+# takes is listed with its arity — boolean, one value, or as many values as
+# follow up to the next flag, which is how claude's own parser reads a variadic,
+# so a real argv never has the prompt right after one without a `--` between.
+# [LAW:no-silent-failure] a flag NOT on the list is a failure to read the flags,
+# returned as 1 with the flag named on stderr: whether the token after it is its
+# value or the prompt is exactly what is unknown, and a guess either way is the
+# silent flagless relaunch above. Extending the table is the fix, and the refusal
+# names the entry to add.
+#
+# Some argv say the process is not a session at all: `--print`/`-p` is the
+# headless SDK bridge, `--bg-pty-host`/`--bg-spare` is the daemon's host, and a
+# subcommand word where the prompt would be (`claude daemon run`) is not a
+# session either. Those return 2 — the caller's question was "what would I
+# relaunch this as", and the answer is "nothing". Read only in the flag region, so
+# a handoff prompt that happens to contain the word `--print` is never mistaken
+# for the flag. [LAW:parse-dont-validate] exception: a prompt whose first word is
+# a subcommand name is indistinguishable from the subcommand in ps output.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks
@@ -344,12 +383,26 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         out+="${out:+ }$tok"; i=$((i+1)) ;;
-      -c|--continue|--resume=*)
+      -p|--print|--bg-pty-host|--bg-spare)
+        return 2 ;;
+      # boolean (`claude --help`, 2.1.283)
+      -c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
         i=$((i+1)) ;;
-      -r|--resume)
-        # resume's value is optional; drop it only when the next token isn't a flag
-        if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then i=$((i+2))
-        else i=$((i+1)); fi ;;
+      # one value
+      --session-id|--sdk-url|--input-format|--output-format|--settings|--setting-sources|--agent|--agents|--effort|-n|--name|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--system-prompt-snapshot|--autocompact|--client-data-url|--debug-file|--environment|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema|--permission-prompts|--remote-control-session-name-prefix)
+        i=$((i+2)) ;;
+      # as many values as follow, up to the next flag — which is also how an
+      # optional value (`--debug [filter]`, `-w [name]`) reads
+      -r|--resume|-d|--debug|-w|--worktree|--cloud|--from-pr|--prompt-suggestions|--remote-control|--teleport|--add-dir|--allowed-tools|--allowedTools|--disallowed-tools|--disallowedTools|--tools|--mcp-config|--betas|--file|--plugin-dir|--plugin-url)
+        i=$((i+1))
+        while [ "$i" -lt "$n" ] && [ "${toks[$i]#-}" = "${toks[$i]}" ]; do i=$((i+1)); done ;;
+      --)
+        break ;;
+      -*)
+        echo "unknown claude flag '$tok': add it to _claude_flags with its arity" >&2
+        return 1 ;;
+      daemon|mcp|update|doctor|config|plugin|install|auth|login|logout|setup-token|agents|remote-control|bg-pty-host|migrate-installer)
+        return 2 ;;
       *)
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
@@ -629,16 +682,14 @@ case "$MODE" in
     elif [[ "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
-      CLAUDE_PID=$(_find_claude_pid) \
+      FOUND=$(_find_claude_session) \
         || _refuse "iTerm2 transport: cannot locate the claude process to relaunch"
-      # [LAW:no-silent-failure] nested as an argument, a failing `ps` was discarded
-      # by the substitution that wrapped it: _claude_flags read "" and succeeded, so
-      # a claude process that exited during the close-out relaunched its successor
-      # with no --model, no --permission-mode and no --dangerously-skip-permissions
-      # — a different session than the one it replaced, reported as success.
-      CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
-        || _refuse "iTerm2 transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD")
+      CLAUDE_PID=${FOUND%%$'\n'*}
+      CLAUDE_CMD=${FOUND#*$'\n'}
+      # [LAW:no-silent-failure] a flag the parser cannot place is a refusal, not a
+      # successor relaunched under whatever flags a guess left it.
+      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
+        || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: claude ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\""
@@ -658,11 +709,12 @@ case "$MODE" in
       # [LAW:one-source-of-truth] the process to relaunch as, and the flags it
       # carries, are found the same way the iTerm2 transport finds them — one
       # function, reused, not a second copy of the same lookup.
-      CLAUDE_PID=$(_find_claude_pid) \
+      FOUND=$(_find_claude_session) \
         || _refuse "detached transport: cannot locate the claude process to relaunch"
-      CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
-        || _refuse "detached transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD")
+      CLAUDE_PID=${FOUND%%$'\n'*}
+      CLAUDE_CMD=${FOUND#*$'\n'}
+      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
+        || _refuse "detached transport: cannot read the flags of claude process $CLAUDE_PID"
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
       # the pid is, and travels with it as data. The worker re-reads it and compares
       # rather than re-deriving what "the old claude" means at kill time — by then
