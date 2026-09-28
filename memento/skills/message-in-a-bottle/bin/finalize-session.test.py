@@ -1028,7 +1028,7 @@ check("a daemon-hosted session's harness flags are consumed and its permission m
 # reported as delivered. The prompt here is a recap dense with dash tokens, as a
 # handoff flattened onto one line by ps is: none of them may be read as a flag.
 done = run(panes=None, forge_command=(
-    "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug --effort high"
+    "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug api -w --effort high"
     " --permission-mode plan === recap === - shipped --print support - fixed"
     " --permission-mode handling - never --dangerously-skip-permissions"))
 check("variadic and boolean flags are dropped by arity and the scan halts at the prompt",

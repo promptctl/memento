@@ -386,13 +386,14 @@ _claude_flags() {
       -p|--print|--bg-pty-host|--bg-spare)
         return 2 ;;
       # boolean
-      -c|--continue|--fork-session|--debug|-d|--ide|--chrome|--no-chrome|--bare|--mcp-debug|--strict-mcp-config|--replay-user-messages|--include-partial-messages|-v|--version|-h|--help|--*=*)
+      -c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--mcp-debug|--strict-mcp-config|--replay-user-messages|--include-partial-messages|-v|--version|-h|--help|--*=*)
         i=$((i+1)) ;;
       # one value
-      --session-id|--sdk-url|--input-format|--output-format|--settings|--agent|--effort|--name|-w|--worktree|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema)
+      --session-id|--sdk-url|--input-format|--output-format|--settings|--agent|--effort|--name|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema)
         i=$((i+2)) ;;
-      # as many values as follow, up to the next flag
-      -r|--resume|--add-dir|--allowed-tools|--allowedTools|--disallowed-tools|--disallowedTools|--tools|--mcp-config|--betas|--plugin-dir)
+      # as many values as follow, up to the next flag — which is also how an
+      # optional value (`--debug [filter]`, `-w [name]`) reads
+      -r|-d|--debug|-w|--worktree|--resume|--add-dir|--allowed-tools|--allowedTools|--disallowed-tools|--disallowedTools|--tools|--mcp-config|--betas|--plugin-dir)
         i=$((i+1))
         while [ "$i" -lt "$n" ] && [ "${toks[$i]#-}" = "${toks[$i]}" ]; do i=$((i+1)); done ;;
       --)
