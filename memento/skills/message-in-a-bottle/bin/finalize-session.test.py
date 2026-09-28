@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER = os.path.join(HERE, "finalize-session")
@@ -311,27 +312,21 @@ MUTE_DIR = os.path.join(FIXTURES, "mute")
 os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
 
-# The real ps, except that the SECOND `-o command=` read of any one pid fails.
+# The real ps, except that the `-o command=` read of the planted claude fails.
 #
-# The count is not a trick for want of a better key - it IS the condition. The
-# ancestry walk and the flags read ask byte-identical questions of the same pid
-# (`ps -o command= -p <pid>`, launcher lines 97 and 641/665), so no inspection of
-# argv can distinguish them, and the thing being modelled is precisely the gap
-# between them: the walk finds claude alive, and by the time the launcher reads
-# what that process was launched with, it is gone. Failing the second read of a
-# pid places the death exactly in that window and nowhere else.
+# The launcher used to read a found claude's command line twice - once to find it,
+# once to read its flags - and a process gone between the two reads relaunched
+# flagless. There is one read now, so the gap this used to place a death in no
+# longer exists; what is left to pin is that the one read failing is never read
+# as a claude launched with no flags. $FIXTURE_PS_MODE picks which failure,
+# because a process that has just exited has two and only one is visible to an
+# exit-status check: `status` is a nonzero exit, `empty` is exit 0 printing
+# nothing - a live pid whose argv the platform withholds.
 #
 # The identity read (`lstart=,command=`), the ancestry hops (`-o ppid=`) and the
 # whole-table walk (`-eo pid=,ppid=,etime=`) carry different field lists and pass
 # through untouched, the same selectivity discipline the muting ps above keeps.
-#
-# $FIXTURE_PS_MODE picks WHICH answer that second read gives, because a process
-# that has just exited has two of them and only one is visible to an exit-status
-# check: `status` is a nonzero exit, `empty` is exit 0 printing nothing - a live
-# pid whose argv the platform withholds, or a holder gone between the two reads.
-# One fixture rather than two that differ only in their last line; the mode is a
-# value the case passes, not a second copy of the counting.
-PS_SECOND_READ = r"""#!/bin/bash
+PS_ROOT_COMMAND = r"""#!/bin/bash
 set -uo pipefail
 fields=""; want=""; prev=""
 for arg in "$@"; do
@@ -339,20 +334,16 @@ for arg in "$@"; do
   [ "$prev" = "-p" ] && want="$arg"
   prev="$arg"
 done
-if [ "$fields" = "command=" ] && [ -n "$want" ]; then
-  seen="$FIXTURE_PS_SEEN/ps-$want"
-  if [ -e "$seen" ]; then
-    [ "${FIXTURE_PS_MODE:-status}" = "empty" ] && exit 0
-    echo "ps: no such process" >&2
-    exit 1
-  fi
-  : > "$seen"
+if [ "$fields" = "command=" ] && [ "$want" = "$(cat "$FIXTURE_ROOT_PID")" ]; then
+  [ "${FIXTURE_PS_MODE:-status}" = "empty" ] && exit 0
+  echo "ps: no such process" >&2
+  exit 1
 fi
 exec /bin/ps "$@"
 """
-PS_SECOND_READ_DIR = os.path.join(FIXTURES, "pssecondread")
-os.mkdir(PS_SECOND_READ_DIR)
-install(PS_SECOND_READ_DIR, "ps", PS_SECOND_READ)
+PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
+os.mkdir(PS_ROOT_COMMAND_DIR)
+install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
 
 # A `date` that removes a directory on its first call and then behaves normally.
 #
@@ -466,7 +457,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
-        log_mktemp_fails=False, cwd_gone=False, ps_second_read=None,
+        log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
         self_dir_gone=False, as_claude=None, claude_pid=None,
         forge_command=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
@@ -490,14 +481,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         path.insert(0, FORGE_COMMAND_DIR)
     if log_mktemp_fails:
         path.insert(0, NO_LOGFILE_BIN)
-    # 'status' or 'empty' - which answer PS_SECOND_READ gives the second read of a
-    # pid; the fixture above says why a process that has just exited has both.
-    if ps_second_read is not None:
-        path.insert(0, PS_SECOND_READ_DIR)
-        # Per-case state, inside the workdir this case already tears down, so two
-        # cases can never see each other's counts.
-        env_ps_seen = os.path.join(workdir, "ps-seen")
-        os.mkdir(env_ps_seen)
+    # 'status' or 'empty' - which answer PS_ROOT_COMMAND gives for the planted
+    # claude; the fixture above says why a process that has just exited has both.
+    if ps_root_command is not None:
+        path.insert(0, PS_ROOT_COMMAND_DIR)
     # The launcher invoked through a directory of its own that the fixture `date`
     # deletes on its first call. A symlink, so what disappears is the path the
     # launcher resolves $0 through and never the file itself - bash holds the script
@@ -528,9 +515,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # so the walk has to find the planted hop by ancestry alone.
     if claude_pid is not None:
         env["CLAUDE_PID"] = str(claude_pid)
-    if ps_second_read is not None:
-        env["FIXTURE_PS_SEEN"] = env_ps_seen
-        env["FIXTURE_PS_MODE"] = ps_second_read
+    if ps_root_command is not None:
+        env["FIXTURE_PS_MODE"] = ps_root_command
     if self_dir_gone:
         env["FIXTURE_RM_DIR"] = selfdir
     if forge_age is not None:
@@ -754,37 +740,33 @@ check("a give-up with no guard of its own still exits 2 and names the preserved 
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(cwdgone_dir, ignore_errors=True)
 
-# The flags the successor is relaunched under. Nested as an argument, a failing
-# `ps` was discarded by the substitution wrapping it - the flag parser read an
-# empty string and succeeded - so a claude process that exited during the
-# close-out handed its successor no --model, no --permission-mode and no
+# The flags the successor is relaunched under. A failing `ps` used to be
+# discarded by the substitution wrapping it - the flag parser read an empty
+# string and succeeded - so a claude process that exited during the close-out
+# handed its successor no --model, no --permission-mode and no
 # --dangerously-skip-permissions, and reported that as a scheduled handoff at
 # exit 0. A successor silently running under different permissions than the
 # session it replaced is the failure this forbids, so the assertion is the
 # refusal and not merely a non-zero status.
 nocmd_dir = tempfile.mkdtemp(prefix="finalize-nocmd.")
-done = run(panes=None, handoff_dir=nocmd_dir, ps_second_read="status")
+done = run(panes=None, handoff_dir=nocmd_dir, ps_root_command="status")
 recorded = sorted(os.listdir(nocmd_dir))
 check("a claude whose command line cannot be read is refused, not relaunched flagless",
       done.returncode == REFUSED_RC and len(recorded) == 1
-      and "cannot read the command line" in done.stderr
+      and "cannot locate the claude process" in done.stderr
       and os.path.join(nocmd_dir, recorded[0]) in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(nocmd_dir, ignore_errors=True)
 
 # The same fact arriving as success. `ps` exiting 0 with nothing to say is not a
-# claude launched with no flags, and an exit-status check alone cannot tell those
-# apart - which is why the read goes through _process_command, holding the bar
-# _process_identity already holds for the same idiom.
-emptycmd_dir = tempfile.mkdtemp(prefix="finalize-emptycmd.")
-done = run(panes=None, handoff_dir=emptycmd_dir, ps_second_read="empty")
-recorded = sorted(os.listdir(emptycmd_dir))
-check("a claude whose command line reads back empty is refused, not read as flagless",
-      done.returncode == REFUSED_RC and len(recorded) == 1
-      and "cannot read the command line" in done.stderr
-      and os.path.join(emptycmd_dir, recorded[0]) in done.stderr,
-      f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
-shutil.rmtree(emptycmd_dir, ignore_errors=True)
+# claude launched with no flags: a pid with no argv is no claude at all, walked
+# past like any other. What the walk meets above is the runner's ancestry - a
+# real claude on a developer's machine, nothing on CI - so the assertion is that
+# the planted pid was not the pick.
+done = run(panes=None, ps_root_command="empty")
+check("a claude whose command line reads back empty is not read as flagless",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The failure that reported success. Resolving the launcher's own path used to
 # concatenate two command substitutions in one assignment, and such an assignment
@@ -963,6 +945,14 @@ NAMED_CLAUDE = subprocess.Popen(
     [NEST_BIN, "0", "sleep", "600"],
     env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+# The rename happens inside nest's own startup, after Popen returns; the launcher
+# reading argv0 before the `exec -a` lands would see `/bin/bash` and refuse for
+# a reason that is this case's timing, not the launcher's judgement.
+for _ in range(100):
+    if subprocess.run(["ps", "-o", "command=", "-p", str(NAMED_CLAUDE.pid)],
+                      capture_output=True, text=True).stdout.startswith(NEST_AS_CLAUDE + " "):
+        break
+    time.sleep(0.05)
 try:
     done = run(panes=None, claude_pid=NAMED_CLAUDE.pid)
     check("$CLAUDE_PID names the claude to relaunch ahead of the ancestry walk",
@@ -1032,15 +1022,43 @@ check("a daemon-hosted session's harness flags are consumed and its permission m
       picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# Flags the parser has never seen, and variadic ones it has: each is dropped with
-# every value up to the next flag, so the flag that matters is still reached.
-# Before, `--allowed-tools Read Edit` consumed one value and `Edit` halted the
-# scan as the prompt - the flagless relaunch, reported as delivered.
+# Every flag claude takes is dropped with the values its arity says it has, so the
+# flag that matters is still reached. Before, `--allowed-tools Read Edit` consumed
+# one value and `Edit` halted the scan as the prompt - the flagless relaunch,
+# reported as delivered. The prompt here is a recap dense with dash tokens, as a
+# handoff flattened onto one line by ps is: none of them may be read as a flag.
 done = run(panes=None, forge_command=(
-    "/x/claude --frobnicate maybe so --add-dir /a /b --allowed-tools Read Edit"
-    " --debug --permission-mode plan --effort high the prompt"))
-check("unknown and variadic flags are dropped with their values, not read as the prompt",
+    "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug --effort high"
+    " --permission-mode plan === recap === - shipped --print support - fixed"
+    " --permission-mode handling - never --dangerously-skip-permissions"))
+check("variadic and boolean flags are dropped by arity and the scan halts at the prompt",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# A flag the table does not have: whether the token after it is its value or the
+# prompt is unknowable, and both guesses are wrong somewhere. It is refused with
+# the handoff on disk and the flag named, never relaunched under whichever flags
+# the guess left.
+done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
+check("an unknown claude flag is a refusal naming the flag, not a guess at the prompt",
+      done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
+      and "--frobnicate" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The daemon itself: a subcommand where a session's prompt would be. Walked past
+# like the pty host it spawns; the assertion is the same shape, for the same
+# ambient-claude reason.
+done = run(panes=None, forge_command="/x/claude daemon run")
+check("a claude subcommand (daemon run) is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# $CLAUDE_PID holding something that is not a pid at all is a refusal in the
+# launcher's own voice, not the shell's `integer expression expected` diagnostic.
+done = run(panes=None, claude_pid="abc")
+check("a non-numeric $CLAUDE_PID is refused cleanly",
+      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr
+      and "integer expression" not in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An identity read that SUCCEEDS and says nothing. `ps` exits 0 with empty output
