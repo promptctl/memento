@@ -988,22 +988,36 @@ check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
 
 # A `--print` claude is an SDK bridge: headless, no input box, nothing a fresh
 # tmux window could stand in for. Relaunching it interactively and TERMing the
-# bridge severs whatever remote client was driving it. `sh -c` reads its script
-# from the first argument, so the trailing `--print` is $0 - an argument the
-# process carries and ignores, exactly where a real bridge carries it.
-HEADLESS_CLAUDE = subprocess.Popen(
-    [NEST_BIN, "0", "sh", "-c", "sleep 600", "--print"],
-    env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_VERSIONED_CLAUDE},
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-try:
-    done = run(panes=None, claude_pid=HEADLESS_CLAUDE.pid)
-    check("a headless (--print) claude named by $CLAUDE_PID is refused, not relaunched",
-          done.returncode == NO_TRANSPORT_RC
-          and "cannot locate the claude process" in done.stderr,
-          f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-finally:
-    os.killpg(HEADLESS_CLAUDE.pid, 15)
-    HEADLESS_CLAUDE.wait()
+# bridge severs whatever remote client was driving it. The shape is the live one
+# (pid 59899, 2026-09-27), forged onto the planted hop.
+done = run(panes=None, forge_command=(
+    "/x/claude/versions/2.1.283 --print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_1"
+    " --session-id cse_1 --input-format stream-json --model claude-opus-5-5"))
+check("a headless (--print) claude is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The daemon's pty host runs the same binary, and it is what the ancestry walk
+# meets next when it walks past a session it declined. TERMing the host takes
+# every session it hosts with it, so it is declined the same way: by its flags.
+# Both walks continue into the runner's ancestry - a real claude on a developer's
+# machine, nothing on CI - so the assertion is that the planted pid was not the
+# pick, not what the pick was.
+done = run(panes=None, forge_command=(
+    "/x/claude --bg-pty-host /tmp/cc-daemon/pty/a.sock 148 38 --"
+    " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions"))
+check("the daemon's --bg-pty-host process is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The headless test reads the flag region and nothing after it. A session born
+# from a prior handoff carries that handoff as its positional prompt, unquoted in
+# ps output, and a handoff can say `--print` in prose - this one does.
+done = run(panes=None, forge_command=(
+    "/x/claude --permission-mode plan the ceiling hook ignores --print sessions; run /next"))
+check("a prompt that mentions --print does not make the session headless",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The flags a daemon-hosted session is launched with, in the order the daemon
 # writes them: harness flags first, `--permission-mode` last. Every one before it
@@ -1018,12 +1032,15 @@ check("a daemon-hosted session's harness flags are consumed and its permission m
       picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A flag the parser has never seen: whether the token after it is its value or
-# the prompt is unknowable, and both guesses are wrong somewhere. It is refused
-# with the handoff on disk, never relaunched under whichever flags the guess left.
-done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
-check("an unknown claude flag is a refusal, not a guess at where the prompt starts",
-      done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr,
+# Flags the parser has never seen, and variadic ones it has: each is dropped with
+# every value up to the next flag, so the flag that matters is still reached.
+# Before, `--allowed-tools Read Edit` consumed one value and `Edit` halted the
+# scan as the prompt - the flagless relaunch, reported as delivered.
+done = run(panes=None, forge_command=(
+    "/x/claude --frobnicate maybe so --add-dir /a /b --allowed-tools Read Edit"
+    " --debug --permission-mode plan --effort high the prompt"))
+check("unknown and variadic flags are dropped with their values, not read as the prompt",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An identity read that SUCCEEDS and says nothing. `ps` exits 0 with empty output

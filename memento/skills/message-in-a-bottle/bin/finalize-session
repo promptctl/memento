@@ -108,19 +108,20 @@ _clear_box() {
 # is not: the daemon's own `--bg-pty-host` process names that path as an ARGUMENT,
 # and killing the host takes every session it hosts with it.
 #
-# A `--print` claude is headless — an SDK bridge with no input box and no terminal
-# — so it is not a session this transport can relaunch; it is walked past like any
-# other non-claude process, and refused when it is the named pid.
+# The binary alone does not make a session. The same binary is also the daemon's
+# `--bg-pty-host` (kill it and every session it hosts dies) and the headless
+# `--print` SDK bridge (no input box, nothing a fresh window could stand in for).
+# Which of those a claude is can only be read from its flags, and _claude_flags is
+# the one reader of that region [LAW:single-enforcer]: a claude it declines is
+# walked past like any non-claude process, and refused when it is the named pid.
 _find_claude_pid() {
   local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i
   for ((i = 0; i < ${hops:-8}; i++)); do
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    case "$cmd" in
-      *\ --print|*\ --print\ *) ;;
-      *) case "${cmd%% *}" in
-           claude|*/claude|*/claude/versions/*) printf '%s' "$pid"; return 0 ;;
-         esac ;;
+    case "${cmd%% *}" in
+      claude|*/claude|*/claude/versions/*)
+        _claude_flags "$cmd" >/dev/null && { printf '%s' "$pid"; return 0; } ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
@@ -352,16 +353,22 @@ _pane_target() {
 # first positional makes that impossible by construction. [LAW:no-silent-failure]
 # we would rather drop an exotic flag than smuggle a prompt into the flags.
 #
-# Every flag is one of three things: propagated, dropped, or unknown — and a
-# dropped flag has to be dropped WITH its value, or the value reads as the first
-# positional and the scan halts there. A daemon-hosted session is launched as
+# A dropped flag is dropped WITH its values, or a value reads as the first
+# positional and the scan halts there: a daemon-hosted session is launched as
 # `--session-id <id> --fork-session --resume <path> --allowed-tools <t> ...
-# --permission-mode <m>`, so halting at `--session-id` relaunched every such
-# session with no permission mode at all and reported that as a delivery.
-# [LAW:no-silent-failure] an unknown flag is a failure to read the flags, not a
-# flag to skip: whether the token after it is its value or the prompt is exactly
-# what we do not know, and guessing either way is the silent flagless relaunch
-# this function exists to prevent. The caller refuses; the handoff is on disk.
+# --permission-mode <m>`, and halting at `--session-id` relaunched every such
+# session under no permission mode, reported as delivered. How many values a
+# dropped flag takes never has to be known: everything up to the next `-` token
+# goes with it. That over-eats only when the flag is the last one and the prompt
+# follows, and the prompt is where the scan was going to stop anyway — so the
+# rule is one rule for every flag, boolean, unary or variadic, known or not.
+# [LAW:dataflow-not-control-flow]
+#
+# Some flags say the process is not a session at all: `--print`/`-p` is the
+# headless SDK bridge and `--bg-pty-host`/`--bg-spare` is the daemon's host. Those
+# return 2 — the caller's question was "what would I relaunch this as", and the
+# answer is "nothing". Read only in the flag region, so a handoff prompt that
+# happens to contain the word `--print` is never mistaken for the flag.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks
@@ -379,17 +386,11 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         out+="${out:+ }$tok"; i=$((i+1)) ;;
-      -c|--continue|--fork-session|--resume=*|--session-id=*|--allowed-tools=*|--disallowed-tools=*)
-        i=$((i+1)) ;;
-      --session-id|--allowed-tools|--disallowed-tools)
-        i=$((i+2)) ;;
-      -r|--resume)
-        # resume's value is optional; drop it only when the next token isn't a flag
-        if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then i=$((i+2))
-        else i=$((i+1)); fi ;;
+      -p|--print|--bg-pty-host|--bg-spare)
+        return 2 ;;
       -*)
-        echo "unknown claude flag '$tok'; cannot tell its value from the prompt" >&2
-        return 1 ;;
+        i=$((i+1))
+        while [ "$i" -lt "$n" ] && [ "${toks[$i]#-}" = "${toks[$i]}" ]; do i=$((i+1)); done ;;
       *)
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
@@ -678,8 +679,7 @@ case "$MODE" in
       # — a different session than the one it replaced, reported as success.
       CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "iTerm2 transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
-        || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
+      FLAGS=$(_claude_flags "$CLAUDE_CMD")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: claude ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\""
@@ -703,8 +703,7 @@ case "$MODE" in
         || _refuse "detached transport: cannot locate the claude process to relaunch"
       CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "detached transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
-        || _refuse "detached transport: cannot read the flags of claude process $CLAUDE_PID"
+      FLAGS=$(_claude_flags "$CLAUDE_CMD")
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
       # the pid is, and travels with it as data. The worker re-reads it and compares
       # rather than re-deriving what "the old claude" means at kill time — by then
