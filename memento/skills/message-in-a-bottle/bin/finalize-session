@@ -87,16 +87,29 @@ _clear_box() {
   sleep 0.3
 }
 
-# Walk the process ancestry from the launcher's parent up to the interactive
-# `claude` process — the one to kill and relaunch. Matched by program name so it
-# survives whatever flags the user launched with.
+# Walk the process ancestry up to the interactive `claude` process — the one to
+# kill and relaunch. Matched by program name so it survives whatever flags the
+# user launched with.
+#
+# [LAW:one-source-of-truth] Claude Code exports the pid of the session running
+# this tool call as $CLAUDE_PID, so that is where the walk starts; the launcher's
+# own parent is only the starting point when no session said which pid it is.
+# Starting from the harness's own answer rather than re-deriving it is what makes
+# a background (daemon-hosted) session an ordinary session here: the process is
+# named by the environment, not found by luck of the ancestry.
+#
+# A `claude` on PATH is a symlink into the versioned install, and a process the
+# daemon spawns is exec'd through that link's TARGET, so its command line is
+# `.../claude/versions/2.1.270 --session-id ...` — a basename that is a version
+# number, not `claude`. Matching the versioned path is the same match as matching
+# the name; both spell "the claude binary".
 _find_claude_pid() {
-  local pid="${PPID}" cmd i
+  local pid="${CLAUDE_PID:-$PPID}" cmd i
   for i in 1 2 3 4 5 6 7 8; do
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
     case "$cmd" in
-      claude|claude\ *|*/claude|*/claude\ *) printf '%s' "$pid"; return 0 ;;
+      claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) printf '%s' "$pid"; return 0 ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
