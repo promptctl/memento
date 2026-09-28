@@ -92,24 +92,35 @@ _clear_box() {
 # user launched with.
 #
 # [LAW:one-source-of-truth] Claude Code exports the pid of the session running
-# this tool call as $CLAUDE_PID, so that is where the walk starts; the launcher's
-# own parent is only the starting point when no session said which pid it is.
-# Starting from the harness's own answer rather than re-deriving it is what makes
-# a background (daemon-hosted) session an ordinary session here: the process is
-# named by the environment, not found by luck of the ancestry.
+# this tool call as $CLAUDE_PID. When it is set there is nothing to walk: that pid
+# is the answer or there is no answer, so the walk is one hop long and a named
+# pid that is not a claude is a refusal, never a starting point for climbing
+# somebody else's ancestry. Only a launcher no session named a pid for — a hook,
+# a shell — walks up from its own parent. Naming the process by the environment
+# rather than by luck of the ancestry is what makes a background (daemon-hosted)
+# session an ordinary session here.
 #
-# A `claude` on PATH is a symlink into the versioned install, and a process the
-# daemon spawns is exec'd through that link's TARGET, so its command line is
-# `.../claude/versions/2.1.270 --session-id ...` — a basename that is a version
+# The match is on argv0 alone. A `claude` on PATH is a symlink into the versioned
+# install, and a process the daemon spawns is exec'd through that link's TARGET,
+# so its argv0 is `.../claude/versions/2.1.270` — a basename that is a version
 # number, not `claude`. Matching the versioned path is the same match as matching
-# the name; both spell "the claude binary".
+# the name; both spell "the claude binary". Matching the rest of the command line
+# is not: the daemon's own `--bg-pty-host` process names that path as an ARGUMENT,
+# and killing the host takes every session it hosts with it.
+#
+# A `--print` claude is headless — an SDK bridge with no input box and no terminal
+# — so it is not a session this transport can relaunch; it is walked past like any
+# other non-claude process, and refused when it is the named pid.
 _find_claude_pid() {
-  local pid="${CLAUDE_PID:-$PPID}" cmd i
-  for i in 1 2 3 4 5 6 7 8; do
+  local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i
+  for ((i = 0; i < ${hops:-8}; i++)); do
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
     case "$cmd" in
-      claude|claude\ *|*/claude|*/claude\ *|*/claude/versions/*) printf '%s' "$pid"; return 0 ;;
+      *\ --print|*\ --print\ *) ;;
+      *) case "${cmd%% *}" in
+           claude|*/claude|*/claude/versions/*) printf '%s' "$pid"; return 0 ;;
+         esac ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
@@ -340,6 +351,17 @@ _pane_target() {
 # next relaunch's flag string, corrupting it. Whitelisting and halting at the
 # first positional makes that impossible by construction. [LAW:no-silent-failure]
 # we would rather drop an exotic flag than smuggle a prompt into the flags.
+#
+# Every flag is one of three things: propagated, dropped, or unknown — and a
+# dropped flag has to be dropped WITH its value, or the value reads as the first
+# positional and the scan halts there. A daemon-hosted session is launched as
+# `--session-id <id> --fork-session --resume <path> --allowed-tools <t> ...
+# --permission-mode <m>`, so halting at `--session-id` relaunched every such
+# session with no permission mode at all and reported that as a delivery.
+# [LAW:no-silent-failure] an unknown flag is a failure to read the flags, not a
+# flag to skip: whether the token after it is its value or the prompt is exactly
+# what we do not know, and guessing either way is the silent flagless relaunch
+# this function exists to prevent. The caller refuses; the handoff is on disk.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks
@@ -357,12 +379,17 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         out+="${out:+ }$tok"; i=$((i+1)) ;;
-      -c|--continue|--resume=*)
+      -c|--continue|--fork-session|--resume=*|--session-id=*|--allowed-tools=*|--disallowed-tools=*)
         i=$((i+1)) ;;
+      --session-id|--allowed-tools|--disallowed-tools)
+        i=$((i+2)) ;;
       -r|--resume)
         # resume's value is optional; drop it only when the next token isn't a flag
         if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then i=$((i+2))
         else i=$((i+1)); fi ;;
+      -*)
+        echo "unknown claude flag '$tok'; cannot tell its value from the prompt" >&2
+        return 1 ;;
       *)
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
@@ -651,7 +678,8 @@ case "$MODE" in
       # — a different session than the one it replaced, reported as success.
       CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "iTerm2 transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD")
+      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
+        || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: claude ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\""
@@ -675,7 +703,8 @@ case "$MODE" in
         || _refuse "detached transport: cannot locate the claude process to relaunch"
       CLAUDE_CMD=$(_process_command "$CLAUDE_PID") \
         || _refuse "detached transport: cannot read the command line of claude process $CLAUDE_PID"
-      FLAGS=$(_claude_flags "$CLAUDE_CMD")
+      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
+        || _refuse "detached transport: cannot read the flags of claude process $CLAUDE_PID"
       # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
       # the pid is, and travels with it as data. The worker re-reads it and compares
       # rather than re-deriving what "the old claude" means at kill time — by then
