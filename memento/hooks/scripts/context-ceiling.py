@@ -33,7 +33,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import GRACE, anchored, in_force, session_directory  # noqa: E402
-from ceiling_log import log  # noqa: E402
+from ceiling_log import hook_payload, log  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
 # Matched rather than the absolute path, because the instruction hands out that path but an
@@ -286,13 +286,7 @@ hook = None
 tokens = "unknown"
 ceiling = "unresolved"
 try:
-    hook = json.load(sys.stdin)
-    if not isinstance(hook, dict):
-        sys.exit(f"memento context ceiling: stdin must be a JSON object, got "
-                 f"{type(hook).__name__}.")
-    if hook["hook_event_name"] != "Stop":
-        sys.exit(f"memento context ceiling: registered on Stop, called on "
-                 f"{hook['hook_event_name']}. Fix hooks.json.")
+    hook = hook_payload("context ceiling", "Stop")
     tokens = context_tokens(hook["transcript_path"])
     ceiling = resolve_ceiling(hook)
     label, verdict = (("allow-under", None) if tokens < ceiling

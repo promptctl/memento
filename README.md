@@ -159,8 +159,9 @@ between stops but the log: the only file under `~/.config/promptctl/sessions/` i
 override `ceiling set session` puts there, and a session that only ever stops leaves that
 tree empty. Editing a shared file, deleting it, or creating one under a running session
 reaches that session at its next stop. Because `Stop` is the only event the hook runs on,
-what a lowered ceiling delivers is the close-out instruction — finish the unit, then hand
-off — never a mid-turn denial. A syntax error in any layer stops the hook for every session
+what a lowered ceiling delivers is a close-out instruction at that stop — the finishing
+band or the closing one, by how far past the new ceiling the session now stands — never a
+mid-turn denial. A syntax error in any layer stops the hook for every session
 reading it, loudly, naming the file and line.
 
 That was not always so. Shared layers used to be frozen per session at its first stop, into

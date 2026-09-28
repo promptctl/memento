@@ -11,6 +11,7 @@ function to the other.
 """
 
 import fcntl
+import json
 import os
 import sys
 from datetime import datetime
@@ -19,6 +20,24 @@ from pathlib import Path
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
 LOG_CAP = 2_000_000
+
+
+def hook_payload(name, event):
+    """The payload on stdin, for a hook registered on one event.
+
+    [LAW:parse-dont-validate] the crossing from bytes on stdin to the one dict every hook then
+    reads its session and paths from, made once here for both hooks rather than once in each. What
+    is not a JSON object has no session to act on, and a payload for another event means
+    hooks.json has drifted from the script - acting on it anyway is how a session gets gated on a
+    number that is not its own, or has an override dropped that it still means to have. Both exit
+    with the reason, which the caller's guard records before re-raising. [LAW:no-silent-failure]"""
+    hook = json.load(sys.stdin)
+    if not isinstance(hook, dict):
+        sys.exit(f"memento {name}: stdin must be a JSON object, got {type(hook).__name__}.")
+    if hook.get("hook_event_name") != event:
+        sys.exit(f"memento {name}: registered on {event}, called with hook_event_name "
+                 f"{hook.get('hook_event_name')!r}. Fix hooks.json.")
+    return hook
 
 
 def log(hook, verdict, **fields):

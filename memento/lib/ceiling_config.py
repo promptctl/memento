@@ -6,8 +6,8 @@ layers to gate a session, and the `ceiling` command that writes them to move one
 implementation of this grammar is the divergence [LAW:one-source-of-truth] forbids, and what it
 produces is not a ceiling that failed to move: a value the reader here rejects stops the hook,
 which Claude Code treats as non-blocking, so the gate silently stops running for the session
-whose file holds it. `write_ceiling` emits only what `ceiling_in` accepts and reads back what it
-wrote, so the writer cannot guess the grammar wrong - there is nothing left to guess.
+whose file holds it. `staged` emits only what `ceiling_in` accepts and `committed` reads back what
+it wrote, so the writer cannot guess the grammar wrong - there is nothing left to guess.
 
 The failure arm is the process. A file that is not this format exits 1 naming the file, and the
 line wherever there is a line to name, which is what both callers want at the moment a ceiling is
@@ -66,11 +66,20 @@ def lines_in(path):
 
     What the filesystem refuses is deliberately not caught: no permission and no such device are not
     about the format, and the caller that can act on one - the command about to remove the file - is
-    the one that catches it."""
+    the one that catches it.
+
+    The one refusal that IS caught is the file vanishing between the check and the read. The layers
+    are shared and any of them can be removed while a reader is between `exists()` and `read_text()`
+    - `ceiling clear` run from another session, a hand `rm`, the `/clear` hook dropping an override.
+    A file that is gone reads as absent, the same answer the `exists()` check gives, rather than a
+    traceback that would take the reader's gate down for a reason nothing states.
+    [LAW:no-silent-failure]"""
     if not path.exists():
         return []
     try:
         return path.read_text().splitlines()
+    except FileNotFoundError:
+        return []
     except UnicodeDecodeError as refusal:
         sys.exit(f"memento config: {path} holds bytes that are not text, so no line of it can set "
                  f"a ceiling: {refusal}. Fix it or remove it.")

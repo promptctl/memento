@@ -511,9 +511,10 @@ _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling
 check("before the reset, the session override is what gates the session", out is None, str(out))
 code, err = cleared(home)
 check("the /clear hook exits clean", code == 0 and not err, f"{code} {err}")
-check("and the session override is gone",
-      not os.path.exists(os.path.join(home, "sessions", SESSION, CONFIG_NAME)),
-      str(os.listdir(os.path.join(home, "sessions", SESSION))))
+check("and the session override is gone, and the directory that held only it",
+      not os.path.exists(os.path.join(home, "sessions", SESSION)),
+      str(os.path.exists(os.path.join(home, "sessions", SESSION))
+          and os.listdir(os.path.join(home, "sessions", SESSION))))
 check("and says so in the ceiling log", "-> dropped" in cleared.log and "SessionStart" in cleared.log,
       cleared.log)
 _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n")
@@ -533,6 +534,11 @@ for event, source in (("SessionStart", "compact"), ("SessionStart", "startup"), 
           code == 1 and "hooks.json" in err
           and os.path.exists(os.path.join(home, "sessions", SESSION, CONFIG_NAME)), f"{code} {err}")
     check("and the stop is recorded", "-> stopped" in cleared.log, cleared.log)
+# A real Stop payload carries no `source` at all; the refusal has to be the curated one, not a
+# KeyError raised while composing it.
+code, err = cleared(home, raw=json.dumps({"session_id": SESSION, "hook_event_name": "Stop"}))
+check("a real Stop payload, which has no source, is refused in the hook's own voice",
+      code == 1 and "hooks.json" in err and "Traceback" not in err, f"{code} {err}")
 for raw in ("42", "[]", "not json", "{}"):
     code, err = cleared(home, raw=raw)
     check(f"a /clear payload of {raw!r} stops the hook loudly and is recorded",
