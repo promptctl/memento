@@ -175,14 +175,22 @@ fi
 # `exec -a` is what puts a name of this fixture's choosing there - a script run
 # through its shebang is argv0 `/bin/bash` however it is symlinked. Everything
 # below this hop proceeds as ordinary nest.
-if [ "${NEST_CLAUDE_AT:-}" = "$depth" ]; then
-  unset NEST_CLAUDE_AT
-  exec -a "$NEST_AS_CLAUDE" /bin/bash "$self" "$depth" "$@"
-fi
+# $NEST_CLAUDE_AT may name several depths; each is planted once. The pid of the
+# last one planted (the deepest) goes to $NEST_RECORD_CLAUDE, so a case can name
+# the exact claude it expects the launcher to pick.
+case " ${NEST_CLAUDE_AT:-} " in
+  *" $depth "*)
+    NEST_CLAUDE_AT=" $NEST_CLAUDE_AT "; NEST_CLAUDE_AT="${NEST_CLAUDE_AT// $depth / }"
+    export NEST_CLAUDE_AT
+    [ -n "${NEST_RECORD_CLAUDE:-}" ] && printf '%s' "$$" > "$NEST_RECORD_CLAUDE"
+    exec -a "$NEST_AS_CLAUDE" /bin/bash "$self" "$depth" "$@" ;;
+esac
 if [ "$depth" -gt 0 ]; then
   if [ "${NEST_REHOST_AT:-}" = "$depth" ]; then
     unset NEST_REHOST_AT
-    claude daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@"
+    # argv0 is the host's own spelling, so the launcher reads this hop as a real
+    # `claude --bg-pty-host` would read; a shebang script alone is argv0 /bin/bash.
+    (exec -a "claude --bg-pty-host" /bin/bash "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
@@ -198,16 +206,18 @@ exit $?
 """
 
 CLAUDE = r"""#!/bin/bash
-# Stands in for `claude daemon run --bg-pty-host`: the re-hosting hop this whole
-# mechanism exists for. The session is spawned by the daemon rather than by the
-# pane's shell, so it inherits none of tmux's environment - stripped here for
-# real, not simulated.
+# Stands in for `claude daemon run --bg-pty-host`: the daemon host. A session it
+# hosts is not displayed by any pane above it, and by default inherits none of
+# tmux's environment - stripped here for real, not simulated.
 set -uo pipefail
 while [ "${1:-}" != "--" ]; do
   [ $# -gt 0 ] || { echo "claude shim: no -- separator" >&2; exit 2; }
   shift
 done
 shift
+# $FIXTURE_HOST_KEEPS_TMUX: a daemon whose spawner sat in a pane passes that
+# pane's $TMUX_PANE down, the leak a host boundary has to survive.
+[ -n "${FIXTURE_HOST_KEEPS_TMUX:-}" ] && { "$@"; exit $?; }
 env -u TMUX -u TMUX_PANE "$@"
 exit $?
 """
@@ -459,7 +469,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         message="handoff", handoff_dir=None, dry_run="1",
         log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
         self_dir_gone=False, as_claude=None, claude_pid=None,
-        forge_command=None):
+        forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
@@ -508,13 +518,17 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # case gets one, unconditionally: a claude hop the walk cannot reach (the
         # over-the-bound chains) is refused for the same reason a claude hop that
         # was never planted would be, so nothing has to decide which cases need it.
-        "NEST_CLAUDE_AT": str(depth),
+        "NEST_CLAUDE_AT": " ".join(str(d) for d in (
+            [depth] if claude_at is None else claude_at if isinstance(claude_at, list) else [claude_at])),
+        "NEST_RECORD_CLAUDE": os.path.join(workdir, "claude.pid"),
         "NEST_AS_CLAUDE": as_claude or NEST_AS_CLAUDE,
     }
     # The pid Claude Code hands every tool call as $CLAUDE_PID. Absent by default,
     # so the walk has to find the planted hop by ancestry alone.
     if claude_pid is not None:
         env["CLAUDE_PID"] = str(claude_pid)
+    if host_keeps_tmux:
+        env["FIXTURE_HOST_KEEPS_TMUX"] = "1"
     if ps_root_command is not None:
         env["FIXTURE_PS_MODE"] = ps_root_command
     if self_dir_gone:
@@ -544,6 +558,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
         argv = [NEST_BIN, str(depth)] + entry + [message]
+        # A daemon host above the whole chain, pane included: the host of some
+        # other session, which this one must not mistake for its own. The trailing
+        # `exit` keeps bash from exec'ing the chain in place of the host process.
+        if outer_host:
+            argv = ["/bin/bash", "-c", 'exec -a "claude --bg-pty-host" /bin/bash -c \'"$@"; exit $?\' host "$@"', "wrap"] + argv
         done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
         # The chain's top pid, read before the workdir goes away. It names both the
@@ -552,6 +571,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # picked one.
         with open(pidfile) as handle:
             done.root_pid = handle.read().strip()
+        try:
+            with open(os.path.join(workdir, "claude.pid")) as handle:
+                done.session_claude_pid = handle.read().strip()
+        except FileNotFoundError:
+            done.session_claude_pid = None
         return done
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -639,7 +663,10 @@ def argv_case(*args, path_prefix=""):
             [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 "TMUX_PANE": "%99", "FIXTURE_PANES": "%99 0 0"})
+                 # The pane's process is this runner, which the launcher descends
+                 # from as it would from a real pane's shell; a pid nothing
+                 # descends from reads as hosted when the suite runs under a host.
+                 "TMUX_PANE": "%99", "FIXTURE_PANES": f"%99 {os.getpid()} 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
@@ -852,26 +879,50 @@ done = run(depth=3, panes="%1 4 0\n%99 ROOTPID 0\n%7 5 0")
 check("picks the pane that owns it, not the first pane listed",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# The case the whole mechanism exists for: a hop that re-hosts the session off the
-# pane's shell, taking $TMUX and $TMUX_PANE with it. $TMUX_PANE must be SET here,
-# and set to a pane the ancestry does not own - otherwise the shim's `env -u` has
-# nothing to strip and the case quietly degrades into another depth-6 chain,
-# passing just as well with the strip deleted outright.
-#
-# This and the inherited-$TMUX_PANE case at the end are the two directions of one
-# precedence rule - the environment wins while the chain is intact, discovery wins
-# once a re-host has broken it. They look alike and are not: neither can be
-# dropped as a duplicate of the other.
-#
-# %77 has to be a pane tmux still owns, not merely a name in the environment.
-# Once the launcher learned to hand a stale $TMUX_PANE on to discovery, an
-# unresolvable %77 reached %99 whether or not the strip ran, and this case went
-# quiet again - the same inertness in a new disguise, introduced by making the
-# launcher more forgiving. A live %77 is one discovery would never choose, so
-# only the strip can decide the outcome.
-done = run(depth=5, rehost_at=3, tmux_pane="%77",
-           panes=f"%99 ROOTPID 0\n%77 {STRANGER.pid} 0")
-check("a re-hosting hop drops the stale $TMUX_PANE and discovery wins",
+# A daemon host is a boundary (promptctl-handoff-yg0). The chain is the one seen
+# 2026-09-28: pane shell -> claude (the spawner) -> `claude --bg-pty-host` ->
+# claude (this session) -> shell. The pane above the host shows the spawner's
+# session, so delivering there sent /clear into it mid-task. Both claudes are
+# planted, so the finder has the spawner's to wrongly pick.
+PANES_ABOVE_HOST = f"%99 ROOTPID 0\n%77 {STRANGER.pid} 0"
+done = run(depth=5, rehost_at=3, claude_at=[5, 2], panes=PANES_ABOVE_HOST)
+check("a hosted session never discovers the pane above its host; it goes detached",
+      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+check("and it relaunches its own claude below the host, not the spawner's",
+      done.session_claude_pid is not None and done.session_claude_pid != done.root_pid
+      and f"claude_pid={done.session_claude_pid} " in done.stdout,
+      f"session={done.session_claude_pid} root={done.root_pid} out={done.stdout!r}")
+# The daemon passed its spawner's live $TMUX_PANE down. The inherited spelling
+# must lose to the boundary exactly as discovery does.
+done = run(depth=5, rehost_at=3, claude_at=[5, 2], tmux_pane="%77", host_keeps_tmux=True,
+           panes=PANES_ABOVE_HOST)
+check("an inherited $TMUX_PANE from the daemon's spawner is never used",
+      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Something between the session's claude and its host (a wrapper) does not
+# hide the host: any host crossed below the first pane counts.
+done = run(depth=5, rehost_at=4, claude_at=[5, 2], panes=PANES_ABOVE_HOST)
+check("a wrapper between the session and its host does not hide the host",
+      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# No claude below the host: the only claude is the spawner above it. Relaunching
+# that would kill an unrelated session, so the finder stops at the host.
+done = run(depth=2, rehost_at=1, panes=PANES_ABOVE_HOST)
+check("the session finder never climbs past a host to the spawner's claude",
+      picked(done) == DECLINED
+      and "detached transport: cannot locate the claude process" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The control: the same chain with no host discovers %99, so the refusals above
+# come from the boundary, not from depth or the fixture.
+done = run(depth=5, panes=PANES_ABOVE_HOST)
+check("the same chain without a host discovers the pane above it",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A host above the pane hosts some other session: this one keeps its pane. This
+# is also the suite run from inside a background session.
+done = run(depth=5, panes=PANES_ABOVE_HOST, outer_host=True)
+check("a host above this session's pane does not make it hosted",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A handoff message naming a host flag is prompt text, not a host.
+done = run(depth=5, panes=PANES_ABOVE_HOST, message="next: verify the --bg-pty-host boundary")
+check("a handoff message containing --bg-pty-host does not trip the boundary",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # --- no pane to be had, but tmux still gives a transport --------------------
@@ -1051,6 +1102,19 @@ check("an unknown claude flag is a refusal naming the flag, not a guess at the p
 done = run(panes=None, forge_command="/x/claude daemon run")
 check("a claude subcommand (daemon run) is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# A pre-warmed spare, as ps shows one live: its subcommand spelling first. Before,
+# `bg-spare` read as the prompt and the spare as a flagless session to kill.
+done = run(panes=None, forge_command="/x/claude bg-spare --bg-spare /tmp/cc/spare/b3.claim.sock")
+check("a daemon spare (bg-spare --bg-spare) is not a session to relaunch",
+      f"claude_pid={done.root_pid} " not in done.stdout,
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A host subcommand counts only with its own follow-up token; a prompt that merely
+# starts with the word is a session's prompt.
+done = run(panes=None, forge_command="/x/claude --permission-mode plan bg-pty-host leaks are fixed")
+check("a prompt starting with a host word is still a session",
+      picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # $CLAUDE_PID holding something that is not a pid at all is a refusal in the
