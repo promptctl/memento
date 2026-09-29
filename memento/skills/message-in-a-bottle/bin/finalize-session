@@ -126,54 +126,68 @@ _find_claude_session() {
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    case "${cmd%% *}" in
-      claude|*/claude|*/claude/versions/*)
-        rc=0; _claude_flags "$cmd" >/dev/null 2>&1 || rc=$?
-        # A host ends the walk: every claude above it is the daemon's spawner,
-        # a different session, and relaunching it kills that session.
-        [ "$rc" -eq 3 ] && return 1
-        [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; } ;;
-    esac
+    rc=0; _claude_host_code "$cmd" || rc=$?
+    # A host ends the walk: every claude above it is the daemon's spawner, a
+    # different session, and relaunching it kills that session.
+    [ "$rc" -eq 3 ] && return 1
+    [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
   return 1
 }
 
-# Succeeds when a claude daemon or daemon host is among this process's ancestors.
+# Succeeds when this session is hosted by a claude daemon.
 #
-# Such a session is displayed only over the host's socket. Every pane or iTerm2
-# session above the host belongs to whichever session spawned the daemon, and
-# so do the $TMUX_PANE and $ITERM_SESSION_ID the daemon may have passed down.
-# Delivering there sends /clear and the handoff into an unrelated live session
-# (seen 2026-09-28, promptctl-handoff-yg0). A hosted session takes the detached
-# transport. The classification is _claude_flags' return 3, read only in the
-# flag region of a claude binary, so a handoff prompt naming a host flag never
-# counts. [LAW:single-enforcer]
+# A hosted session is displayed only over its host's socket. Every pane or
+# iTerm2 session reachable from it belongs to whichever session spawned the
+# daemon, and so do the $TMUX_PANE and $ITERM_SESSION_ID the daemon may have
+# passed down. Delivering there sends /clear and the handoff into an unrelated
+# live session (seen 2026-09-28, promptctl-handoff-yg0), so a hosted session
+# takes the detached transport.
 #
-# Only this session's own host counts. The walk stops at the first claude that is
-# a session and asks whether its parent is a host; a host further up hosts some
-# other session, and this one keeps its pane.
+# The test is the ancestry between this process and its pane. A tmux pane's
+# process descends from the tmux server, never from a host, so a pane reached
+# without crossing a host is this session's own, and a host crossed first means
+# every pane above it belongs to someone else. The walk stops at the first live
+# pane process; a host above that hosts some other session. Hosts are read by
+# _claude_flags' return 3, in the flag region of a claude binary only, so a
+# handoff message naming a host flag never counts. [LAW:single-enforcer]
+#
+# $CLAUDE_PID names the session directly when set, so its parent being a host
+# answers it even for a launcher whose own ancestry no longer reaches it.
+#
+# [LAW:no-silent-failure] a read that fails mid-walk answers "hosted": the cost
+# of wrongly going detached is a relaunch of this session, while the cost of
+# wrongly staying on a pane is /clear in someone else's.
 _hosted_by_daemon() {
-  local pid=$$ cmd i rc
+  local panes pid=$$ line cmd i rc
+  panes=" $(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
+            | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
+  case "${CLAUDE_PID:-}" in
+    ''|*[!0-9]*) ;;
+    *)
+      line=$(ps -o ppid= -p "$CLAUDE_PID" 2>/dev/null | tr -d '[:space:]')
+      if [ -n "$line" ] && [ "$line" -gt 1 ]; then
+        rc=0; _claude_host_code "$(ps -o command= -p "$line" 2>/dev/null)" || rc=$?
+        [ "$rc" -eq 3 ] && return 0
+      fi ;;
+  esac
   for ((i = 0; i < 16; i++)); do
-    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     [ "$pid" -gt 1 ] || return 1
-    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [[ "$panes" == *" $pid "* ]] && return 1
+    line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
+    [ -n "$line" ] || return 0
+    read -r pid cmd <<<"$line"
     rc=0; _claude_host_code "$cmd" || rc=$?
-    [ "$rc" -eq 3 ] && return 0         # a host with no session below it
-    if [ "$rc" -lt 2 ]; then            # this session's claude: its parent decides
-      case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-      rc=0; _claude_host_code "$(ps -o command= -p "$pid" 2>/dev/null)" || rc=$?
-      [ "$rc" -eq 3 ] && return 0
-      return 1
-    fi
+    [ "$rc" -eq 3 ] && return 0
   done
   return 1
 }
 
 # _claude_flags' return code for a claude binary's command line, or 2 (not a
-# session) for anything else. Output is discarded; only the classification is read.
+# session) for anything else. The one place argv0 is matched as the claude
+# binary. Output is discarded; only the classification is read.
 _claude_host_code() {
   case "${1%% *}" in
     claude|*/claude|*/claude/versions/*)
@@ -229,10 +243,9 @@ _still_captured_process() { # <pid> <identity captured at launch>
 # instead of from $TMUX_PANE.
 #
 # The environment can lose $TMUX_PANE while the process still descends from the
-# pane that shows it, so descent is asked directly. Descent through a daemon host
-# (`--bg-pty-host`) is not that case: the pane above a host spawned the daemon and
-# shows its own session, never a hosted one, so the walk stops at the host and a
-# hosted session takes the detached transport (promptctl-handoff-yg0).
+# pane that shows it, so descent is asked directly. This walk does not know about
+# daemon hosts: the launcher runs it only once _hosted_by_daemon has said no, and
+# a hosted session never reaches it (promptctl-handoff-yg0).
 #
 # [FRAMING:representation] $TMUX_PANE is a copy of a fact, propagated by
 # inheritance and lost the moment something breaks the chain. The fact itself is
@@ -448,8 +461,15 @@ _claude_flags() {
       -*)
         echo "unknown claude flag '$tok': add it to _claude_flags with its arity" >&2
         return 1 ;;
-      daemon|bg-pty-host)
-        return 3 ;;
+      daemon|bg-pty-host|bg-spare)
+        # A host's subcommand is followed by its own token (`daemon run`,
+        # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
+        # merely starts with the word is still a session's prompt.
+        case "$tok $next" in
+          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 3 ;;
+        esac
+        [ "$tok" = daemon ] && return 2
+        break ;;
       mcp|update|doctor|config|plugin|install|auth|login|logout|setup-token|agents|remote-control|migrate-installer)
         return 2 ;;
       *)
@@ -826,6 +846,10 @@ case "$MODE" in
       # This is the sole genuine no-transport case: no owned pane, no reachable
       # iTerm2 session, and no tmux binary to spawn a fresh window with either
       # — there is truly nothing on this machine to deliver into.
+      if [[ -n "$HOSTED" ]]; then
+        _refuse "this session is hosted by a claude daemon, so no pane or iTerm2
+session shows it, and the detached transport needs a tmux binary; none is installed."
+      fi
       _refuse "no tmux, iTerm2, or tmux binary to spawn a fresh window with.
 Nothing on this machine to deliver the close-out into."
       # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
