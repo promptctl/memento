@@ -1062,17 +1062,25 @@ check("a prompt that mentions --print does not make the session headless",
 
 # The relaunch line is parsed by a shell (tmux's default-shell, or the one iTerm2
 # types into). The live flags `--model opus[1m]` (2026-09-29) are a glob there:
-# zsh aborts on the no-match and the successor never starts. failglob is bash's
-# zsh-nomatch, so the flags must come back out of it as the exact argv.
-done = run(panes=None, forge_command=(
+# zsh aborts on the no-match and the successor never starts; a quote in the
+# handoff's path unbalances the line the same way. The dry run prints the line the
+# worker runs, so it goes through zsh as the user's shell would read it, and
+# through bash's failglob, and must come back out as the exact argv.
+quoted_dir = tempfile.mkdtemp(prefix="o'neil [1m] ")
+done = run(panes=None, handoff_dir=quoted_dir, forge_command=(
     "/x/claude --model opus[1m] --permission-mode bypassPermissions run /next"))
-flags = done.stdout.partition("flags=[")[2].partition("]\n")[0]
-parsed = subprocess.run(["bash", "-O", "failglob", "-c", 'printf "%s\\n" ' + flags],
-                        capture_output=True, text=True)
-check("flags reach the relaunch shell-quoted, so a glob-shaped model survives zsh",
-      parsed.returncode == 0 and parsed.stdout.split("\n")[:-1]
-      == ["--model", "opus[1m]", "--permission-mode", "bypassPermissions"],
-      f"flags={flags!r} parsed={parsed!r} out={done.stdout!r}")
+line = done.stdout.partition("would launch: ")[2].partition(" in a fresh detached")[0]
+shells = [["bash", "-O", "failglob", "-c"]] + ([["zsh", "-f", "-c"]] if shutil.which("zsh") else [])
+for shell in shells:
+    parsed = subprocess.run(shell + ['cat() { printf "%s\\n" "$@"; }; printf "%s\\n" ' + line],
+                            capture_output=True, text=True)
+    argv = parsed.stdout.split("\n")
+    check(f"the relaunch line reaches {shell[0]} as the exact argv, glob-shaped model and quoted path included",
+          picked(done) == DETACHED and parsed.returncode == 0
+          and argv[1:5] == ["--model", "opus[1m]", "--permission-mode", "bypassPermissions"]
+          and argv[5].startswith(quoted_dir + "/"),
+          f"line={line!r} parsed={parsed!r} out={done.stdout!r}")
+shutil.rmtree(quoted_dir)
 
 # The flags a daemon-hosted session is launched with, in the order the daemon
 # writes them: harness flags first, `--permission-mode` last. Every one before it

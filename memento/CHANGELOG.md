@@ -2,6 +2,7 @@ Each version's section is written in the PR that bumps `.claude-plugin/plugin.js
 
 ## Unreleased
 
+- fix(message-in-a-bottle): the successor claude starts when its relaunch line holds shell syntax. `finalize-session` spliced the kept flags, the claude path and the handoff path into the line tmux's default-shell or the iTerm2 shell runs, unquoted or in bare single quotes: `--model opus[1m]` is a glob zsh aborts on, and a quote in the home directory unbalanced the line, so in both cases the session was reset and nothing replaced it. Every piece is now shell-quoted by one builder the dry run prints and the workers run.
 - fix(message-in-a-bottle): a background session's handoff no longer lands in the session that spawned its daemon. `finalize-session` used to reach that session's pane through the ancestry walk or an inherited `$TMUX_PANE`, then send `/clear` and the handoff into an unrelated live session; the same leak reached its iTerm2 session, and with `$CLAUDE_PID` unset the detached transport could relaunch the spawner's claude. A session is now hosted when a daemon host (`claude daemon run`, `--bg-pty-host`, `--bg-spare`) sits between it and the first tmux pane above it, or is the parent of `$CLAUDE_PID`; a hosted session skips the tmux and iTerm2 transports for detached, and the claude finder never climbs past a host. Hosts are read by the same flag parser that reads relaunch flags, so a handoff message mentioning a host flag does not count.
 
 ## v0.10.0 - 2026-09-28
