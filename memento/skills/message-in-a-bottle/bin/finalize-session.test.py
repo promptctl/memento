@@ -663,7 +663,10 @@ def argv_case(*args, path_prefix=""):
             [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 "TMUX_PANE": "%99", "FIXTURE_PANES": "%99 0 0"})
+                 # The pane's process is this runner, which the launcher descends
+                 # from as it would from a real pane's shell; a pid nothing
+                 # descends from reads as hosted when the suite runs under a host.
+                 "TMUX_PANE": "%99", "FIXTURE_PANES": f"%99 {os.getpid()} 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
