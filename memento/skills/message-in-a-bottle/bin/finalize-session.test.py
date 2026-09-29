@@ -888,6 +888,12 @@ check("the session finder never climbs past a host to the spawner's claude",
 done = run(depth=5, panes=PANES_ABOVE_HOST)
 check("the same chain without a host discovers the pane above it",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Only the session's own host counts. Here a host sits above the session's claude
+# but is not its parent, so it hosts some other session and this one keeps its
+# pane. The unbounded walk this replaced sent every such session detached.
+done = run(depth=5, rehost_at=4, claude_at=2, panes=PANES_ABOVE_HOST)
+check("a host above the session's own parent does not make it hosted",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A handoff message naming a host flag is prompt text, not a host.
 done = run(depth=5, panes=PANES_ABOVE_HOST, message="next: verify the --bg-pty-host boundary")
 check("a handoff message containing --bg-pty-host does not trip the boundary",

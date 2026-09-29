@@ -149,20 +149,37 @@ _find_claude_session() {
 # transport. The classification is _claude_flags' return 3, read only in the
 # flag region of a claude binary, so a handoff prompt naming a host flag never
 # counts. [LAW:single-enforcer]
+#
+# Only this session's own host counts. The walk stops at the first claude that is
+# a session and asks whether its parent is a host; a host further up hosts some
+# other session, and this one keeps its pane.
 _hosted_by_daemon() {
   local pid=$$ cmd i rc
   for ((i = 0; i < 16; i++)); do
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    case "${cmd%% *}" in
-      claude|*/claude|*/claude/versions/*)
-        rc=0; _claude_flags "$cmd" >/dev/null 2>&1 || rc=$?
-        [ "$rc" -eq 3 ] && return 0 ;;
-    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    rc=0; _claude_host_code "$cmd" || rc=$?
+    [ "$rc" -eq 3 ] && return 0         # a host with no session below it
+    if [ "$rc" -lt 2 ]; then            # this session's claude: its parent decides
+      case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+      rc=0; _claude_host_code "$(ps -o command= -p "$pid" 2>/dev/null)" || rc=$?
+      [ "$rc" -eq 3 ] && return 0
+      return 1
+    fi
   done
   return 1
+}
+
+# _claude_flags' return code for a claude binary's command line, or 2 (not a
+# session) for anything else. Output is discarded; only the classification is read.
+_claude_host_code() {
+  case "${1%% *}" in
+    claude|*/claude|*/claude/versions/*)
+      _claude_flags "$1" >/dev/null 2>&1; return $? ;;
+  esac
+  return 2
 }
 
 # What a pid is holding, as a value that survives the pid being reissued: the
