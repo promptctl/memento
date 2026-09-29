@@ -435,12 +435,12 @@ _claude_flags() {
     next="${toks[$((i+1))]:-}"
     case "$tok" in
       --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--verbose)
-        out+="${out:+ }$tok"; i=$((i+1)) ;;
+        out+="${out:+ }$(printf '%q' "$tok")"; i=$((i+1)) ;;
       --model|--permission-mode)
-        if [ $((i+1)) -lt "$n" ]; then out+="${out:+ }$tok $next"; i=$((i+2))
+        if [ $((i+1)) -lt "$n" ]; then out+="${out:+ }$(printf '%q %q' "$tok" "$next")"; i=$((i+2))
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
-        out+="${out:+ }$tok"; i=$((i+1)) ;;
+        out+="${out:+ }$(printf '%q' "$tok")"; i=$((i+1)) ;;
       --bg-pty-host|--bg-spare)
         return 3 ;;
       -p|--print)
@@ -476,6 +476,10 @@ _claude_flags() {
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
   done
+  # Every relaunch splices this into a command line a shell parses — tmux hands
+  # it to default-shell, iTerm2 types it into the user's — so each token leaves
+  # here shell-quoted. Bare, `--model opus[1m]` is a zsh glob with no match:
+  # zsh aborts the line and the successor claude never starts.
   printf '%s' "$out"
 }
 
