@@ -426,7 +426,7 @@ _pane_target() {
 # a subcommand name is indistinguishable from the subcommand in ps output.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
-  local -a toks
+  local -a toks keep=()
   IFS=' ' read -r -a toks <<<"$cmd" || true
   n=${#toks[@]}
   i=1  # skip argv0
@@ -435,12 +435,12 @@ _claude_flags() {
     next="${toks[$((i+1))]:-}"
     case "$tok" in
       --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--verbose)
-        out+="${out:+ }$tok"; i=$((i+1)) ;;
+        keep+=("$tok"); i=$((i+1)) ;;
       --model|--permission-mode)
-        if [ $((i+1)) -lt "$n" ]; then out+="${out:+ }$tok $next"; i=$((i+2))
+        if [ $((i+1)) -lt "$n" ]; then keep+=("$tok" "$next"); i=$((i+2))
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
-        out+="${out:+ }$tok"; i=$((i+1)) ;;
+        keep+=("$tok"); i=$((i+1)) ;;
       --bg-pty-host|--bg-spare)
         return 3 ;;
       -p|--print)
@@ -476,7 +476,23 @@ _claude_flags() {
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
   done
-  printf '%s' "$out"
+  # Every relaunch splices this into a command line a shell parses — tmux hands
+  # it to default-shell, iTerm2 types it into the user's — so each token leaves
+  # here shell-quoted. Bare, `--model opus[1m]` is a zsh glob with no match:
+  # zsh aborts the line and the successor claude never starts.
+  [ "${#keep[@]}" -gt 0 ] && printf -v out '%q ' "${keep[@]}"
+  printf '%s' "${out% }"
+}
+
+# The one command line every relaunch hands a shell: claude, the kept flags, and
+# the handoff read from its file by that shell. Each piece is shell-quoted here —
+# a home directory with a quote in it must not break the line any more than a
+# glob-shaped model may.
+_relaunch_line() {
+  local bin msg
+  printf -v bin '%q' "$1"
+  printf -v msg '%q' "$MSGFILE"
+  printf '%s' "$bin ${FLAGS:+$FLAGS }\"\$(cat $msg)\""
 }
 
 # Read the currently-visible contents of the iTerm2 session with the given UUID.
@@ -770,7 +786,7 @@ case "$MODE" in
         || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
-        echo "[dry-run] would relaunch: claude ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\""
+        echo "[dry-run] would relaunch: $(_relaunch_line claude)"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
@@ -820,7 +836,7 @@ case "$MODE" in
       SESSION="finalize-$$-$(date +%s)"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=detached session=$SESSION cwd=$CWD claude_pid=$CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
-        echo "[dry-run] would launch: $CLAUDE_BIN ${FLAGS:+$FLAGS }\"\$(cat '$MSGFILE')\" in a fresh detached tmux window"
+        echo "[dry-run] would launch: $(_relaunch_line "$CLAUDE_BIN") in a fresh detached tmux window"
         echo "[dry-run] old-process identity: $CLAUDE_IDENT"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
@@ -969,7 +985,7 @@ Nothing on this machine to deliver the close-out into."
     # The shell evaluates $(cat MSGFILE), so the whole message rides in the file
     # — no message text is embedded in argv or AppleScript. Build the literal the
     # shell should run, then AppleScript-escape only \ and " for the write.
-    RELAUNCH="claude ${FLAGS:+$FLAGS }\"\$(cat '${MSGFILE}')\""
+    RELAUNCH=$(_relaunch_line claude)
     AS=${RELAUNCH//\\/\\\\}
     AS=${AS//\"/\\\"}
 
@@ -1078,11 +1094,11 @@ OSA2
 
     # Same trick as the iTerm2 relaunch: the shell in the new window evaluates
     # $(cat msgfile) itself, so the message never touches argv or tmux quoting —
-    # [LAW:effects-at-boundaries] the only escaping done here is the single
-    # embedded path, not the message content. CLAUDE_BIN is the absolute path
+    # [LAW:effects-at-boundaries] the only escaping is _relaunch_line's, of the
+    # paths and flags, never the message content. CLAUDE_BIN is the absolute path
     # resolved in the launcher, not the bare "claude" the login shell about to
     # spawn might or might not still have on its PATH.
-    RELAUNCH="'${CLAUDE_BIN}' ${FLAGS:+$FLAGS }\"\$(cat '${MSGFILE}')\""
+    RELAUNCH=$(_relaunch_line "$CLAUDE_BIN")
     if ! tmux new-session -d -s "$SESSION" -c "$CWD" "$RELAUNCH" 2>>/dev/stderr; then
       log "ERROR: could not create detached tmux session $SESSION; nothing delivered"
       exit 1
