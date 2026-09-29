@@ -852,26 +852,24 @@ done = run(depth=3, panes="%1 4 0\n%99 ROOTPID 0\n%7 5 0")
 check("picks the pane that owns it, not the first pane listed",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# The case the whole mechanism exists for: a hop that re-hosts the session off the
-# pane's shell, taking $TMUX and $TMUX_PANE with it. $TMUX_PANE must be SET here,
-# and set to a pane the ancestry does not own - otherwise the shim's `env -u` has
-# nothing to strip and the case quietly degrades into another depth-6 chain,
-# passing just as well with the strip deleted outright.
+# A daemon host is a boundary the walk never crosses. The chain here is the one
+# seen 2026-09-28 (promptctl-handoff-yg0): pane shell -> claude -> `claude daemon
+# run --bg-pty-host` -> claude -> shell. The pane above the host spawned the
+# daemon and displays its own session, so taking it sent /clear into an unrelated
+# session mid-task. The planted claude above the host keeps a relaunch target
+# findable, so refusing the pane means the detached transport, not no handoff.
 #
-# This and the inherited-$TMUX_PANE case at the end are the two directions of one
-# precedence rule - the environment wins while the chain is intact, discovery wins
-# once a re-host has broken it. They look alike and are not: neither can be
-# dropped as a duplicate of the other.
-#
-# %77 has to be a pane tmux still owns, not merely a name in the environment.
-# Once the launcher learned to hand a stale $TMUX_PANE on to discovery, an
-# unresolvable %77 reached %99 whether or not the strip ran, and this case went
-# quiet again - the same inertness in a new disguise, introduced by making the
-# launcher more forgiving. A live %77 is one discovery would never choose, so
-# only the strip can decide the outcome.
+# $TMUX_PANE is set to a live pane the ancestry does not own, so the shim's
+# `env -u` is what keeps the inherited spelling from answering instead.
 done = run(depth=5, rehost_at=3, tmux_pane="%77",
            panes=f"%99 ROOTPID 0\n%77 {STRANGER.pid} 0")
-check("a re-hosting hop drops the stale $TMUX_PANE and discovery wins",
+check("a daemon host is a boundary: the pane above it is never chosen",
+      picked(done) not in ("%99", "%77"),
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The control: the identical chain with no host hop resolves %99, so the refusal
+# above comes from the host boundary and not from depth or the fixture.
+done = run(depth=5, panes=f"%99 ROOTPID 0\n%77 {STRANGER.pid} 0")
+check("the same chain without a host hop discovers the pane above it",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # --- no pane to be had, but tmux still gives a transport --------------------

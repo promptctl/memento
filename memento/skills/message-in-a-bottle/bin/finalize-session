@@ -182,14 +182,11 @@ _still_captured_process() { # <pid> <identity captured at launch>
 # The tmux pane this process is running inside, discovered from process ancestry
 # instead of from $TMUX_PANE.
 #
-# A session hosted by `claude daemon run` — which is every session when
-# remoteControlAtStartup is on — is spawned by the daemon, not by the pane's
-# shell, so it inherits none of tmux's environment. $TMUX and $TMUX_PANE are
-# simply absent even though a pane four levels up is displaying that session and
-# taking its keystrokes. Reading the environment alone therefore reports "no
-# transport" for a session that plainly has one, and the close-out silently stops
-# happening for precisely the longest-running sessions — the ones with the most
-# worth handing off.
+# The environment can lose $TMUX_PANE while the process still descends from the
+# pane that shows it, so descent is asked directly. Descent through a daemon host
+# (`--bg-pty-host`) is not that case: the pane above a host spawned the daemon and
+# shows its own session, never a hosted one, so the walk stops at the host and a
+# hosted session takes the detached transport (promptctl-handoff-yg0).
 #
 # [FRAMING:representation] $TMUX_PANE is a copy of a fact, propagated by
 # inheritance and lost the moment something breaks the chain. The fact itself is
@@ -243,7 +240,7 @@ _discover_tmux_pane() {
   command -v tmux >/dev/null 2>&1 || return 1
   panes=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || return 1
   [ -n "$panes" ] || return 1
-  proctable=$(ps -eo pid=,ppid=,etime=) || return 1
+  proctable=$(ps -eo pid=,ppid=,etime=,args=) || return 1
   # The literal 'pane' lead-in is tmux labelling its own rows, so one pass can
   # tell the two snapshots apart without a separator line to get out of step.
   printf '%s\n%s\n' "$panes" "$proctable" | awk -v self=$$ -v maxhops=16 '
@@ -271,7 +268,10 @@ _discover_tmux_pane() {
     # and the caller declines; that is the safe direction, and the one the
     # elapsed-time check below already takes for the same reason.
     $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
-    NF == 3      { parent[$1] = $2; elapsed[$1] = $3 }
+    NF >= 3      {
+      parent[$1] = $2; elapsed[$1] = $3
+      for (i = 4; i <= NF; i++) if ($i == "--bg-pty-host") { host[$1] = 1; break }
+    }
     END {
       pid = self
       descendant_age = -1
@@ -283,6 +283,12 @@ _discover_tmux_pane() {
         if (elapsed[pid] !~ /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9][0-9]$/) exit 1
         age = ageof(elapsed[pid])
         if (age < descendant_age) exit 1
+        # A daemon host is a boundary, not a hop. Whatever pane sits above it
+        # spawned the daemon; it displays its own session, never the ones the
+        # daemon hosts (a hosted session is reached over the host socket). Seen
+        # 2026-09-28: a background session walked through a transient daemon into
+        # an unrelated session pane, and /clear wiped that session mid-task.
+        if (pid in host) exit 1
         if (pid in pane) { print pane[pid]; exit 0 }
         descendant_age = age
         pid = parent[pid]
