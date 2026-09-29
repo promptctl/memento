@@ -129,7 +129,36 @@ _find_claude_session() {
     case "${cmd%% *}" in
       claude|*/claude|*/claude/versions/*)
         rc=0; _claude_flags "$cmd" >/dev/null 2>&1 || rc=$?
+        # A host ends the walk: every claude above it is the daemon's spawner,
+        # a different session, and relaunching it kills that session.
+        [ "$rc" -eq 3 ] && return 1
         [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; } ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  done
+  return 1
+}
+
+# Succeeds when a claude daemon or daemon host is among this process's ancestors.
+#
+# Such a session is displayed only over the host's socket. Every pane or iTerm2
+# session above the host belongs to whichever session spawned the daemon, and
+# so do the $TMUX_PANE and $ITERM_SESSION_ID the daemon may have passed down.
+# Delivering there sends /clear and the handoff into an unrelated live session
+# (seen 2026-09-28, promptctl-handoff-yg0). A hosted session takes the detached
+# transport. The classification is _claude_flags' return 3, read only in the
+# flag region of a claude binary, so a handoff prompt naming a host flag never
+# counts. [LAW:single-enforcer]
+_hosted_by_daemon() {
+  local pid=$$ cmd i rc
+  for ((i = 0; i < 16; i++)); do
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] || return 1
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+    case "${cmd%% *}" in
+      claude|*/claude|*/claude/versions/*)
+        rc=0; _claude_flags "$cmd" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 3 ] && return 0 ;;
     esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
@@ -240,7 +269,7 @@ _discover_tmux_pane() {
   command -v tmux >/dev/null 2>&1 || return 1
   panes=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || return 1
   [ -n "$panes" ] || return 1
-  proctable=$(ps -eo pid=,ppid=,etime=,args=) || return 1
+  proctable=$(ps -eo pid=,ppid=,etime=) || return 1
   # The literal 'pane' lead-in is tmux labelling its own rows, so one pass can
   # tell the two snapshots apart without a separator line to get out of step.
   printf '%s\n%s\n' "$panes" "$proctable" | awk -v self=$$ -v maxhops=16 '
@@ -268,10 +297,7 @@ _discover_tmux_pane() {
     # and the caller declines; that is the safe direction, and the one the
     # elapsed-time check below already takes for the same reason.
     $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
-    NF >= 3      {
-      parent[$1] = $2; elapsed[$1] = $3
-      for (i = 4; i <= NF; i++) if ($i == "--bg-pty-host") { host[$1] = 1; break }
-    }
+    NF == 3      { parent[$1] = $2; elapsed[$1] = $3 }
     END {
       pid = self
       descendant_age = -1
@@ -283,12 +309,6 @@ _discover_tmux_pane() {
         if (elapsed[pid] !~ /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9][0-9]$/) exit 1
         age = ageof(elapsed[pid])
         if (age < descendant_age) exit 1
-        # A daemon host is a boundary, not a hop. Whatever pane sits above it
-        # spawned the daemon; it displays its own session, never the ones the
-        # daemon hosts (a hosted session is reached over the host socket). Seen
-        # 2026-09-28: a background session walked through a transient daemon into
-        # an unrelated session pane, and /clear wiped that session mid-task.
-        if (pid in host) exit 1
         if (pid in pane) { print pane[pid]; exit 0 }
         descendant_age = age
         pid = parent[pid]
@@ -365,10 +385,12 @@ _pane_target() {
 # names the entry to add.
 #
 # Some argv say the process is not a session at all: `--print`/`-p` is the
-# headless SDK bridge, `--bg-pty-host`/`--bg-spare` is the daemon's host, and a
-# subcommand word where the prompt would be (`claude daemon run`) is not a
-# session either. Those return 2 — the caller's question was "what would I
-# relaunch this as", and the answer is "nothing". Read only in the flag region, so
+# headless SDK bridge, and a subcommand word where the prompt would be
+# (`claude mcp serve`) is not a session either. Those return 2 — the caller's
+# question was "what would I relaunch this as", and the answer is "nothing".
+# The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`,
+# `claude bg-pty-host`) are not sessions either, and return 3 so
+# _hosted_by_daemon can tell a host apart from other non-sessions. Read only in the flag region, so
 # a handoff prompt that happens to contain the word `--print` is never mistaken
 # for the flag. [LAW:parse-dont-validate] exception: a prompt whose first word is
 # a subcommand name is indistinguishable from the subcommand in ps output.
@@ -389,7 +411,9 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         out+="${out:+ }$tok"; i=$((i+1)) ;;
-      -p|--print|--bg-pty-host|--bg-spare)
+      --bg-pty-host|--bg-spare)
+        return 3 ;;
+      -p|--print)
         return 2 ;;
       # boolean (`claude --help`, 2.1.283)
       -c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
@@ -407,7 +431,9 @@ _claude_flags() {
       -*)
         echo "unknown claude flag '$tok': add it to _claude_flags with its arity" >&2
         return 1 ;;
-      daemon|mcp|update|doctor|config|plugin|install|auth|login|logout|setup-token|agents|remote-control|bg-pty-host|migrate-installer)
+      daemon|bg-pty-host)
+        return 3 ;;
+      mcp|update|doctor|config|plugin|install|auth|login|logout|setup-token|agents|remote-control|migrate-installer)
         return 2 ;;
       *)
         break ;;  # first positional = the prompt; never propagate it or anything after
@@ -661,18 +687,27 @@ case "$MODE" in
     # below is typed on that value. Detection lives here once
     # [LAW:single-enforcer]; workers never re-detect.
     #
+    # A daemon-hosted session owns no pane and no iTerm2 session: every one its
+    # environment or ancestry could name belongs to the daemon's spawner. It is
+    # decided once, here, and skips both display transports for detached.
+    HOSTED=""
+    _hosted_by_daemon && HOSTED=1
+    #
     # The pane resolves from two spellings of one question — inherited when this
-    # process is a child of the pane's shell, discovered from ancestry when a
-    # daemon broke that chain — and they collapse to a single value here so no
+    # process is a child of the pane's shell, discovered from ancestry when the
+    # environment lost it — and they collapse to a single value here so no
     # code below has to know which spelling answered. [LAW:one-source-of-truth]
     # Each spelling is accepted only once tmux confirms it still names that pane,
     # and a spelling that fails to resolve hands the question on rather than
     # consuming the attempt. The inherited copy going stale is the same "the map
     # went missing" failure discovery exists for, so it must not be able to lose
     # the handoff on discovery's behalf. [FRAMING:representation]
-    TARGET=$(_pane_target "${TMUX_PANE:-}") \
-      || TARGET=$(_pane_target "$(_discover_tmux_pane || true)") \
-      || TARGET=""
+    TARGET=""
+    if [[ -z "$HOSTED" ]]; then
+      TARGET=$(_pane_target "${TMUX_PANE:-}") \
+        || TARGET=$(_pane_target "$(_discover_tmux_pane || true)") \
+        || TARGET=""
+    fi
     if [[ -n "$TARGET" ]]; then
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
@@ -685,7 +720,7 @@ case "$MODE" in
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
-    elif [[ "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
+    elif [[ -z "$HOSTED" && "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
       FOUND=$(_find_claude_session) \

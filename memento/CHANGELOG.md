@@ -2,7 +2,7 @@ Each version's section is written in the PR that bumps `.claude-plugin/plugin.js
 
 ## Unreleased
 
-- fix(message-in-a-bottle): a background session's handoff no longer lands in the pane of whichever session spawned its daemon. The pane discovery walk used to climb through `claude --bg-pty-host` into the pane above the daemon, which shows its own session, so `finalize-session` sent `/clear` and the handoff into an unrelated live session. A daemon host is now a boundary the walk never crosses, and a hosted session takes the detached transport.
+- fix(message-in-a-bottle): a background session's handoff no longer lands in the session that spawned its daemon. `finalize-session` used to reach that session's pane through the ancestry walk or an inherited `$TMUX_PANE`, then send `/clear` and the handoff into an unrelated live session; the same leak reached its iTerm2 session, and with `$CLAUDE_PID` unset the detached transport could relaunch the spawner's claude. A session with a daemon or daemon host among its ancestors (`claude daemon run`, `--bg-pty-host`, `--bg-spare`) now skips the tmux and iTerm2 transports for detached, and the claude finder stops at the host. Hosts are read by the same flag parser that reads relaunch flags, so a handoff message mentioning a host flag does not count.
 
 ## v0.10.0 - 2026-09-28
 
