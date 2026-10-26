@@ -1,0 +1,61 @@
+// memento's cc-candybar plugin: the session's context ceiling on the bar, and
+// the moves that change it. memento's hooks install this folder, as
+// $XDG_DATA_HOME/cc-candybar/plugins/memento/, with a `memento` launcher
+// beside this file that runs the memento install whose hooks last ran; and
+// they write `session/<session id>.json` there, the file the `status` source
+// reads, at every stop and session start and after every `ceiling` command
+// (memento/lib/candybar.py). Placed as `plugins.memento.ceiling`.
+{
+  sources: {
+    // { home, ceiling: <tokens> | "off", session: <the session layer> | null },
+    // or { home, refusal } when a layer memento's reader refuses has stopped
+    // its gate. `home` is the config home memento resolved for the session,
+    // handed back to each move so it writes the layers the gate reads.
+    status: {
+      scope: "session",
+      refresh: { watch: true },
+      read: { file: { json: true } },
+    },
+  },
+  segments: {
+    // Beside `context` wherever it stands, since the two numbers are read
+    // against each other. ↺ shows only while the session has a layer to drop,
+    // or beside a refusal, where dropping the session's layer may restore the
+    // gate.
+    ceiling: {
+      group: "model-context",
+      description: "memento's context ceiling for this session: − and + move it by 100K, ∞ lifts it, ↺ drops this session's own setting.",
+      // No file until memento has written one for this session.
+      when: '{{ hasKey .plugins.memento "status" }}',
+      template: '{{ with .plugins.memento.status }}⌈ {{ if hasKey . "refusal" }}⚠ {{ .refusal }} {{ action "plugins.memento.clear" "↺" }}{{ else }}{{ if eq (toString .ceiling) "off" }}off{{ else }}{{ template "formatTokenCount" .ceiling }} {{ action "plugins.memento.lower" "−" }} {{ action "plugins.memento.raise" "+" }} {{ action "plugins.memento.off" "∞" }}{{ end }}{{ if .session }} {{ action "plugins.memento.clear" "↺" }}{{ end }}{{ end }}{{ end }}',
+      // A refusal means memento's gate is off for this session until someone
+      // fixes the file it names.
+      bg: '{{ if hasKey .plugins.memento.status "refusal" }}{{ color "error" }}{{ else }}{{ tint }}{{ end }}',
+    },
+  },
+  // Each move is memento's own `ceiling` command on the session's layer, with
+  // memento's own value grammar. cc-candybar runs it for the clicked session,
+  // setting CLAUDE_CODE_SESSION_ID and CLAUDE_PROJECT_DIR to that session's.
+  actions: {
+    raise: {
+      run: ["./memento", "ceiling", "set", "session", "+100_000"],
+      env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
+      refreshes: ["status"],
+    },
+    lower: {
+      run: ["./memento", "ceiling", "set", "session", "-100_000"],
+      env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
+      refreshes: ["status"],
+    },
+    off: {
+      run: ["./memento", "ceiling", "set", "session", "off"],
+      env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
+      refreshes: ["status"],
+    },
+    clear: {
+      run: ["./memento", "ceiling", "clear", "session"],
+      env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
+      refreshes: ["status"],
+    },
+  },
+}

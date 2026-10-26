@@ -330,6 +330,25 @@ is blocked rather than let through. Otherwise, if the session stops again the ho
 forced attempt was spent. A further block would spend more context on the problem that
 *is* too much context.
 
+## On cc-candybar's bar
+
+memento ships a [cc-candybar](https://github.com/promptctl/cc-candybar) plugin that shows the
+ceiling in force for a session beside its context use, with controls that move this session's own
+layer: − and + by 100K, ∞ to lift it, ↺ to drop it. Its hooks install the plugin into
+cc-candybar's user plugin root, `$XDG_DATA_HOME/cc-candybar/plugins/memento/`, and replace it
+whenever the running memento ships a different one. Place `plugins.memento.ceiling` in your
+cc-candybar config, or add it from edit mode, to show it.
+
+The bar reads no layer itself. Every stop, a session's start or resume, `/clear`, and every
+`ceiling` command write the session's ceiling in force, as the Stop hook resolves it, to
+`session/<session id>.json` in the plugin's folder; a layer the reader refuses is written as that
+refusal, which the bar shows in its error colour. A control runs `ceiling` through the `memento`
+launcher beside the plugin's definition, for the session that was clicked. A change to the project
+or user layer reaches another session's bar at that session's next stop.
+
+memento writes that file only into a `session` folder cc-candybar has created, which it does when
+a daemon loads the plugin; cc-candybar also removes the files no session has written in 30 days.
+
 ## Repo layout
 
 One plugin, one directory, and every file is a real file:
@@ -341,6 +360,10 @@ memento/CHANGELOG.md
 memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
 memento/hooks/scripts/clear-session-ceiling.py
+memento/hooks/scripts/session-status.py
+memento/bin/memento
+memento/cc-candybar/plugin.json5
+memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
 memento/skills/address-pr-reviews/
@@ -352,7 +375,8 @@ memento/skills/ceiling/
 `memento/skills/ceiling/bin/ceiling` all read the config layers through
 `ceiling_config.py`, so the program that gates a session on its ceiling and the program
 that moves one cannot disagree about the file format or about which layer wins, and both
-hooks write the ceiling log through `ceiling_log.py`, so their lines read alike.
+hooks write the ceiling log through `ceiling_log.py`, so their lines read alike. Each of them
+also publishes the session's status for cc-candybar through `candybar.py`.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the

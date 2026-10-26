@@ -22,6 +22,9 @@ import tempfile
 
 SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The command installs memento's cc-candybar plugin under XDG_DATA_HOME; every child this suite runs
+# inherits a scratch one, so no run reaches the plugin root of the machine it runs on.
+os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "ceiling")

@@ -34,6 +34,10 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import GRACE, anchored, in_force, session_directory  # noqa: E402
 from ceiling_log import hook_payload, log  # noqa: E402
+# Every stop also refreshes the session's status on cc-candybar's bar, refusal included, so the bar
+# shows the number this stop gated on. A bar that could not be updated is a fact on this line, never
+# the end of the gate.
+from candybar import published  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
 # Matched rather than the absolute path, because the instruction hands out that path but an
@@ -297,8 +301,9 @@ except (Exception, SystemExit) as unresolved:
     # None/non-dict when the failure came before it was one - log needs a dict to name a session.
     reason = (unresolved.code if isinstance(unresolved, SystemExit)
               else f"{type(unresolved).__name__}: {unresolved}")
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason}", tokens=tokens, ceiling=ceiling)
+    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason}", tokens=tokens, ceiling=ceiling,
+        **published(hook))
     raise
-log(hook, label, tokens=tokens, ceiling=ceiling)
+log(hook, label, tokens=tokens, ceiling=ceiling, **published(hook))
 if verdict:
     print(json.dumps(verdict))
