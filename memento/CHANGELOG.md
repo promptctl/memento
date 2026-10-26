@@ -2,6 +2,8 @@ Each version's section is written in the PR that bumps `.claude-plugin/plugin.js
 
 ## v0.11.0 - 2026-10-26
 
+Needs cc-candybar 1.157.0 or later.
+
 - feat(ceiling): memento ships a cc-candybar plugin, so the bar shows and moves the context ceiling with nothing memento-specific in cc-candybar. Its hooks install the plugin into cc-candybar's user plugin root (`$XDG_DATA_HOME/cc-candybar/plugins/memento/`) and keep it current with the running memento; the Stop hook, the SessionStart hooks (now also on startup and resume) and every `ceiling` command write the session's ceiling in force, its own layer, or memento's refusal for the plugin to read, with the session's own `ceiling` command, so a click runs the memento that session runs. Place `plugins.memento.ceiling` in your cc-candybar config, or add it from edit mode, to show it.
 - feat(ceiling): `ceiling` exits 3 when the move stands but the session's status for the bar could not be written. A script that reads any nonzero exit as a refused move should treat 3 as a move that took effect.
 - fix(message-in-a-bottle): the successor claude starts when its relaunch line holds shell syntax. `finalize-session` spliced the kept flags, the claude path and the handoff path into the line tmux's default-shell or the iTerm2 shell runs, unquoted or in bare single quotes: `--model opus[1m]` is a glob zsh aborts on, and a quote in the home directory unbalanced the line, so in both cases the session was reset and nothing replaced it. Every piece is now shell-quoted by one builder the dry run prints and the workers run.
