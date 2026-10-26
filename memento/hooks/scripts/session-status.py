@@ -18,15 +18,13 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from candybar import publish  # noqa: E402
 from ceiling_config import anchored, session_directory  # noqa: E402
-from ceiling_log import hook_payload, log  # noqa: E402
+from ceiling_log import hook_payload, log, reason_of  # noqa: E402
 
 hook = None
 try:
     hook = hook_payload("session-status", "SessionStart")
     facts = publish(session_directory(hook["session_id"]), anchored(hook["cwd"]))
 except (Exception, SystemExit) as unresolved:
-    reason = (unresolved.code if isinstance(unresolved, SystemExit)
-              else f"{type(unresolved).__name__}: {unresolved}")
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason}")
+    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}")
     raise
 log(hook, "published", **facts)

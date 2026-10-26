@@ -9,7 +9,8 @@ session, `session/<session id>.json` in its folder, and memento writes it.
 [LAW:one-source-of-truth] what that file says is `in_force`, the number the Stop hook gates on,
 asked of the same layers the same way; the bar never reads memento's layers itself, and a move it
 makes is memento's own `ceiling` command. The definition is memento's shipped copy, installed
-byte for byte, so the reader on disk is always the one this writer shipped with.
+byte for byte under a line naming the memento that installed it, so the reader on disk is one a
+memento shipped, and the newest installed.
 
 cc-candybar owns the `session` folder: it creates it when a daemon loads the plugin and sweeps the
 files no session has written in 30 days. memento only writes into it, so on a machine where no
@@ -19,6 +20,7 @@ cc-candybar has loaded the plugin no file is written that nothing would ever swe
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -26,9 +28,11 @@ from pathlib import Path
 
 from ceiling_config import (CONFIG_HOME, CONFIG_NAME, anchored, ceiling_in, in_force,
                             session_directory)
+from ceiling_log import reason_of
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_DEFINITION = PLUGIN_ROOT / "cc-candybar" / "plugin.json5"
+MANIFEST = PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 # What the plugin's actions run, carried in each session's status rather than in a file beside the
 # definition: Claude Code keeps each version of a plugin, and each profile's copy, at its own path,
 # and a session's controls must run the memento whose hooks that session runs. One path shared by
@@ -40,11 +44,23 @@ PLUGINS = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "sha
 FOLDER = PLUGINS / "memento"
 STORAGE = FOLDER / "session"
 DEFINITION_NAME = "plugin.json5"
+# The first line of an installed definition, naming the memento that installed it.
+STAMP = re.compile(rb"// memento ([0-9]+(?:\.[0-9]+)*)\b[^\n]*\n")
 
 
-def contents():
-    """The folder as this memento ships it: each file's bytes and mode."""
-    return {DEFINITION_NAME: (SHIPPED_DEFINITION.read_bytes(), 0o644)}
+def definition():
+    """The definition as this memento installs it: the shipped file under a first line naming this
+    memento's version, which is how an install tells a newer memento's copy from an older one.
+    Read here rather than at import, so a hook whose plugin root cannot say still runs its gate."""
+    version = json.loads(MANIFEST.read_text())["version"]
+    return f"// memento {version}\n".encode() + SHIPPED_DEFINITION.read_bytes()
+
+
+def version_in(data):
+    """The memento version a definition's first line names, as numbers to compare, or () for one
+    that names none - a hand edit, or no stamp at all - which any memento replaces."""
+    stamp = STAMP.match(data)
+    return tuple(int(part) for part in stamp.group(1).split(b".")) if stamp else ()
 
 
 def bytes_at(path):
@@ -69,7 +85,7 @@ def placed(path, data, mode):
         partial.unlink(missing_ok=True)
 
 
-def created(wanted):
+def created(data):
     """A new plugin folder, staged whole in the root and renamed into place, so the daemon never
     sees a plugin folder with no definition in it, which it reports as a broken plugin. False when
     another hook's rename won, and the folder it placed is there to compare. The stage is a
@@ -78,8 +94,9 @@ def created(wanted):
     # A name no other run holds, so a stage a killed run left behind never blocks this one.
     stage = Path(tempfile.mkdtemp(prefix=".memento-", dir=PLUGINS))
     try:
-        for name, (data, mode) in wanted.items():
-            placed(stage / name, data, mode)
+        # mkdtemp's 0700 would become the plugin folder's mode with the rename.
+        stage.chmod(0o755)
+        placed(stage / DEFINITION_NAME, data, 0o644)
         stage.rename(FOLDER)
         return True
     except OSError:
@@ -93,15 +110,24 @@ def created(wanted):
 
 def install():
     """The plugin folder brought to what this memento ships, and what that took: `installed`,
-    `updated` or `current`. A folder already there has only its differing files replaced, so a
-    current one sees no write at all: cc-candybar watches the root and this runs at every stop."""
-    wanted = contents()
+    `updated`, `current`, or `newer` where a newer memento's definition is in place, which this one
+    leaves standing. A current folder sees no write at all: cc-candybar watches the root and this
+    runs at every stop.
+
+    [LAW:one-source-of-truth] the folder holds the newest definition any installed memento ships.
+    Two profiles, or two versions of the plugin, each running its own memento, would otherwise
+    rewrite it at every stop of either, and the daemon reload the plugin each time. So a newer
+    memento's definition reads the status every older one writes."""
+    wanted = definition()
     if not FOLDER.is_dir() and created(wanted):
         return "installed"
-    stale = [name for name, (data, _) in wanted.items() if bytes_at(FOLDER / name) != data]
-    for name in stale:
-        placed(FOLDER / name, *wanted[name])
-    return "updated" if stale else "current"
+    there = bytes_at(FOLDER / DEFINITION_NAME)
+    if there == wanted:
+        return "current"
+    if there is not None and version_in(there) > version_in(wanted):
+        return "newer"
+    placed(FOLDER / DEFINITION_NAME, wanted, 0o644)
+    return "updated"
 
 
 def status(directory, anchor):
@@ -160,7 +186,5 @@ def published(hook):
     try:
         return publish(session_directory(hook["session_id"]), anchored(hook["cwd"]))
     except (Exception, SystemExit) as failure:
-        reason = (failure.code if isinstance(failure, SystemExit)
-                  else f"{type(failure).__name__}: {failure}")
-        print(f"memento: cc-candybar plugin not updated: {reason}", file=sys.stderr)
-        return {"candybar": f"failed: {reason}"}
+        print(f"memento: cc-candybar plugin not updated: {reason_of(failure)}", file=sys.stderr)
+        return {"candybar": f"failed: {reason_of(failure)}"}

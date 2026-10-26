@@ -3,7 +3,9 @@
 // $XDG_DATA_HOME/cc-candybar/plugins/memento/, and write
 // `session/<session id>.json` there, the file the `status` source reads, at
 // every stop and session start and after every `ceiling` command
-// (memento/lib/candybar.py). Placed as `plugins.memento.ceiling`.
+// (memento/lib/candybar.py). Placed as `plugins.memento.ceiling`. Of two
+// mementos installing it, the newer one's copy stands, so this definition
+// reads the status of every older memento.
 {
   sources: {
     // { home, command, ceiling: <tokens> | "off", session: <the session
@@ -20,15 +22,15 @@
   },
   segments: {
     // Beside `context` wherever it stands, since the two numbers are read
-    // against each other. ↺ shows only while the session has a layer to drop,
-    // or beside a refusal, where dropping the session's layer may restore the
-    // gate.
+    // against each other. − shows only above 100K, since a move below zero is
+    // refused. ↺ shows only while the session has a layer to drop, or beside a
+    // refusal, where dropping the session's layer may restore the gate.
     ceiling: {
       group: "model-context",
       description: "memento's context ceiling for this session: − and + move it by 100K, ∞ lifts it, ↺ drops this session's own setting.",
       // No file until memento has written one for this session.
       when: '{{ hasKey .plugins.memento "status" }}',
-      template: '{{ with .plugins.memento.status }}⌈ {{ if hasKey . "refusal" }}⚠ {{ .refusal }} {{ action "plugins.memento.clear" "↺" }}{{ else }}{{ if eq (toString .ceiling) "off" }}off{{ else }}{{ template "formatTokenCount" .ceiling }} {{ action "plugins.memento.lower" "−" }} {{ action "plugins.memento.raise" "+" }} {{ action "plugins.memento.off" "∞" }}{{ end }}{{ if .session }} {{ action "plugins.memento.clear" "↺" }}{{ end }}{{ end }}{{ end }}',
+      template: '{{ with .plugins.memento.status }}⌈ {{ if hasKey . "refusal" }}⚠ {{ .refusal }} {{ action "plugins.memento.clear" "↺" }}{{ else }}{{ if eq (toString .ceiling) "off" }}off{{ else }}{{ template "formatTokenCount" .ceiling }} {{ if gt .ceiling 100000 }}{{ action "plugins.memento.lower" "−" }} {{ end }}{{ action "plugins.memento.raise" "+" }} {{ action "plugins.memento.off" "∞" }}{{ end }}{{ if .session }} {{ action "plugins.memento.clear" "↺" }}{{ end }}{{ end }}{{ end }}',
       // A refusal means memento's gate is off for this session until someone
       // fixes the file it names.
       bg: '{{ if hasKey .plugins.memento.status "refusal" }}{{ color "error" }}{{ else }}{{ tint }}{{ end }}',

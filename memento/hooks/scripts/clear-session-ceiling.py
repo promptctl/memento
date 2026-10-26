@@ -19,7 +19,7 @@ import sys
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import CONFIG_NAME, session_directory  # noqa: E402
-from ceiling_log import hook_payload, log  # noqa: E402
+from ceiling_log import hook_payload, log, reason_of  # noqa: E402
 # The session's status on cc-candybar's bar is written again once the override is gone, so the bar
 # shows the ceiling the successor runs under.
 from candybar import published  # noqa: E402
@@ -51,9 +51,7 @@ try:
     with contextlib.suppress(OSError):
         directory.rmdir()
 except (Exception, SystemExit) as unresolved:
-    reason = (unresolved.code if isinstance(unresolved, SystemExit)
-              else f"{type(unresolved).__name__}: {unresolved}")
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason}", override=override,
+    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}", override=override,
         **published(hook))
     raise
 log(hook, "dropped" if dropped else "no-override", override=override, **published(hook))

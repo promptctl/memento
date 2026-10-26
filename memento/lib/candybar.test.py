@@ -27,6 +27,8 @@ CLEAR_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "clear-session-ceiling.py"
 STATUS_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "session-status.py")
 CEILING = os.path.join(PLUGIN, "skills", "ceiling", "bin", "ceiling")
 SHIPPED = os.path.join(PLUGIN, "cc-candybar", "plugin.json5")
+VERSION = json.load(open(os.path.join(PLUGIN, ".claude-plugin", "plugin.json")))["version"]
+INSTALLED = f"// memento {VERSION}\n".encode() + open(SHIPPED, "rb").read()
 sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING  # noqa: E402
 
@@ -100,8 +102,10 @@ w = World(storage=False)
 done = w.hook(STATUS_HOOK, "SessionStart", source="startup")
 check("a starting session's hook succeeds where no cc-candybar has loaded the plugin",
       done.returncode == 0, done.stderr)
-check("it installs the plugin's definition byte for byte",
-      open(os.path.join(w.folder, "plugin.json5"), "rb").read() == open(SHIPPED, "rb").read())
+check("it installs the plugin's definition byte for byte, under a line naming this memento",
+      open(os.path.join(w.folder, "plugin.json5"), "rb").read() == INSTALLED)
+check("in a folder anyone may read, as a plugin folder is",
+      os.stat(w.folder).st_mode & 0o777 == 0o755, oct(os.stat(w.folder).st_mode))
 check("and nothing beside it",
       os.listdir(w.folder) == ["plugin.json5"], os.listdir(w.folder))
 check("and leaves no stage behind in the plugin root",
@@ -120,9 +124,25 @@ check("an install that is current writes nothing, so the watched root sees no ch
 with open(os.path.join(w.folder, "plugin.json5"), "w") as handle:
     handle.write("{ an older memento's definition }")
 w.hook(STATUS_HOOK, "SessionStart", source="startup")
-check("a definition that differs from this memento's is replaced",
-      open(os.path.join(w.folder, "plugin.json5"), "rb").read() == open(SHIPPED, "rb").read()
+check("a definition that names no memento is replaced",
+      open(os.path.join(w.folder, "plugin.json5"), "rb").read() == INSTALLED
       and "plugin=updated" in w.last_log(), w.last_log())
+
+for older in ("0.0.1", "0.9.99"):
+    with open(os.path.join(w.folder, "plugin.json5"), "w") as handle:
+        handle.write(f"// memento {older}\n{{ an older memento's definition }}")
+    w.hook(STATUS_HOOK, "SessionStart", source="startup")
+    check(f"an older memento's definition ({older}) is replaced",
+          open(os.path.join(w.folder, "plugin.json5"), "rb").read() == INSTALLED
+          and "plugin=updated" in w.last_log(), w.last_log())
+
+newer = "// memento 99.0.0\n{ a newer memento's definition }"
+with open(os.path.join(w.folder, "plugin.json5"), "w") as handle:
+    handle.write(newer)
+w.hook(STATUS_HOOK, "SessionStart", source="startup")
+check("a newer memento's definition is left standing, so two mementos never take turns",
+      open(os.path.join(w.folder, "plugin.json5")).read() == newer
+      and "plugin=newer" in w.last_log(), w.last_log())
 
 # --- the status ---
 
