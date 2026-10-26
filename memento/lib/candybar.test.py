@@ -231,6 +231,21 @@ check("a status that cannot be written exits 3, and the move it follows stands",
       done.returncode == 3 and "cc-candybar status not written" in done.stderr
       and f"this session        {DEFAULT_CEILING + 100_000:,}" in done.stdout,
       (done.returncode, done.stderr, done.stdout))
+# A publish that fails for any reason, not only the filesystem's, is the same exit 3: a copy of
+# this plugin whose manifest names no version cannot stamp its definition.
+broken = os.path.join(tempfile.mkdtemp(dir=SCRATCH), "memento")
+shutil.copytree(PLUGIN, broken)
+with open(os.path.join(broken, ".claude-plugin", "plugin.json"), "w") as handle:
+    handle.write("{}")
+w2 = World()
+done = w2.ceiling("set", "session", "+100_000",
+                  program=[sys.executable, os.path.join(broken, "skills", "ceiling", "bin", "ceiling")])
+check("a publish that fails for any reason exits 3, with no traceback, and the move stands",
+      done.returncode == 3 and "Traceback" not in done.stderr
+      and "cc-candybar status not written: KeyError" in done.stderr
+      and f"this session        {DEFAULT_CEILING + 100_000:,}" in done.stdout,
+      (done.returncode, done.stderr))
+
 check("and leaves no partial behind",
       os.listdir(os.path.join(w.folder, "session")) == [f"{SESSION}.json"],
       os.listdir(os.path.join(w.folder, "session")))

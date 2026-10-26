@@ -22,8 +22,9 @@
   },
   segments: {
     // Beside `context` wherever it stands, since the two numbers are read
-    // against each other. − shows only above 100K, since a move below zero is
-    // refused. ↺ shows only while the session has a layer to drop, or beside a
+    // against each other. − shows only above 100K: below it the move is
+    // refused, and at it the move sets a ceiling of 0, which ends every turn
+    // in a hand-off. ↺ shows only while the session has a layer to drop, or beside a
     // refusal, where dropping the session's layer may restore the gate.
     ceiling: {
       group: "model-context",

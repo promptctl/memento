@@ -43,6 +43,7 @@ from ceiling_config import (CONFIG_NAME, PROJECT_CONFIG_DIR, USER_CONFIG,  # noq
                             Written, anchored, ceiling_in, committed, folded, in_force,
                             live_shared, project_file, session_directory, staging)
 from candybar import publish  # noqa: E402
+from ceiling_log import reason_of  # noqa: E402
 
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 ANCHOR = anchored(os.getcwd())
@@ -369,8 +370,8 @@ def publishing():
     try:
         print("cc-candybar  " + " ".join(f"{k}={v}" for k, v in publish(directory, ANCHOR).items()))
         return None
-    except OSError as refusal:
-        print(f"ceiling: cc-candybar status not written: {refusal}", file=sys.stderr)
+    except Exception as failure:
+        print(f"ceiling: cc-candybar status not written: {reason_of(failure)}", file=sys.stderr)
         return 3
 
 
