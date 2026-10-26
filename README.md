@@ -342,9 +342,9 @@ cc-candybar config, or add it from edit mode, to show it.
 The bar reads no layer itself. Every stop, a session's start or resume, `/clear`, and every
 `ceiling` command write the session's ceiling in force, as the Stop hook resolves it, to
 `session/<session id>.json` in the plugin's folder; a layer the reader refuses is written as that
-refusal, which the bar shows in its error colour. A control runs `ceiling` through the `memento`
-launcher beside the plugin's definition, for the session that was clicked. A change to the project
-or user layer reaches another session's bar at that session's next stop.
+refusal, which the bar shows in its error colour. The file also names the session's own `ceiling`
+command, so a control runs the memento that session runs, for the session that was clicked. A
+change to the project or user layer reaches another session's bar at that session's next stop.
 
 memento writes that file only into a `session` folder cc-candybar has created, which it does when
 a daemon loads the plugin; cc-candybar also removes the files no session has written in 30 days.
@@ -361,7 +361,6 @@ memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
 memento/hooks/scripts/clear-session-ceiling.py
 memento/hooks/scripts/session-status.py
-memento/bin/memento
 memento/cc-candybar/plugin.json5
 memento/lib/candybar.py
 memento/lib/ceiling_config.py

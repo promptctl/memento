@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for memento's cc-candybar plugin: the folder memento installs and the status it writes.
 
-Every case runs memento's real programs as subprocesses - the hooks with a payload on stdin, the
-`ceiling` command, the launcher the install puts in the plugin's folder - under a scratch config
-home and a scratch XDG_DATA_HOME, then reads what landed on disk. [LAW:behavior-not-structure]
+Every case runs memento's real programs as subprocesses - the hooks with a payload on stdin, and
+the `ceiling` command a session's status names, started as cc-candybar's run starts it - under a
+scratch config home and a scratch XDG_DATA_HOME, then reads what landed on disk. [LAW:behavior-not-structure]
 cc-candybar reads only those files, so they are the contract.
 
 Run: python3 candybar.test.py
@@ -26,7 +26,6 @@ STOP_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
 CLEAR_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "clear-session-ceiling.py")
 STATUS_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "session-status.py")
 CEILING = os.path.join(PLUGIN, "skills", "ceiling", "bin", "ceiling")
-COMMANDS = os.path.join(PLUGIN, "bin", "memento")
 SHIPPED = os.path.join(PLUGIN, "cc-candybar", "plugin.json5")
 sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING  # noqa: E402
@@ -65,15 +64,19 @@ class World:
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items()
                if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME", "CLAUDE_CODE_SESSION_ID")}
-        env.update(MEMENTO_CONFIG_HOME=self.home, XDG_DATA_HOME=self.data,
-                   MEMENTO_CEILING_LOG=self.log, **extra)
+        env.update({"MEMENTO_CONFIG_HOME": self.home, "XDG_DATA_HOME": self.data,
+                    "MEMENTO_CEILING_LOG": self.log, **extra})
         return env
 
-    def hook(self, script, event, **payload):
+    def hook(self, script, event, cwd=None, env=None, **payload):
         body = {"hook_event_name": event, "session_id": SESSION, "cwd": self.project,
                 "transcript_path": self.transcript, **payload}
         return subprocess.run([sys.executable, script], input=json.dumps(body), text=True,
-                              capture_output=True, env=self.env())
+                              capture_output=True, cwd=cwd, env=env or self.env())
+
+    def where(self):
+        """What every status carries: the config home and the session's `ceiling` command."""
+        return {"home": self.home, "command": CEILING}
 
     def ceiling(self, *argv, program=None, cwd=None):
         """`ceiling` as cc-candybar's run starts it: the session's id and project in the
@@ -99,10 +102,8 @@ check("a starting session's hook succeeds where no cc-candybar has loaded the pl
       done.returncode == 0, done.stderr)
 check("it installs the plugin's definition byte for byte",
       open(os.path.join(w.folder, "plugin.json5"), "rb").read() == open(SHIPPED, "rb").read())
-launcher = os.path.join(w.folder, "memento")
-check("and an executable launcher beside it", os.access(launcher, os.X_OK))
-check("which runs this memento's commands", COMMANDS in open(launcher).read(),
-      open(launcher).read())
+check("and nothing beside it",
+      os.listdir(w.folder) == ["plugin.json5"], os.listdir(w.folder))
 check("and leaves no stage behind in the plugin root",
       os.listdir(os.path.dirname(w.folder)) == ["memento"], os.listdir(os.path.dirname(w.folder)))
 check("no session folder: no status is written, and nothing that nothing would sweep",
@@ -128,11 +129,11 @@ check("a definition that differs from this memento's is replaced",
 w = World()
 w.hook(STATUS_HOOK, "SessionStart", source="startup")
 check("a starting session's status is the ceiling in force, with no session layer",
-      w.status() == {"home": w.home, "ceiling": DEFAULT_CEILING, "session": None}, w.status())
+      w.status() == {**w.where(), "ceiling": DEFAULT_CEILING, "session": None}, w.status())
 
 done = w.ceiling("set", "session", "+100_000")
 check("a move writes the session's status after it", done.returncode == 0
-      and w.status() == {"home": w.home, "ceiling": DEFAULT_CEILING + 100_000,
+      and w.status() == {**w.where(), "ceiling": DEFAULT_CEILING + 100_000,
                          "session": str(DEFAULT_CEILING + 100_000)}, (done.stderr, w.status()))
 check("and says so in its output", "cc-candybar  plugin=current status=written" in done.stdout,
       done.stdout)
@@ -149,7 +150,7 @@ check("every stop writes the status the gate resolved", done.returncode == 0
 done = w.hook(CLEAR_HOOK, "SessionStart", source="clear")
 check("/clear drops the session's layer and the status shows the ceiling beneath",
       done.returncode == 0
-      and w.status() == {"home": w.home, "ceiling": DEFAULT_CEILING, "session": None},
+      and w.status() == {**w.where(), "ceiling": DEFAULT_CEILING, "session": None},
       (done.stderr, w.status()))
 
 # --- a refusal ---
@@ -160,26 +161,59 @@ status = w.status() or {}
 check("a stop over a layer the reader refuses still fails loudly", done.returncode != 0,
       done.stderr)
 check("and the status carries memento's refusal, for the bar to show",
-      set(status) == {"home", "refusal"} and "lots" in status.get("refusal", ""), status)
+      set(status) == {"home", "command", "refusal"} and "lots" in status.get("refusal", ""),
+      status)
 os.remove(os.path.join(w.folder, "session", f"{SESSION}.json"))
 done = w.ceiling("show")
 check("so does `ceiling`, which exits 1 over it as before",
       done.returncode == 1 and "lots" in (w.status() or {}).get("refusal", ""),
       (done.returncode, w.status()))
 
-# --- the launcher, as cc-candybar's run starts it ---
+w = World(user_conf="ceiling = lots\n")
+done = w.ceiling("set", "session", "+100_000")
+check("a move refused over an unusable layer still writes the refusal for the bar",
+      done.returncode == 1 and "lots" in (w.status() or {}).get("refusal", ""),
+      (done.returncode, done.stderr, w.status()))
+
+# --- the session's command, as cc-candybar's run starts it ---
 
 w = World()
 w.hook(STATUS_HOOK, "SessionStart", source="startup")
-done = w.ceiling("ceiling", "set", "session", "-100_000",
-                 program=[os.path.join(w.folder, "memento")], cwd=w.folder)
-check("the launcher runs `ceiling` from the plugin's folder, as the plugin's actions do",
+command = w.status()["command"]
+check("the status names the session's `ceiling` command by absolute path",
+      os.path.isabs(command) and os.access(command, os.X_OK), command)
+done = w.ceiling("set", "session", "-100_000", program=[command], cwd=w.folder)
+check("which runs from the plugin's folder, as the plugin's actions do",
       done.returncode == 0
-      and w.status() == {"home": w.home, "ceiling": DEFAULT_CEILING - 100_000,
+      and w.status() == {**w.where(), "ceiling": DEFAULT_CEILING - 100_000,
                          "session": str(DEFAULT_CEILING - 100_000)}, (done.stderr, w.status()))
-done = subprocess.run([COMMANDS, "status"], text=True, capture_output=True)
-check("a command memento has none of exits 2, naming it",
-      done.returncode == 2 and "status" in done.stderr, done.stderr)
+check("and every action runs the command the status names",
+      open(SHIPPED).read().count('run: ["{{ .plugins.memento.status.command }}"') == 4)
+
+# A config home named relative to the session's directory names another directory where
+# cc-candybar runs the command, so the status carries it absolute.
+w = World()
+env = w.env(MEMENTO_CONFIG_HOME=os.path.relpath(w.home, w.project))
+w.hook(STATUS_HOOK, "SessionStart", cwd=w.project, env=env, source="startup")
+home = (w.status() or {}).get("home", "")
+check("a relative config home is written absolute",
+      os.path.isabs(home) and os.path.realpath(home) == os.path.realpath(w.home), w.status())
+
+# --- a status that cannot be written ---
+
+w = World()
+w.hook(STATUS_HOOK, "SessionStart", source="startup")
+blocked = os.path.join(w.folder, "session", f"{SESSION}.json")
+os.remove(blocked)
+os.mkdir(blocked)
+done = w.ceiling("set", "session", "+100_000")
+check("a status that cannot be written exits 3, and the move it follows stands",
+      done.returncode == 3 and "cc-candybar status not written" in done.stderr
+      and f"this session        {DEFAULT_CEILING + 100_000:,}" in done.stdout,
+      (done.returncode, done.stderr, done.stdout))
+check("and leaves no partial behind",
+      os.listdir(os.path.join(w.folder, "session")) == [f"{SESSION}.json"],
+      os.listdir(os.path.join(w.folder, "session")))
 
 if failures:
     sys.exit(f"{len(failures)} failed: {', '.join(failures)}")

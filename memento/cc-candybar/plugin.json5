@@ -1,16 +1,17 @@
 // memento's cc-candybar plugin: the session's context ceiling on the bar, and
 // the moves that change it. memento's hooks install this folder, as
-// $XDG_DATA_HOME/cc-candybar/plugins/memento/, with a `memento` launcher
-// beside this file that runs the memento install whose hooks last ran; and
-// they write `session/<session id>.json` there, the file the `status` source
-// reads, at every stop and session start and after every `ceiling` command
+// $XDG_DATA_HOME/cc-candybar/plugins/memento/, and write
+// `session/<session id>.json` there, the file the `status` source reads, at
+// every stop and session start and after every `ceiling` command
 // (memento/lib/candybar.py). Placed as `plugins.memento.ceiling`.
 {
   sources: {
-    // { home, ceiling: <tokens> | "off", session: <the session layer> | null },
-    // or { home, refusal } when a layer memento's reader refuses has stopped
-    // its gate. `home` is the config home memento resolved for the session,
-    // handed back to each move so it writes the layers the gate reads.
+    // { home, command, ceiling: <tokens> | "off", session: <the session
+    // layer> | null }, or { home, command, refusal } when a layer memento's
+    // reader refuses has stopped its gate. `home` is the config home memento
+    // resolved for the session and `command` the `ceiling` command of the
+    // memento install the session runs, both handed to each move, so a click
+    // runs that session's memento over the layers its gate reads.
     status: {
       scope: "session",
       refresh: { watch: true },
@@ -33,27 +34,27 @@
       bg: '{{ if hasKey .plugins.memento.status "refusal" }}{{ color "error" }}{{ else }}{{ tint }}{{ end }}',
     },
   },
-  // Each move is memento's own `ceiling` command on the session's layer, with
-  // memento's own value grammar. cc-candybar runs it for the clicked session,
+  // Each move is the session's own memento's `ceiling` command on the
+  // session's layer, with memento's own value grammar. cc-candybar runs it for the clicked session,
   // setting CLAUDE_CODE_SESSION_ID and CLAUDE_PROJECT_DIR to that session's.
   actions: {
     raise: {
-      run: ["./memento", "ceiling", "set", "session", "+100_000"],
+      run: ["{{ .plugins.memento.status.command }}", "set", "session", "+100_000"],
       env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
       refreshes: ["status"],
     },
     lower: {
-      run: ["./memento", "ceiling", "set", "session", "-100_000"],
+      run: ["{{ .plugins.memento.status.command }}", "set", "session", "-100_000"],
       env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
       refreshes: ["status"],
     },
     off: {
-      run: ["./memento", "ceiling", "set", "session", "off"],
+      run: ["{{ .plugins.memento.status.command }}", "set", "session", "off"],
       env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
       refreshes: ["status"],
     },
     clear: {
-      run: ["./memento", "ceiling", "clear", "session"],
+      run: ["{{ .plugins.memento.status.command }}", "clear", "session"],
       env: { MEMENTO_CONFIG_HOME: "{{ .plugins.memento.status.home }}" },
       refreshes: ["status"],
     },

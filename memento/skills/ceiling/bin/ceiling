@@ -17,12 +17,13 @@ Every command also brings memento's cc-candybar plugin up to date and writes thi
 for it (lib/candybar.py), which is how a move made from the bar shows on the bar.
 
 Exit codes, which are a contract: 0 the files now say what this printed; 1 the ceiling asked for
-cannot be written or cannot be read back, or the session's status for cc-candybar cannot be written
-- a config file or a resolved ceiling that is not usable, the filesystem refusing a read or a write,
-or the session or repository this needs not being there, named with the file and, where a line is
-what to go fix, the line - and any `wrote` line already printed still stands, because the unusable
-file can be a layer this command never touched; 2 the line as typed does not parse, which is
-argparse's own code for it.
+cannot be written or cannot be read back - a config file or a resolved ceiling that is not usable,
+the filesystem refusing a read or a write, or the session or repository this needs not being there,
+named with the file and, where a line is what to go fix, the line - and any `wrote` line already
+printed still stands, because the unusable file can be a layer this command never touched; 2 the
+line as typed does not parse, which is argparse's own code for it; 3 the files say what this
+printed, but the session's status for cc-candybar could not be written, so the bar does not show
+it yet.
 """
 
 import argparse
@@ -360,13 +361,27 @@ directory = this_session()
 # the reason, and a traceback is that promise broken for the agent reading stderr for `ceiling: `.
 # The errno message carries both, so there is nothing to add to it. [LAW:effects-at-boundaries]
 #
-# The session's status on cc-candybar's bar is written before the report, because the report exits
-# on a layer the reader refuses, and the bar is where that refusal has to show.
+# The session's status on cc-candybar's bar is written however the step ended - a move refused over
+# an unusable layer included, since the bar is where that refusal has to show - and before the
+# report, which exits on such a layer. Writing it is not this command's job, so a failure to is
+# reported on its own line and in its own exit code, and the move and the report stand.
+def publishing():
+    try:
+        print("cc-candybar  " + " ".join(f"{k}={v}" for k, v in publish(directory, ANCHOR).items()))
+        return None
+    except OSError as refusal:
+        print(f"ceiling: cc-candybar status not written: {refusal}", file=sys.stderr)
+        return 3
+
+
 try:
-    {"show": lambda: None,
-     VALUE_TAKING: lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
-     "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
-    print("cc-candybar  " + " ".join(f"{k}={v}" for k, v in publish(directory, ANCHOR).items()))
+    try:
+        {"show": lambda: None,
+         VALUE_TAKING: lambda: move(SCOPES[args.scope], args.ceiling, directory, ANCHOR),
+         "clear": lambda: clear(SCOPES[args.scope], directory, ANCHOR)}[args.command]()
+    finally:
+        unpublished = publishing()
     report(directory, ANCHOR)
 except OSError as refusal:
     sys.exit(f"ceiling: {refusal}")
+sys.exit(unpublished)

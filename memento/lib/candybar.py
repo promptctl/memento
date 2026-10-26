@@ -19,9 +19,9 @@ cc-candybar has loaded the plugin no file is written that nothing would ever swe
 import json
 import math
 import os
-import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from ceiling_config import (CONFIG_HOME, CONFIG_NAME, anchored, ceiling_in, in_force,
@@ -29,32 +29,22 @@ from ceiling_config import (CONFIG_HOME, CONFIG_NAME, anchored, ceiling_in, in_f
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SHIPPED_DEFINITION = PLUGIN_ROOT / "cc-candybar" / "plugin.json5"
-COMMANDS = PLUGIN_ROOT / "bin" / "memento"
+# What the plugin's actions run, carried in each session's status rather than in a file beside the
+# definition: Claude Code keeps each version of a plugin, and each profile's copy, at its own path,
+# and a session's controls must run the memento whose hooks that session runs. One path shared by
+# the folder would be whichever install's hook ran last, rewritten back and forth by two profiles.
+CEILING_COMMAND = PLUGIN_ROOT / "skills" / "ceiling" / "bin" / "ceiling"
 # The user's plugin root, as cc-candybar resolves it: where an app drops a plugin folder.
 PLUGINS = (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
            / "cc-candybar" / "plugins")
 FOLDER = PLUGINS / "memento"
 STORAGE = FOLDER / "session"
 DEFINITION_NAME = "plugin.json5"
-LAUNCHER_NAME = "memento"
-
-
-def launcher():
-    """The launcher the plugin's actions run: memento's commands, at this install of memento.
-
-    A `run` action starts in the plugin's folder with no shell and no PATH lookup, so the folder
-    holds the program itself. Claude Code keeps each version of a plugin at its own path, so the
-    path is written at install, and the hooks of an upgraded memento rewrite it."""
-    return (f"#!/bin/sh\n"
-            f"# memento's commands, as installed at {PLUGIN_ROOT}; written by its hooks.\n"
-            f"exec {shlex.quote(str(COMMANDS))} \"$@\"\n").encode()
 
 
 def contents():
-    """The folder as this memento ships it: each file's bytes and mode, the launcher first, so a
-    definition naming it never lands before it."""
-    return {LAUNCHER_NAME: (launcher(), 0o755),
-            DEFINITION_NAME: (SHIPPED_DEFINITION.read_bytes(), 0o644)}
+    """The folder as this memento ships it: each file's bytes and mode."""
+    return {DEFINITION_NAME: (SHIPPED_DEFINITION.read_bytes(), 0o644)}
 
 
 def bytes_at(path):
@@ -66,11 +56,17 @@ def bytes_at(path):
 
 def placed(path, data, mode):
     """One file written whole: staged under a dot-name, which cc-candybar's load never reads, then
-    renamed into place, because the daemon watches this folder and loads what appears in it."""
+    renamed into place, because the daemon watches this folder and loads what appears in it.
+
+    [LAW:no-silent-failure] a write that fails leaves no partial: a dot-name is invisible to
+    cc-candybar's load and to its sweep alike, so one left behind would stay forever."""
     partial = path.with_name(f".{path.name}.{os.getpid()}")
-    partial.write_bytes(data)
-    partial.chmod(mode)
-    os.replace(partial, path)
+    try:
+        partial.write_bytes(data)
+        partial.chmod(mode)
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def created(wanted):
@@ -79,8 +75,8 @@ def created(wanted):
     another hook's rename won, and the folder it placed is there to compare. The stage is a
     dot-name, which cc-candybar's load never reads. [LAW:no-ambient-temporal-coupling]"""
     PLUGINS.mkdir(parents=True, exist_ok=True)
-    stage = PLUGINS / f".memento-{os.getpid()}"
-    stage.mkdir()
+    # A name no other run holds, so a stage a killed run left behind never blocks this one.
+    stage = Path(tempfile.mkdtemp(prefix=".memento-", dir=PLUGINS))
     try:
         for name, (data, mode) in wanted.items():
             placed(stage / name, data, mode)
@@ -113,15 +109,17 @@ def status(directory, anchor):
     layer, or the refusal that stops memento's gate for this session.
 
     [LAW:no-silent-failure] a layer the reader refuses is shown on the bar as that refusal, in the
-    error colour, rather than as a ceiling the gate is no longer enforcing."""
+    error colour, rather than as a ceiling the gate is no longer enforcing. `home` and `command`
+    are in every status, a refusal's too, because the control beside a refusal is a move."""
+    where = {"home": str(CONFIG_HOME), "command": str(CEILING_COMMAND)}
     try:
         ceiling = in_force(directory, anchor)
         layer = ceiling_in(directory / CONFIG_NAME)
     except SystemExit as refusal:
-        return {"home": str(CONFIG_HOME), "refusal": str(refusal.code)}
+        return {**where, "refusal": str(refusal.code)}
     except OSError as refusal:
-        return {"home": str(CONFIG_HOME), "refusal": f"memento config: {refusal}"}
-    return {"home": str(CONFIG_HOME),
+        return {**where, "refusal": f"memento config: {refusal}"}
+    return {**where,
             "ceiling": "off" if ceiling == math.inf else ceiling,
             "session": layer.text if layer else None}
 

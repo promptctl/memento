@@ -35,8 +35,10 @@ sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import GRACE, anchored, in_force, session_directory  # noqa: E402
 from ceiling_log import hook_payload, log  # noqa: E402
 # Every stop also refreshes the session's status on cc-candybar's bar, refusal included, so the bar
-# shows the number this stop gated on. A bar that could not be updated is a fact on this line, never
-# the end of the gate.
+# shows the ceiling in force as the turn ends. It is asked of the layers again rather than handed the
+# number gated on, so one reader writes the status for every caller; a move landing between the two
+# reads reaches the bar at the next stop. A bar that could not be updated is a fact on this line,
+# never the end of the gate.
 from candybar import published  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
