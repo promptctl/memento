@@ -21,6 +21,9 @@ import tempfile
 # subdirectory, but the suite no longer abandons one per case in the system temp dir.
 SCRATCH = tempfile.mkdtemp(prefix="context-ceiling-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The hooks install memento's cc-candybar plugin under XDG_DATA_HOME; every child this suite runs
+# inherits a scratch one, so no run reaches the plugin root of the machine it runs on.
+os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
 
 
 def scratch_dir():
@@ -49,6 +52,7 @@ sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE  # noqa: E402
 
 CLEAR_HOOK = os.path.join(HERE, "clear-session-ceiling.py")
+STATUS_HOOK = os.path.join(HERE, "session-status.py")
 
 # Past the ceiling and past the limit the grace sets beyond it: the two bands a stop can block in.
 LIMIT = TEST_CEILING + GRACE
@@ -818,7 +822,8 @@ check("the close-out contract's prose does not match the marker",
 registered = json.load(open(os.path.join(os.path.dirname(HERE), "hooks.json")))["hooks"]
 # The count is only true of the live context at a stop: a session reset in place keeps its
 # transcript, so on any earlier event the newest record can describe a context already gone. The
-# one other event registered measures nothing: it drops a session override on /clear.
+# one other event registered measures nothing: it drops a session override on /clear, and writes a
+# starting session's status for cc-candybar.
 check("the gate is registered on Stop, and the override reset on SessionStart, and nothing else",
       sorted(registered) == ["SessionStart", "Stop"], str(sorted(registered)))
 command = registered["Stop"][0]["hooks"][0]["command"]
@@ -827,12 +832,20 @@ check("the Stop registration runs this script, from the plugin root",
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
 # A compaction is also a SessionStart, with source "compact", and the context after it is the same
 # session still running - its override must stand. The matcher is what keeps the hook off it.
-starting = registered["SessionStart"]
+starting = {os.path.basename(hook["command"].split("/")[-1].strip('"')): entry.get("matcher")
+            for entry in registered["SessionStart"] for hook in entry["hooks"]}
 check("the /clear hook is matched to source clear alone",
-      len(starting) == 1 and starting[0].get("matcher") == "clear", str(starting))
+      starting.get(os.path.basename(CLEAR_HOOK)) == "clear", str(starting))
 check("and runs the clear script, from the plugin root",
-      os.path.basename(CLEAR_HOOK) in starting[0]["hooks"][0]["command"]
-      and "${CLAUDE_PLUGIN_ROOT}" in starting[0]["hooks"][0]["command"], str(starting))
+      all("${CLAUDE_PLUGIN_ROOT}" in hook["command"]
+          for entry in registered["SessionStart"] for hook in entry["hooks"]), str(starting))
+# The status hook writes a session's status as the session begins. /clear has its own hook, which
+# writes it once the override is gone, and a status written alongside it could land first and show
+# the dropped override; a compaction changes nothing the status says.
+check("the status hook runs on startup and resume alone",
+      starting.get(os.path.basename(STATUS_HOOK)) == "startup|resume", str(starting))
+check("every SessionStart script is executable",
+      all(os.access(script, os.X_OK) for script in (CLEAR_HOOK, STATUS_HOOK)))
 check("the /clear hook is executable", os.access(CLEAR_HOOK, os.X_OK), CLEAR_HOOK)
 
 print(f"\n{len(failures)} failed")

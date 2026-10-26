@@ -40,6 +40,14 @@ def hook_payload(name, event):
     return hook
 
 
+def reason_of(failure):
+    """A failure as one log field: a SystemExit's curated message, which it carries in `code`, or an
+    error's type and args, so a KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
+    [LAW:one-source-of-truth] every hook's line spells its failures alike."""
+    return (failure.code if isinstance(failure, SystemExit)
+            else f"{type(failure).__name__}: {failure}")
+
+
 def log(hook, verdict, **fields):
     """Append one line: when, which session and event, the fields the hook decided on, and the
     verdict. Its own failure is reported but not fatal - raising would take the gate down with the

@@ -33,7 +33,13 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import GRACE, anchored, in_force, session_directory  # noqa: E402
-from ceiling_log import hook_payload, log  # noqa: E402
+from ceiling_log import hook_payload, log, reason_of  # noqa: E402
+# Every stop also refreshes the session's status on cc-candybar's bar, refusal included, so the bar
+# shows the ceiling in force as the turn ends. It is asked of the layers again rather than handed the
+# number gated on, so one reader writes the status for every caller; a move landing between the two
+# reads reaches the bar at the next stop. A bar that could not be updated is a fact on this line,
+# never the end of the gate.
+from candybar import published  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
 # Matched rather than the absolute path, because the instruction hands out that path but an
@@ -292,13 +298,11 @@ try:
     label, verdict = (("allow-under", None) if tokens < ceiling
                       else stop(hook, tokens, ceiling))
 except (Exception, SystemExit) as unresolved:
-    # SystemExit carries its curated message in `code`; other errors carry type and args, so a
-    # KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`. `hook` is whatever parsed, or
-    # None/non-dict when the failure came before it was one - log needs a dict to name a session.
-    reason = (unresolved.code if isinstance(unresolved, SystemExit)
-              else f"{type(unresolved).__name__}: {unresolved}")
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason}", tokens=tokens, ceiling=ceiling)
+    # `hook` is whatever parsed, or None/non-dict when the failure came before it was one - log
+    # needs a dict to name a session.
+    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}", tokens=tokens,
+        ceiling=ceiling, **published(hook))
     raise
-log(hook, label, tokens=tokens, ceiling=ceiling)
+log(hook, label, tokens=tokens, ceiling=ceiling, **published(hook))
 if verdict:
     print(json.dumps(verdict))

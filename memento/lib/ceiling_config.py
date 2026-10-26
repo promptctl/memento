@@ -37,7 +37,10 @@ GRACE = 100_000
 CONFIG_NAME = "memento.conf"
 # A repo carries its own config as a dot-directory, because a checkout has no XDG anything.
 XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl")
+# Absolute, against the directory this process started in: the home is handed to programs that start
+# elsewhere - cc-candybar runs `ceiling` in its plugin's folder - and a relative one would name
+# another directory there. [LAW:one-source-of-truth]
+CONFIG_HOME = Path(os.environ.get("MEMENTO_CONFIG_HOME") or XDG_CONFIG / "promptctl").absolute()
 USER_CONFIG = CONFIG_HOME / CONFIG_NAME
 # The only thing under here is the session override `ceiling set session` writes, at
 # sessions/<id>/CONFIG_NAME. Nothing else is ever written per session: the ceiling in force is a

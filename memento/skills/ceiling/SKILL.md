@@ -101,7 +101,10 @@ layer and exit 1 over a malformed user layer. Rightly: a layer the hook's reader
 read stops the Stop hook, Claude Code treats a dead Stop hook as non-blocking, and the
 gate is off for every session reading that file. Report both — what was written, and which
 file to go fix. `2` is the line as typed not parsing — argparse's own code, used for
-nothing else, and nothing was written.
+nothing else, and nothing was written. `3` is every printed line true — a move, where one
+was asked for, standing — and only the session's status for cc-candybar's bar left
+unwritten, as where writes outside the project are denied; the bar catches up at the
+session's next stop.
 
 A `set` reads what each destination file holds, and reads it again immediately before
 writing. A destination that changed in between — another session running this command,
