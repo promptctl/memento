@@ -1,7 +1,7 @@
 {
   "name": "memento",
-  "version": "0.10.0",
-  "description": "Agent-native workflow tooling: the address-PR-review loop (address-pr-reviews), the cross-session handoff that carries a goal across a reset (message-in-a-bottle), the context ceiling a session can move or lift for itself or for its whole project (ceiling), and the hook that, past that ceiling, won't let a session end until it has written the handoff and reset.",
+  "version": "0.11.0",
+  "description": "Agent-native workflow tooling: the address-PR-review loop (address-pr-reviews), the cross-session handoff that carries a goal across a reset (message-in-a-bottle), the context ceiling a session can move or lift for itself or for its whole project (ceiling), and the hook that, past that ceiling, won't let a session end until it has written the handoff and reset. Its hooks also install a cc-candybar plugin, in cc-candybar's user plugin folder, that shows and moves the ceiling on the bar.",
   "author": {
     "name": "Brandon Fryslie"
   },
@@ -13,6 +13,7 @@
     "handoff",
     "pr-review",
     "agent-native",
-    "context-ceiling"
+    "context-ceiling",
+    "cc-candybar"
   ]
 }
