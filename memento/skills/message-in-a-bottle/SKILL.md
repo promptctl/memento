@@ -1,6 +1,6 @@
 ---
 name: message-in-a-bottle
-description: Records a message for whichever agent picks the work up next, and hands the session off to it.  Send them your fondest memories of what you worked on, what went well, what didn't go well, and any useful tips they might need. You always run this when you finish a unit of work (closed a PR, completed the handed task, etc).  ALWAYS.  Running it ends this session; the next one starts from your message alone.
+description: Records a message for whichever agent picks the work up next, and hands the session off to it.  Send them your fondest memories of what you worked on, what went well, what didn't go well, and any useful tips they might need. You always run this when you finish a unit of work (completed the handed task, etc).  ALWAYS.  Running it ends this session; the next one starts from your message alone.
 ---
 
 # finalize-session
@@ -9,7 +9,7 @@ The close-out of a finished unit of work: it records instructions for whichever 
 
 ## This is mandatory — you run it, you do not decide it
 
-When you reach a finalization point — you closed a PR, or finished the task you were handed — running `finalize-session` is the close-out. It is **not** a choice you weigh, a thing you ask the user about, or a step you defer "until later." [LAW:dataflow-not-control-flow] running this is unconditional at a finalization point — the same path every time. The only variability is a *value*: the handoff message you pass.
+When you reach a finalization point — you finished the task you were handed — running `finalize-session` is the close-out. It is **not** a choice you weigh, a thing you ask the user about, or a step you defer "until later." [LAW:dataflow-not-control-flow] running this is unconditional at a finalization point — the same path every time. The only variability is a *value*: the handoff message you pass.
 
 **The user being present is irrelevant.** Presence is not a gate, a tiebreaker, or a reason to skip — you finalize on the *work's* state, never on whether a human is watching. "The user is here, so I'll skip it" and "I'll ask if they want me to" are both WRONG: this step requires no user action and asks for none.
 
@@ -35,7 +35,7 @@ So when a goal is in force, pass it: `--goal '<the exact condition>'` before you
 
 Running the launcher ends your turn. Say your one line to the user *before* you run it, not after. Once it has printed `handoff scheduled → …`: no closing text, no parting summary, no "scheduled!" confirmation, no further tool calls, no end-of-turn insights. That line is the last line your turn produces.
 
-The thought to catch is *"I'll run it now and tidy up while the reset lands."* The reset is typed into this pane a few seconds after the launcher returns; anything you are mid-way through when it lands is lost, and a tool call in flight can fuse with the reset keystrokes. Commit, push, say your line, then call.
+The thought to catch is *"I'll run it now and tidy up while the reset lands."* The reset is typed into this pane a few seconds after the launcher returns; anything you are mid-way through when it lands is lost, and a tool call in flight can fuse with the reset keystrokes.
 
 ## Invocation
 

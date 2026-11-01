@@ -1,71 +1,45 @@
 #!/usr/bin/env bash
-# finalize-session — the mandatory session close-out: schedule a delayed
-# self-handoff into the current session. The launcher returns immediately; a
-# detached worker delivers the handoff after a fixed delay.
+# finalize-session: schedules a delayed self-handoff into the current session. The launcher returns
+# immediately, and a detached worker delivers the handoff after a fixed delay.
 #
-# Three transports, most reliable first:
-#   tmux      — in-place /clear verified by reading the pane
-#               back, then paste the message. Deterministic; no focus concerns.
-#   iTerm2    — kill the running claude and relaunch it fresh with the message as
-#               its initial prompt, via `write text` to the exact session (no
-#               focus steal, no readback needed — a new process is guaranteed
-#               fresh).
-#   detached  — neither of the above reaches this process (no pane owns it, no
-#               iTerm2 session names it — the ordinary shape of a session hosted
-#               by `claude daemon run`). Spawn a brand-new detached tmux window,
-#               launch claude in it with the message as its initial prompt
-#               (the same `claude "$(cat msgfile)"` trick as the iTerm2 relaunch),
-#               and once it is confirmed ready, retire the old process. A window
-#               nobody was already using cannot collide with anybody's live work.
+# Transports, most reliable first:
+#   tmux      - clears the pane with /clear, verifies it by reading the pane back, then pastes the message.
+#   iTerm2    - kills the running claude and relaunches it with the message as its initial prompt, sent
+#               with `write text` to the exact session.
+#   detached  - for a session that no pane or iTerm2 session owns, such as one hosted by `claude daemon
+#               run`. Starts a new detached tmux window running claude with the message as its initial
+#               prompt, and retires the old process once the new one is ready.
 #
-# [LAW:no-mode-explosion] every session must end up equally capable of continuing
-# an autonomy chain — foreground and background alike, no subclass excluded, per
-# owner decision 2026-08-23. tmux/iTerm2 already give a pane- or window-owning
-# session that capability; detached is what gives it to a session that owns
-# neither. Only a machine with no tmux binary at all has genuinely nothing to
-# hand off into — that is the sole remaining hard failure.
+# Every session can continue an autonomy chain. Only a machine with no tmux binary cannot hand off.
 #
 # Modes:
-#   launcher:         its argv is _usage's to state — read it, or run --help
+#   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile>
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
 
 set -euo pipefail
 
-# [LAW:one-source-of-truth] timing lives here once. HANDOFF_DELAY_SECONDS is how
-# long to wait before firing; RESET_REGISTER_* bound the poll that watches the
-# reset land (tmux).
+# HANDOFF_DELAY_SECONDS is the wait before firing. RESET_REGISTER_* bound the poll that waits for the
+# reset to appear in the pane (tmux).
 HANDOFF_DELAY_SECONDS=10
-# The reset is typed into a pane whose agent is usually still mid-turn, because
-# finalize-session is itself invoked from inside that turn. Claude holds typed
-# input as type-ahead and runs it only once the turn ends, so how long the reset
-# takes to appear is the turn's business, not this worker's. A fixed settle read
-# the pane before that happened and called the queued reset a misfire - 12 of 58
-# handoffs on 2026-09-01/02, each one deleting the handoff it failed to confirm.
-# [LAW:no-ambient-temporal-coupling] wait for the state; never bet on a duration.
-# Overridable so the timeout arm is reachable in a test without waiting it out.
-# A failure arm nobody can execute is a failure arm nobody has tested.
+# The reset is typed while the agent is usually still mid-turn, and Claude runs queued input only when
+# the turn ends. So the worker polls for the reset to appear instead of waiting a fixed time. The timeout
+# can be overridden so tests can reach the timeout path.
 RESET_REGISTER_TIMEOUT_SECONDS="${MEMENTO_RESET_TIMEOUT_SECONDS:-300}"
 RESET_REGISTER_POLL_SECONDS=0.5
 
-# [LAW:one-source-of-truth] the handoff's authoritative home. Every pasted or
-# relaunched copy is derived from this file, and a derived copy can be lost to a
-# bad paste, a wrong pane, or a reset that never lands. The file cannot, so no
-# downstream failure can destroy the only record of what the session was doing.
+# The handoff file is the authoritative copy. Pasted and relaunched copies are derived from it, and they
+# can be lost, but the file is not.
 HANDOFF_DIR="${MEMENTO_HANDOFF_DIR:-$HOME/.claude/memento/handoffs}"
-# Upper bound on how long to wait for a freshly relaunched claude to become ready
-# — its banner drawn, input box up — before queueing a carried /goal into it
-# (iTerm2 transport only). We POLL the session contents and proceed the instant it
-# is ready; on timeout we surface a failure rather than blind-writing into a
-# not-yet-ready input box. This mirrors the tmux worker's pane read-back, and
-# [LAW:no-silent-failure] closes the race a fixed boot sleep could only narrow.
+# How long to wait for a relaunched claude to show its input box before queueing a /goal into it (iTerm2
+# only). The worker polls and proceeds as soon as the session is ready, and fails on timeout rather than
+# typing into a box that is not ready.
 CLAUDE_READY_TIMEOUT_SECONDS=30
 CLAUDE_READY_POLL_SECONDS=0.5
 
-# [LAW:one-source-of-truth] the static framing wrapped around the agent's message
-# lives here once. The launcher composes PREFIX + agent message + SUFFIX into the
-# single value that flows to the transport; workers stay dumb conduits.
+# The framing wrapped around the agent's message. The launcher joins PREFIX, the message, and SUFFIX into
+# one value, and the workers pass it through unchanged.
 HANDOFF_PREFIX=$(cat <<'PREFIX'
 === Below is a message from an agent on behalf of the user ===
 PREFIX
@@ -75,51 +49,23 @@ HANDOFF_SUFFIX=$(cat <<'SUFFIX'
 SUFFIX
 )
 
-# Empty the input box before writing into it. The box is shared mutable state -
-# a stray keystroke, a half-typed prompt, a previous delivery - and whatever is
-# already sitting there FUSES with whatever arrives next: `/clear` typed onto a
-# stray `m` submits as the prompt `m/clear`, and a handoff pasted onto residue
-# arrives as `junk[Pasted text #1 +40 lines]`. Escape does not empty the box;
-# C-u does. [LAW:single-enforcer] every writer clears first, so no writer has to
-# know what the last one left behind.
+# Clears the input box before writing to it. Leftover text would fuse with the new input, so C-u is sent
+# first. Escape does not clear the box.
 _clear_box() {
   tmux send-keys -t "$1" C-u
   sleep 0.3
 }
 
-# Walk the process ancestry up to the interactive `claude` process — the one to
-# kill and relaunch. Matched by program name so it survives whatever flags the
-# user launched with.
+# Finds the interactive claude process to kill and relaunch. It walks up from $CLAUDE_PID when that is
+# set, and from the parent otherwise. Prints the pid, then the command line the decision was made on,
+# from one read of the process table.
 #
-# [LAW:one-source-of-truth] Claude Code exports the pid of the session running
-# this tool call as $CLAUDE_PID. When it is set there is nothing to walk: that pid
-# is the answer or there is no answer, so the walk is one hop long and a named
-# pid that is not a claude is a refusal, never a starting point for climbing
-# somebody else's ancestry. Only a launcher no session named a pid for — a hook,
-# a shell — walks up from its own parent. Naming the process by the environment
-# rather than by luck of the ancestry is what makes a background (daemon-hosted)
-# session an ordinary session here.
+# Matching is on argv0 only, so the versioned install path (`.../claude/versions/<n>`) matches. Matching
+# the whole command line would also match the daemon's `--bg-pty-host`, which names that path as an
+# argument, and killing the host would kill every session it hosts.
 #
-# The match is on argv0 alone. A `claude` on PATH is a symlink into the versioned
-# install, and a process the daemon spawns is exec'd through that link's TARGET,
-# so its argv0 is `.../claude/versions/2.1.270` — a basename that is a version
-# number, not `claude`. Matching the versioned path is the same match as matching
-# the name; both spell "the claude binary". Matching the rest of the command line
-# is not: the daemon's own `--bg-pty-host` process names that path as an ARGUMENT,
-# and killing the host takes every session it hosts with it.
-#
-# The binary alone does not make a session. The same binary is also the daemon's
-# `--bg-pty-host` (kill it and every session it hosts dies), the headless `--print`
-# SDK bridge (no input box, nothing a fresh window could stand in for) and every
-# subcommand (`claude daemon run`, `claude mcp serve`). Which of those a claude is
-# can only be read from its argv, and _claude_flags is the one reader of that
-# region [LAW:single-enforcer]: a claude it declines is walked past like any
-# non-claude process, and refused when it is the named pid.
-#
-# Prints the pid and, on the next line, the command line it was judged by. One
-# read: the pid, the argv the flags are parsed from and the argv this decision
-# was made on are the same bytes, so there is no second read for the process to
-# vanish or be reissued between. [LAW:one-source-of-truth]
+# A process that is not a session is walked past. The daemon host ends the walk, since any claude above it
+# belongs to another session. _claude_flags decides which claude processes are sessions.
 _find_claude_session() {
   local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i rc
   for ((i = 0; i < ${hops:-8}; i++)); do
@@ -136,29 +82,14 @@ _find_claude_session() {
   return 1
 }
 
-# Succeeds when this session is hosted by a claude daemon.
+# Succeeds if this session is hosted by a claude daemon. A hosted session is displayed only over its
+# host's socket, so any pane or iTerm2 session reachable from it belongs to another session. A hosted
+# session therefore takes the detached transport.
 #
-# A hosted session is displayed only over its host's socket. Every pane or
-# iTerm2 session reachable from it belongs to whichever session spawned the
-# daemon, and so do the $TMUX_PANE and $ITERM_SESSION_ID the daemon may have
-# passed down. Delivering there sends /clear and the handoff into an unrelated
-# live session (seen 2026-09-28, promptctl-handoff-yg0), so a hosted session
-# takes the detached transport.
-#
-# The test is the ancestry between this process and its pane. A tmux pane's
-# process descends from the tmux server, never from a host, so a pane reached
-# without crossing a host is this session's own, and a host crossed first means
-# every pane above it belongs to someone else. The walk stops at the first live
-# pane process; a host above that hosts some other session. Hosts are read by
-# _claude_flags' return 3, in the flag region of a claude binary only, so a
-# handoff message naming a host flag never counts. [LAW:single-enforcer]
-#
-# $CLAUDE_PID names the session directly when set, so its parent being a host
-# answers it even for a launcher whose own ancestry no longer reaches it.
-#
-# [LAW:no-silent-failure] a read that fails mid-walk answers "hosted": the cost
-# of wrongly going detached is a relaunch of this session, while the cost of
-# wrongly staying on a pane is /clear in someone else's.
+# The walk goes up from this process. Reaching a host before a live pane means the pane is not this
+# session's own. $CLAUDE_PID is checked directly, since its parent may be a host even when this walk does
+# not reach it. A read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a
+# wrong pane costs a /clear in someone else's session.
 _hosted_by_daemon() {
   local panes pid=$$ line cmd i rc
   panes=" $(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
@@ -185,9 +116,8 @@ _hosted_by_daemon() {
   return 1
 }
 
-# _claude_flags' return code for a claude binary's command line, or 2 (not a
-# session) for anything else. The one place argv0 is matched as the claude
-# binary. Output is discarded; only the classification is read.
+# Returns _claude_flags' code for a command line, or 2 for anything that is not a claude binary. This is
+# the one place argv0 is matched against the claude binary.
 _claude_host_code() {
   case "${1%% *}" in
     claude|*/claude|*/claude/versions/*)
@@ -196,22 +126,12 @@ _claude_host_code() {
   return 2
 }
 
-# What a pid is holding, as a value that survives the pid being reissued: the
-# process's start time and its command line. Empty output — the pid holds nothing
-# — is a failure to identify, never an identity of its own.
+# Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
+# Empty output means the pid holds nothing, and that is a failure to identify.
 #
-# [FRAMING:representation] a pid is a map, not the territory. The kernel is free to
-# reissue it the instant its holder exits, so "pid 4711 is alive" and "pid 4711 is
-# still the claude I captured" are different facts, and only the second one licenses
-# a signal. Start time is what tells them apart: two processes cannot hold one pid at
-# one instant, so a pid whose start time still matches is the same process.
-#
-# This is the same bar `_discover_tmux_pane` holds itself to. That walk goes to real
-# lengths to PROVE descent rather than narrow it — pane_dead, non-decreasing age
-# while climbing — precisely because a recycled pid forges a match. The detached
-# worker signals a pid up to ~41s after capturing it (10s delay + up to 30s of
-# readiness polling), which is far more room for reuse than the walk ever has, so it
-# cannot hold a lower bar than the walk does.
+# A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
+# time tells the two apart. The detached worker signals a pid up to about 41 seconds after capturing it, so
+# this check is as strict as the pane walk in _discover_tmux_pane.
 _process_identity() {
   local pid="${1:-}" raw
   [ -n "$pid" ] || return 1
@@ -220,80 +140,29 @@ _process_identity() {
   printf '%s' "$raw"
 }
 
-# THE ONLY QUESTION THE RETIREMENT SEQUENCE ASKS ABOUT THE OLD PROCESS: is this pid still
-# holding the process captured at launch? `kill -0` cannot answer it. It answers "some
-# process is alive at this pid", and a pid the OS has reissued answers yes to that while
-# being a stranger — which is the whole reason _process_identity exists.
+# Answers whether a pid still holds the process captured at launch. `kill -0` is not enough, since it
+# only shows that some process is alive at the pid. Every check in the retirement sequence (the gate, the
+# poll, and the KILL escalation) uses this, because TERM frees the pid for reuse during the poll.
 #
-# Asking it once, before TERM, is not enough, and the reason is the sequence's own doing:
-# the point of TERM is that the process EXITS, which frees its pid to be reissued during
-# the poll that immediately follows. So the one moment this file creates a reuse window is
-# the one moment it used to stop checking. Every check in the sequence — the gate, the
-# poll, and the escalation to KILL — goes through here, so a stranger cannot inherit the
-# signal at any of them. [LAW:single-enforcer] [LAW:parse-dont-validate]
-#
-# The reading is left in IDENT_NOW so a caller reports the value its own check saw, rather
-# than re-reading a moment later and describing a different instant than the one it acted on.
+# The reading is left in IDENT_NOW, so the caller reports the value its check used.
 _still_captured_process() { # <pid> <identity captured at launch>
   IDENT_NOW=$(_process_identity "$1") || IDENT_NOW=""
   [[ "$IDENT_NOW" == "$2" ]]
 }
 
-# The tmux pane this process is running inside, discovered from process ancestry
-# instead of from $TMUX_PANE.
+# Finds the tmux pane this process runs in, by process ancestry rather than $TMUX_PANE, which the
+# environment can lose. The launcher runs this only when _hosted_by_daemon says no. A process with no
+# pane ancestor returns 1, so the caller falls through to the next transport.
 #
-# The environment can lose $TMUX_PANE while the process still descends from the
-# pane that shows it, so descent is asked directly. This walk does not know about
-# daemon hosts: the launcher runs it only once _hosted_by_daemon has said no, and
-# a hosted session never reaches it (promptctl-handoff-yg0).
+# Pids are recycled, so a matching pid alone does not prove descent. The snapshot therefore guards two cases:
+#   - A pane whose process has exited can stay listed under its old pid with remain-on-exit. #{pane_dead}
+#     keeps those rows out of the match.
+#   - An ancestor that exited can be replaced by a younger process with the same pid. Elapsed time must not
+#     decrease while climbing, since a parent is never younger than its child, and the walk stops if it does.
 #
-# [FRAMING:representation] $TMUX_PANE is a copy of a fact, propagated by
-# inheritance and lost the moment something breaks the chain. The fact itself is
-# "an ancestor of mine is some pane's process." Ask the territory, not the map
-# that went missing.
-#
-# [LAW:no-silent-failure] the match is descent and nothing else — never the
-# working directory, never "the only pane that looks plausible." A process with
-# no pane ancestor gets no pane: this returns 1 and the caller falls through to
-# the next transport, rather than pasting a handoff into an unrelated window.
-#
-# WHY DESCENT NEEDS MORE THAN A PID. Pids are recycled, so "an ancestor's pid
-# equals a pane's pid" is not by itself proof that the pane's process is that
-# ancestor. Two forgeries are available to a recycled pid, and each is closed by
-# making the snapshot carry a fact the recycled pid cannot supply:
-#
-#   A pane outliving its process. With remain-on-exit set, a pane whose process
-#   has exited stays listed and keeps advertising that dead pid (observed: kill a
-#   pane's process and list-panes still reports its pid, with pane_dead=1). Once
-#   that pid is reissued to something in this chain, the pid match is a
-#   coincidence and the handoff lands in a window showing a corpse. #{pane_dead}
-#   is what tells them apart, so it rides along in the snapshot and dead rows
-#   never enter the match set.
-#
-#   An ancestor exiting mid-walk. Age tells this one apart: a parent is never
-#   younger than its child, so elapsed time must not decrease as the walk climbs.
-#   A pid reissued after its holder died is younger than the descendant that
-#   claimed it, and the walk stops rather than wandering into a stranger's tree.
-#
-# Together they are a proof to the resolution of the clock. Non-decreasing age
-# from hop zero means every matched ancestor is at least as old as this process,
-# so it has held its pid continuously since before this process existed — which
-# is before the pane list was read. Two processes cannot hold one pid at one
-# instant, so the live pane recorded at that pid is that ancestor.
-#
-# That clock ticks once a second, and no portable shell carries a faster one:
-# etime is [[dd-]hh:]mm:ss, `ps -o lstart=` is whole seconds as well, and the one
-# genuinely finer source — /proc/<pid>/stat's start time — does not exist on
-# macOS, where this transport mostly runs. Both were measured before being ruled
-# out. So one case stays open: a pid reissued within the same second this process
-# started reads as the same age and passes. Reaching it also needs `ps -e` to
-# read the ppid row and the row for the pid it names on opposite sides of that
-# reuse. A second later, the age check refuses it.
-#
-# [LAW:effects-at-boundaries] both snapshots are taken here, at the edge, and the
-# resolution below is arithmetic over those two values. One whole-table ps rather
-# than a query per hop is what makes that true: pid and age are read at a single
-# instant, so nothing shifts underneath the walk.
+# With non-decreasing age, every matched ancestor has held its pid since before this process started. The
+# clock has one-second resolution, so a pid reused within the same second as this process's start can still
+# pass. Both snapshots are taken once, at the start, and the walk is arithmetic over them.
 _discover_tmux_pane() {
   local panes proctable
   command -v tmux >/dev/null 2>&1 || return 1
@@ -316,16 +185,9 @@ _discover_tmux_pane() {
       for (i = 1; i <= fields; i++) seconds = seconds * 60 + parts[i] + 0
       return days * 86400 + seconds
     }
-    # [LAW:parse-dont-validate] a whitelist, not a blacklist of the dead value:
-    # only a row that positively asserts liveness joins the match set. tmux
-    # expands a format field it does not know to the empty string (verified on
-    # 3.6a: `#{no_such_field}` renders as nothing, it does not survive as a
-    # literal), so on a tmux predating #{pane_dead} the row arrives with three
-    # fields and an uninitialised $4 — and `$4 != 1` would read that as alive,
-    # silently reverting discovery to the bare pid match this guard exists to
-    # close. The price of strictness is that such a tmux matches no pane at all
-    # and the caller declines; that is the safe direction, and the one the
-    # elapsed-time check below already takes for the same reason.
+    # A row counts only if it positively reports the pane alive. tmux renders an unknown format field as
+    # empty, so on a tmux without #{pane_dead} the row would otherwise read as alive. Such a tmux matches
+    # no pane, and the caller declines.
     $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
     NF == 3      { parent[$1] = $2; elapsed[$1] = $3 }
     END {
@@ -333,9 +195,7 @@ _discover_tmux_pane() {
       descendant_age = -1
       for (hop = 0; hop < maxhops; hop++) {
         if (!(pid in parent)) exit 1
-        # [LAW:parse-dont-validate] an elapsed time this cannot read is not an
-        # age of zero, which would quietly reduce the walk to bare pid matching.
-        # It is a failure to establish descent, and it refuses the pane.
+        # An unreadable elapsed time counts as a failure to establish descent, so the pane is refused.
         if (elapsed[pid] !~ /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9][0-9]$/) exit 1
         age = ageof(elapsed[pid])
         if (age < descendant_age) exit 1
@@ -348,34 +208,11 @@ _discover_tmux_pane() {
     }'
 }
 
-# A pane id resolved to the tmux target that addresses it, or 1 if tmux does not
-# own that pane.
+# Returns the tmux target that addresses a pane id, or exits 1 if tmux does not own that pane.
 #
-# [LAW:parse-dont-validate] display-message cannot be asked this question
-# directly, because it answers the same way whether or not the pane exists: given
-# a pane id no server owns it exits 0 with every field empty, so the target format
-# renders as the literal ":." — an answer-shaped void, non-empty and therefore
-# indistinguishable from a real target to any caller that only checks emptiness.
-# Worse, tmux then reads ":." as a live address meaning current-session:current-
-# window.current-pane, so a stale pane id does not fail loudly; it silently
-# retargets the handoff at whatever the user happens to be looking at when the
-# worker fires. (Verified on tmux 3.6a: `display-message -t %4242` exits 0 and
-# renders ":.", while `list-panes -t %4242` exits 1.)
-#
-# Asking for #{pane_id} alongside the target makes the reply carry its own proof:
-# a target is this pane's target only if the id tmux echoes back is the id we
-# asked about. That refuses the stale id and the degenerate ":." alike.
-#
-# The id alone is not enough, for the same reason the walk above carries
-# #{pane_dead}: owning a pane and displaying a live process are different facts,
-# and remain-on-exit separates them. A dead pane answers exactly like a live one
-# — verified on 3.6a by killing a pane's process on a scratch server, after which
-# `display-message` still exits 0 and still echoes `%0 1 t:1.1`. Admitted on the
-# id alone it would satisfy this, short-circuit the discovery that would have
-# refused it, and leave the worker sending keys into a corpse. So liveness is
-# demanded here in the same words the walk demands it: a positive "0", never the
-# absence of a "1". A tmux too old to know #{pane_dead} renders it empty and is
-# refused by both, which is the point of saying it the same way twice.
+# display-message exits 0 for an unknown pane, with an empty target that tmux then reads as the current
+# window. The reply must therefore echo the pane id back, and must show the pane alive: `#{pane_dead}` has
+# to read "0", since a dead pane still answers.
 _pane_target() {
   local pane="${1:-}" reply rest
   [ -n "$pane" ] || return 1
@@ -387,43 +224,17 @@ _pane_target() {
   printf '%s' "${rest#* }"
 }
 
-# The flags claude was launched with, reduced to a safe whitelist: permission
-# mode, model, and the skip-permissions toggles — the ones that make the fresh
-# session match the user's setup. Every other flag claude takes is dropped with
-# its values, and scanning STOPS at the first positional argument.
+# Reduces claude's flags to a whitelist of those that carry over to a fresh session: permission mode,
+# model, and the skip-permissions toggles. Each dropped flag is dropped with its values. The scan stops
+# at the first positional argument, which is the prompt.
 #
-# [LAW:types-are-the-program] this is load-bearing, not defensive. message-in-a-
-# bottle hands the message off as a positional PROMPT (iTerm2 relaunch does
-# `claude ... "$(cat msgfile)"`), so a session that was itself born from a prior
-# handoff carries a giant multi-word prompt in its own argv. The old "keep every
-# token that isn't argv0/resume" logic then splices that entire prompt into the
-# next relaunch's flag string, corrupting it. Whitelisting and halting at the
-# first positional makes that impossible by construction.
+# A flag not on the list fails with exit 1 and is named on stderr, since the scan cannot tell whether
+# the next token is its value or the prompt. Adding the flag to the table with its arity fixes that.
 #
-# A dropped flag is dropped WITH its values, or a value reads as the first
-# positional and the scan halts there: a daemon-hosted session is launched as
-# `--session-id <id> --fork-session --resume <path> --allowed-tools <t> ...
-# --permission-mode <m>`, and halting at `--session-id` relaunched every such
-# session under no permission mode, reported as delivered. So every flag claude
-# takes is listed with its arity — boolean, one value, or as many values as
-# follow up to the next flag, which is how claude's own parser reads a variadic,
-# so a real argv never has the prompt right after one without a `--` between.
-# [LAW:no-silent-failure] a flag NOT on the list is a failure to read the flags,
-# returned as 1 with the flag named on stderr: whether the token after it is its
-# value or the prompt is exactly what is unknown, and a guess either way is the
-# silent flagless relaunch above. Extending the table is the fix, and the refusal
-# names the entry to add.
-#
-# Some argv say the process is not a session at all: `--print`/`-p` is the
-# headless SDK bridge, and a subcommand word where the prompt would be
-# (`claude mcp serve`) is not a session either. Those return 2 — the caller's
-# question was "what would I relaunch this as", and the answer is "nothing".
-# The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`,
-# `claude bg-pty-host`) are not sessions either, and return 3 so
-# _hosted_by_daemon can tell a host apart from other non-sessions. Read only in the flag region, so
-# a handoff prompt that happens to contain the word `--print` is never mistaken
-# for the flag. [LAW:parse-dont-validate] exception: a prompt whose first word is
-# a subcommand name is indistinguishable from the subcommand in ps output.
+# `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
+# function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
+# return 3, so _hosted_by_daemon can tell them apart. Only the flag region is read, so a prompt that
+# contains those words is never misread.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks keep=()
@@ -476,18 +287,14 @@ _claude_flags() {
         break ;;  # first positional = the prompt; never propagate it or anything after
     esac
   done
-  # Every relaunch splices this into a command line a shell parses — tmux hands
-  # it to default-shell, iTerm2 types it into the user's — so each token leaves
-  # here shell-quoted. Bare, `--model opus[1m]` is a zsh glob with no match:
-  # zsh aborts the line and the successor claude never starts.
+  # Each token is shell-quoted, since a shell parses the relaunch line. Unquoted, `--model opus[1m]` is a
+  # zsh glob that matches nothing, which aborts the line.
   [ "${#keep[@]}" -gt 0 ] && printf -v out '%q ' "${keep[@]}"
   printf '%s' "${out% }"
 }
 
-# The one command line every relaunch hands a shell: claude, the kept flags, and
-# the handoff read from its file by that shell. Each piece is shell-quoted here —
-# a home directory with a quote in it must not break the line any more than a
-# glob-shaped model may.
+# The command line every relaunch runs: claude, the kept flags, and the handoff read from its file. Each
+# piece is shell-quoted, so a path containing a quote cannot break the line.
 _relaunch_line() {
   local bin msg
   printf -v bin '%q' "$1"
@@ -495,19 +302,12 @@ _relaunch_line() {
   printf '%s' "$bin ${FLAGS:+$FLAGS }\"\$(cat $msg)\""
 }
 
-# Read the currently-visible contents of the iTerm2 session with the given UUID.
-# This is the iTerm2 analog of tmux's `capture-pane -p`: the readiness probe polls
-# it for the relaunched claude's banner before queueing a carried /goal, so the
-# goal is never written into a not-yet-ready input box. In the direct-iTerm2 path
-# (the only one that reaches this — the launcher prefers tmux when both exist) the
-# killed claude's alternate screen is torn down on exit, so a banner match here can
-# only be the fresh relaunch, not a stale one lingering in scrollback.
+# Prints the visible contents of the iTerm2 session with the given UUID, the analog of tmux's
+# `capture-pane -p`. The readiness probe polls it for the relaunched claude's banner before a /goal is
+# queued. The old claude's alternate screen is torn down on exit, so a banner match can only come from the relaunch.
 _iterm_session_contents() {
   local uuid="$1"
-  # [LAW:no-silent-failure] surface osascript errors into the worker log rather
-  # than swallowing them — the healthy read writes nothing to stderr (found →
-  # returns text; UUID absent → empty, exit 0), so this only speaks up on a real
-  # AppleScript/iTerm2 fault, which is exactly the clue a silent 30s timeout lacks.
+  # osascript errors go to the worker log. A healthy read writes nothing to stderr.
   osascript <<OSA 2>>/dev/stderr
 tell application "iTerm2"
   repeat with w in windows
@@ -523,39 +323,18 @@ end tell
 OSA
 }
 
-# Refuse the run and say why: _refuse <reason>.
-#
-# [LAW:single-enforcer] one place turns a launcher failure into this tool's own
-# refusal — the tool named, the reason given, exit 2, and the recorded handoff's
-# path whenever there is one. It used to be hand-rolled at every site, and the
-# copies had already drifted: one named no tool at all, and only the no-transport
-# branch named the handoff it was walking away from. [LAW:no-silent-failure]
-#
-# [LAW:dataflow-not-control-flow] $RECORDED carries the whole difference between a
-# refusal before the handoff is written and one after — empty until the write, the
-# handoff's path from then on — and is always interpolated, so no call site has to
-# know which side of the write it sits on, and a refusal added later is right
-# without its author having to notice the question.
+# Refuses the run with a reason: _refuse <reason>. Exits 2, and names the handoff's path if one was recorded.
+# RECORDED is empty until the handoff is written, and is always interpolated, so the message is correct on
+# either side of the write.
 _refuse() {
   echo "finalize-session: $1${RECORDED:+
 The handoff was NOT delivered. It is preserved at: $RECORDED}" >&2
   exit 2
 }
 
-# Make a transient file, or refuse: _mktemp_or_exit <varname> <purpose>.
-#
-# Unguarded, `set -e` ended the launcher on mktemp's own status — a code the usage
-# block does not mention, under a message naming neither this tool nor what it was
-# trying to write, on the one failure (a full or unwritable temp dir) where the
-# operator most needs both.
-#
-# It assigns through the caller's variable rather than printing the path, so the
-# exit below is the script's. Behind a command substitution it would only ever
-# have been a subshell's, leaving the outcome to errexit propagation.
-#
-# The reason names the purpose and stops: `mktemp -t` reads the Darwin per-user
-# temp dir and ignores $TMPDIR outright, so naming a directory here would
-# misdirect the operator on the platform this most often runs on.
+# Makes a temp file or refuses: _mktemp_or_exit <varname> <purpose>. The result is assigned through the
+# caller's variable, so the exit belongs to this script. `mktemp -t` ignores $TMPDIR on macOS, so the
+# refusal names the purpose and no directory.
 _mktemp_or_exit() {
   local __var="$1" purpose="$2" path
   path=$(mktemp -t "finalize-$purpose.XXXXXX") \
@@ -563,8 +342,7 @@ _mktemp_or_exit() {
   printf -v "$__var" '%s' "$path"
 }
 
-# [LAW:one-source-of-truth] the argv the tool itself ships, and the copy the docs
-# answer to. The header's Modes block names the worker contracts and defers here.
+# The usage text. The header's Modes block refers to it.
 _usage() {
   cat <<'USAGE'
 finalize-session — record the session handoff and reset the session into it.
@@ -587,8 +365,7 @@ exit: 0 it did what you asked · 2 it could not — argv, setup, or transport
 USAGE
 }
 
-# [LAW:types-are-the-program] one discriminator at the entry; everything
-# downstream operates on validated, typed inputs for exactly one mode.
+# Selects the mode once, from the first argument.
 case "${1:-}" in
   --worker)          MODE=tmux-worker; shift ;;
   --iterm-worker)    MODE=iterm-worker; shift ;;
@@ -599,14 +376,10 @@ esac
 case "$MODE" in
 
   launcher)
-    # [LAW:dataflow-not-control-flow] an optional carried goal is a leading
-    # --goal <condition> value, stripped here so the remainder is the message.
-    # /clear and a fresh relaunch both wipe the session-scoped /goal, so
-    # without this the next agent wakes with no goal and the autonomous run stops.
-    # Absent → empty string; the same code path runs, the value decides the effect.
+    # A leading --goal <condition> is stripped here, so the rest is the message. /clear and a fresh relaunch
+    # both drop the session's /goal, so it is re-issued into the new session. An absent goal is an empty string.
     GOAL=""
-    # A literal newline, named so the flag checkpoint below can match one inside a
-    # case pattern, where quoting is what keeps it literal against the globs.
+    # A literal newline, for matching inside a case pattern below.
     NEWLINE=$'\n'
     while :; do
       case "${1:-}" in
@@ -616,34 +389,14 @@ case "$MODE" in
           ;;
         --help)
           _usage; exit 0 ;;
-        # The release valve for the refusal below, and it must be matched first
-        # because `--` is itself two dashes: a handoff whose text genuinely opens
-        # with `--` stays expressible, said on purpose rather than by accident.
+        # `--` ends flag parsing, so a handoff that must start with `--` can still be sent.
         --)
           shift; break ;;
-        # A token carrying a newline is prose, and prose is what this tool
-        # carries. No flag spans a line, so the newline settles it before the
-        # refusal below ever looks: the close-out's handoff is routinely a
-        # multi-line recap, and refusing one that happens to open with `--` would
-        # bite at the moment a session has the least context left to work out why.
+        # A token containing a newline is message text, since no flag spans a line.
         --*"$NEWLINE"*)
           break ;;
-        # [LAW:parse-dont-validate] the checkpoint for the flag POSITION. Without
-        # it the flag namespace had no border at all: every unrecognised token fell
-        # through to the message, so `finalize-session --help` recorded a handoff
-        # whose entire text was "--help" and handed that to the next agent as its
-        # opening prompt — which is how one real session woke up holding the string
-        # `--help` and nothing else (2026-09-11T00:30:46Z). A typo did it
-        # silently: `--rest compact` shipped "--rest compact" as the handoff.
-        # [LAW:no-silent-failure] a mistyped flag is a fact about the caller's
-        # intent, and reinterpreting it as content destroys that fact at the one
-        # moment this tool exists to preserve it.
-        #
-        # [LAW:types-are-the-program] two dashes is the whole of it, because every
-        # flag this tool takes has two. A single-dash token cannot be a near-miss
-        # of anything in that set — there is no short flag for it to have been —
-        # so `-h` is text, the same as `- shipped the parser`, and refusing either
-        # would refuse prose on the strength of its first character.
+        # Only two-dash words are flags. An unknown one is refused rather than sent as the handoff, so a typo
+        # such as `--rest compact` is not delivered as text. A single-dash token such as `-h` is message text.
         --*)
           echo "unknown flag '$1' — finalize-session --help lists what it takes." >&2
           echo "To send it as handoff text, put it after --." >&2
@@ -652,68 +405,41 @@ case "$MODE" in
       esac
     done
 
-    # [LAW:dataflow-not-control-flow] the message is a value carrying a canonical
-    # default — /next, the standard "pull the next ticket" handoff. Omitting argv
-    # selects that default; it never yields an empty handoff, so no guard follows.
+    # The message defaults to /next when no arguments are given.
     AGENT_MESSAGE="${*:-/next}"
 
-    # [LAW:dataflow-not-control-flow] the message flows through a file as a value,
-    # bypassing every shell-quoting hazard between argv → worker → transport. No
-    # escaping branches anywhere. The file is durable rather than temporary
-    # because it is the handoff itself, not a copy of it in flight.
+    # The message is passed between processes as a file, so no shell quoting is involved. The file is kept
+    # after delivery, since it is the handoff itself.
 
-    # Empty until the handoff is on disk, and every refusal below reads it. Declared
-    # here so it is defined before the first one, not at the write it describes.
+    # Empty until the handoff is on disk. Every refusal below reads it.
     RECORDED=""
-    # [LAW:single-enforcer] _refuse is the one checkpoint for giving up, and `set -e`
-    # was the way around it. An explicit `|| _refuse` was never the only way out of
-    # this branch: a bare command substitution that failed ended the launcher on the
-    # failing command's own status — 1, a code the usage block does not name — under
-    # the shell's message, which names neither this tool nor the handoff already on
-    # disk. `pwd -P` in the detached transport did exactly that to a session whose
-    # working directory had been unlinked, leaving a complete handoff with nothing
-    # anywhere pointing at it. Routing that path into _refuse leaves one exit where
-    # there were two, and a give-up added below inherits the contract rather than
-    # depending on its author to remember it, which is what converting the
-    # substitutions one at a time would not have bought. Its limit is worth knowing:
-    # it fires on a command that FAILS, so it cannot reach an assignment that
-    # swallows its own failure and reports 0 — the SELFDIR split below is guarded by
-    # hand for exactly that reason. Condition contexts (`a || b`, `if`) are exempt,
-    # as they are under `set -e`, so the transport probes below still fall through.
+    # _refuse is the exit for every give-up. The ERR trap routes an unexpected failing command into _refuse.
+    # The trap fires only on a failing command, so an assignment that swallows its own failure is checked by
+    # hand (see SELFDIR below). Condition contexts such as `a || b` and `if` are exempt, so the transport
+    # probes below can fall through.
     trap '_refuse "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
-    # [LAW:one-source-of-truth] the wrapped value is assembled once, here - and it
-    # carries the path of the file it is written to, so the location travels with
-    # every copy. A paste that arrives truncated, garbled, into the wrong pane, or
-    # not at all still leaves the next agent one `cat` from the whole handoff.
+    # The wrapped message is built once and includes the handoff file's path, so every copy points to the
+    # full text on disk.
     MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
       "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""
-    # [LAW:no-silent-failure] MSGFILE is deliberately absent from this trap and
-    # from every worker's: the transient files go, the handoff stays.
+    # The EXIT trap removes transient files only. The handoff file is kept.
     trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
-    # The write is named as the destination it failed to reach, not as a preserved
-    # handoff: $RECORDED stays empty until it succeeds, so a half-written file is
-    # never offered to the operator as their work.
+    # $RECORDED stays empty until the write succeeds, so a half-written file is never reported as the handoff.
     printf '%s' "$MESSAGE" > "$MSGFILE" \
       || _refuse "cannot write the handoff to $MSGFILE"
     RECORDED="$MSGFILE"
-    # [LAW:dataflow-not-control-flow] the goal rides its own tempfile as a value,
-    # empty when none was carried. Workers read it and re-issue /goal only when it
-    # is non-empty; nothing branches on a separate "has goal" flag.
+    # The goal is passed as a file value, empty when none was carried. Workers re-issue /goal only when it is non-empty.
     printf '%s' "$GOAL" > "$GOALFILE" \
       || _refuse "cannot write the carried goal to $GOALFILE"
 
-    # [LAW:no-mode-explosion] a handoff hands the session off: recording the
-    # message and resetting into it are one act, on every run. The flag that
-    # once made the reset optional let a "handoff" leave the session running,
-    # which is the one thing a handoff is not. The next session starts blank,
-    # holding the message and nothing else; the message is the only channel.
+    # A handoff always resets the session. The next session starts blank and holds only the message.
 
     # Resolve own path for both ./script and PATH-lookup invocations.
     if [[ "$0" == */* ]]; then
@@ -722,39 +448,21 @@ case "$MODE" in
       SELF_RAW=$(command -v -- "$0") \
         || _refuse "cannot resolve own path from \$0=$0"
     fi
-    # [LAW:no-silent-failure] two substitutions in one assignment report only the
-    # LAST one's status, so with `basename` closing the line a failed `cd` into a
-    # directory that no longer exists left status 0 and SELF the malformed
-    # "/finalize-session". Nothing downstream reads it synchronously — the worker is
-    # started with `nohup ... &` — so the launcher announced a scheduled handoff and
-    # exited 0 with no worker behind it. The trap below cannot cover this: it fires
-    # on a command that fails, and an assignment reporting success while failing
-    # reaches no exit path at all. Split, the `cd` is the assignment's own status.
+    # Split into two assignments: in one assignment only the last command's status counts, so a failed `cd`
+    # would go unnoticed and leave SELF malformed.
     SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
       || _refuse "cannot resolve own directory from \$0=$0"
     SELF="$SELFDIR/$(basename "$SELF_RAW")"
 
-    # [LAW:parse-dont-validate] this is the parse of the environment into a
-    # transport: it yields a value that could not exist beforehand (a tmux target,
-    # or an iTerm2 session uuid plus the claude pid to relaunch), and every worker
-    # below is typed on that value. Detection lives here once
-    # [LAW:single-enforcer]; workers never re-detect.
+    # Transport detection runs once, here. Each worker receives the result as a typed value and does not
+    # re-detect.
     #
-    # A daemon-hosted session owns no pane and no iTerm2 session: every one its
-    # environment or ancestry could name belongs to the daemon's spawner. It is
-    # decided once, here, and skips both display transports for detached.
+    # A daemon-hosted session owns no pane and no iTerm2 session, so it always takes the detached transport.
     HOSTED=""
     _hosted_by_daemon && HOSTED=1
     #
-    # The pane resolves from two spellings of one question — inherited when this
-    # process is a child of the pane's shell, discovered from ancestry when the
-    # environment lost it — and they collapse to a single value here so no
-    # code below has to know which spelling answered. [LAW:one-source-of-truth]
-    # Each spelling is accepted only once tmux confirms it still names that pane,
-    # and a spelling that fails to resolve hands the question on rather than
-    # consuming the attempt. The inherited copy going stale is the same "the map
-    # went missing" failure discovery exists for, so it must not be able to lose
-    # the handoff on discovery's behalf. [FRAMING:representation]
+    # The pane comes from $TMUX_PANE, or from process ancestry if that is missing. Each candidate is accepted
+    # only after tmux confirms it names that pane, so a stale $TMUX_PANE cannot block discovery.
     TARGET=""
     if [[ -z "$HOSTED" ]]; then
       TARGET=$(_pane_target "${TMUX_PANE:-}") \
@@ -780,8 +488,7 @@ case "$MODE" in
         || _refuse "iTerm2 transport: cannot locate the claude process to relaunch"
       CLAUDE_PID=${FOUND%%$'\n'*}
       CLAUDE_CMD=${FOUND#*$'\n'}
-      # [LAW:no-silent-failure] a flag the parser cannot place is a refusal, not a
-      # successor relaunched under whatever flags a guess left it.
+      # A flag the parser cannot place is a refusal, not a guess.
       FLAGS=$(_claude_flags "$CLAUDE_CMD") \
         || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
@@ -797,42 +504,26 @@ case "$MODE" in
       echo "handoff scheduled → iTerm2 (kill+relaunch, fresh) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
     elif command -v tmux >/dev/null 2>&1; then
-      # Neither an owned pane nor a reachable iTerm2 session — the shape of a
-      # session hosted by `claude daemon run`, which inherits neither. tmux
-      # itself needs no server already running: `new-session -d` starts one.
-      # [LAW:one-source-of-truth] the process to relaunch as, and the flags it
-      # carries, are found the same way the iTerm2 transport finds them — one
-      # function, reused, not a second copy of the same lookup.
+      # No owned pane and no reachable iTerm2 session, as with a session hosted by `claude daemon run`.
+      # `new-session -d` starts a tmux server if none is running. The relaunch process is found by the same
+      # function the iTerm2 transport uses.
       FOUND=$(_find_claude_session) \
         || _refuse "detached transport: cannot locate the claude process to relaunch"
       CLAUDE_PID=${FOUND%%$'\n'*}
       CLAUDE_CMD=${FOUND#*$'\n'}
       FLAGS=$(_claude_flags "$CLAUDE_CMD") \
         || _refuse "detached transport: cannot read the flags of claude process $CLAUDE_PID"
-      # [LAW:one-source-of-truth] the identity is captured HERE, at the same instant
-      # the pid is, and travels with it as data. The worker re-reads it and compares
-      # rather than re-deriving what "the old claude" means at kill time — by then
-      # the pid may name a stranger, and a second derivation would simply describe
-      # the stranger. [LAW:no-silent-failure] a pid we cannot identify is not a pid
-      # we may later signal, so this is a hard stop, not a degraded mode.
+      # The identity is captured at the same instant as the pid and passed on as data. The worker compares
+      # against it before signaling, since by then the pid may belong to another process. A pid that cannot
+      # be identified is never signaled, so this is a hard stop.
       CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
         || _refuse "detached transport: cannot read the identity of claude process $CLAUDE_PID"
-      # A fresh detached window's default shell is a login shell that resources
-      # dotfiles before running anything handed to it, so it can rebuild PATH
-      # out from under whatever this process currently has — unlike the iTerm2
-      # transport, which types into an already-running, already-initialized
-      # shell. Resolving the absolute path HERE, once, and handing it down as
-      # data removes the dependency instead of hoping the two PATHs agree.
-      # [LAW:no-silent-failure] "claude" resolving to nothing is the genuine
-      # no-transport case, not a reason to fall back to a bare command name
-      # that may resolve to something else, or nothing, once the login shell
-      # finishes its own startup.
+      # A fresh detached window starts a login shell that may rebuild PATH, so the absolute path is resolved
+      # here and passed down as data. An unresolvable `claude` is a refusal, not a fallback to a bare name.
       CLAUDE_BIN=$(command -v claude) \
         || _refuse "detached transport: 'claude' is not resolvable on PATH; cannot name what to relaunch"
       CWD=$(pwd -P)
-      # tmux session names may not contain ':' or '.'; $$ and epoch seconds are
-      # digits only, and collide only if two handoffs from the same pid fire in
-      # the same second — near-impossible given HANDOFF_DELAY_SECONDS.
+      # tmux session names cannot contain ':' or '.'. The pid and epoch seconds are digits only.
       SESSION="finalize-$$-$(date +%s)"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=detached session=$SESSION cwd=$CWD claude_pid=$CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
@@ -848,20 +539,9 @@ case "$MODE" in
       echo "handoff scheduled → fresh detached tmux window '$SESSION' in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
     else
-      # [LAW:parse-dont-validate] the failure arm of the parse above. Exiting
-      # nonzero is the whole of it: the close-out did not happen, and the caller
-      # learns that from the exit code rather than from prose it may not read.
-      # [LAW:no-silent-failure] the nonzero exit is what makes naming the file
-      # safe here. The handoff is already on disk - it is written before any
-      # transport is chosen - so the path is a recovery route, not a claim of
-      # delivery: nothing was delivered, this says so, and it says where the
-      # message is. Reporting the path while exiting 0 would be the
-      # answer-shaped void; reporting it while exiting 2 is just not throwing
-      # the work away on the way out. _refuse states that part, here and
-      # everywhere else past the write, so this branch no longer spells it out.
-      # This is the sole genuine no-transport case: no owned pane, no reachable
-      # iTerm2 session, and no tmux binary to spawn a fresh window with either
-      # — there is truly nothing on this machine to deliver into.
+      # Nothing can deliver the handoff: no owned pane, no reachable iTerm2 session, and no tmux binary. The
+      # handoff is already on disk, so the refusal names its path. The nonzero exit tells the caller the
+      # close-out did not happen.
       if [[ -n "$HOSTED" ]]; then
         _refuse "this session is hosted by a claude daemon, so no pane or iTerm2
 session shows it, and the detached transport needs a tmux binary; none is installed."
@@ -899,11 +579,8 @@ Nothing on this machine to deliver the close-out into."
     sleep 0.5
     tmux send-keys -t "$TARGET" Enter
 
-    # [LAW:no-ambient-temporal-coupling] poll for the reset to land rather than
-    # betting on a duration. Correctness now holds however long the pane's turn
-    # runs, which is exactly the variable the old fixed settle was guessing at.
-    # Counted in polls because bash 3.2 - still /bin/bash on macOS - has no float
-    # arithmetic.
+    # Polls for the reset to appear, up to the timeout. The poll count is integer arithmetic, since bash 3.2
+    # (the /bin/bash on macOS) has no floats.
     POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
     POLLS=0
     OBSERVED="WARNING: not observed within ${RESET_REGISTER_TIMEOUT_SECONDS}s"
@@ -917,13 +594,8 @@ Nothing on this machine to deliver the close-out into."
       POLLS=$((POLLS + 1))
     done
 
-    # [LAW:dataflow-not-control-flow] the handoff is sent on every path; what the
-    # poll saw is a value in the log line, never a branch over whether the payload
-    # goes. tmux type-ahead preserves order, so a handoff pasted while the turn is
-    # still running lands after the queued reset exactly as an observed one does -
-    # which is why withholding it was never protection. That was the old misfire
-    # arm: it destroyed the handoff to report that it could not confirm a step
-    # that had, in every case the logs recorded, already worked.
+    # The handoff is sent whether or not the reset was seen; the poll result only goes into the log. tmux
+    # type-ahead keeps input in order, so the handoff lands after the queued reset either way.
     log "/clear $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
     _clear_box "$TARGET"
@@ -932,10 +604,7 @@ Nothing on this machine to deliver the close-out into."
     sleep 0.5
     tmux send-keys -t "$TARGET" Enter
 
-    # [LAW:dataflow-not-control-flow] carry the goal only when the value is
-    # present. It goes in as a queued input *after* the handoff prompt, so it
-    # never races the handoff turn — Claude type-aheads it and the session-scoped
-    # /goal governs the turns that follow. The /clear above wiped it.
+    # The goal is queued after the handoff prompt, so it does not race the handoff turn. /clear wiped it.
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
       sleep 1
@@ -964,8 +633,7 @@ Nothing on this machine to deliver the close-out into."
     log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    # Kill the running claude so the launching shell regains the session, then
-    # relaunch fresh. TERM first, escalate to KILL if it lingers.
+    # Stop the running claude so the shell regains the session. TERM first, then KILL if it lingers.
     if kill -0 "$CLAUDE_PID" 2>/dev/null; then
       kill -TERM "$CLAUDE_PID" 2>/dev/null || true
       for _ in $(seq 1 20); do kill -0 "$CLAUDE_PID" 2>/dev/null || break; sleep 0.5; done
@@ -982,9 +650,8 @@ Nothing on this machine to deliver the close-out into."
     # Let the shell draw its prompt before typing into it.
     sleep 2
 
-    # The shell evaluates $(cat MSGFILE), so the whole message rides in the file
-    # — no message text is embedded in argv or AppleScript. Build the literal the
-    # shell should run, then AppleScript-escape only \ and " for the write.
+    # The shell reads the message from MSGFILE, so no message text enters argv or AppleScript. Only \ and "
+    # are escaped for AppleScript.
     RELAUNCH=$(_relaunch_line claude)
     AS=${RELAUNCH//\\/\\\\}
     AS=${AS//\"/\\\"}
@@ -1005,25 +672,16 @@ end tell
 OSA
     then
       log "relaunch command sent to iTerm2 session $UUID"
-      # [LAW:dataflow-not-control-flow] re-establish the carried goal as a queued
-      # input into the freshly relaunched claude — same value-decides-effect shape
-      # as tmux. The relaunch started a new process, so the /goal was wiped.
+      # Re-queues the carried goal, which the relaunch wiped. It is sent only when the goal file is non-empty.
       if [[ -s "$GOALFILE" ]]; then
-        # [LAW:no-silent-failure] mirror the tmux worker's read-back: poll the
-        # session until the relaunched claude has drawn its banner (input box up,
-        # ready for type-ahead) rather than blind-sleeping a fixed boot delay that
-        # a slow boot would outrun. Proceed the instant it is ready; if it never
-        # becomes ready within the bound, surface the failure below — the carried
-        # goal is NEVER logged as re-established when it was not delivered.
-        # 'Claude Code v[0-9]' is the fresh-boot banner the tmux worker keys on too.
+        # Polls until the relaunched claude shows its banner, then proceeds. On timeout the goal is logged as
+        # not delivered, never as re-established. 'Claude Code v[0-9]' is the fresh-boot banner.
         log "waiting for relaunched claude to become ready (up to ${CLAUDE_READY_TIMEOUT_SECONDS}s)"
         READY=""
         DEADLINE=$(( $(date +%s) + CLAUDE_READY_TIMEOUT_SECONDS ))
         while [[ $(date +%s) -le $DEADLINE ]]; do
-          # Capture then grep a herestring — never `osascript | grep`: with
-          # pipefail, grep -q closing the pipe early SIGPIPEs osascript (its output
-          # exceeds the pipe buffer), and pipefail would then report a MATCH as a
-          # failure, spuriously declaring the session not-ready.
+          # Captures the output first and greps a herestring. Piping osascript into `grep -q` can SIGPIPE
+          # osascript, and under pipefail that reports a match as a failure.
           SNAP=$(_iterm_session_contents "$UUID")
           if grep -qE 'Claude Code v[0-9]' <<<"$SNAP"; then
             READY=1
@@ -1035,8 +693,7 @@ OSA
         if [[ -z "$READY" ]]; then
           log "ERROR: relaunched claude in session $UUID did not become ready within ${CLAUDE_READY_TIMEOUT_SECONDS}s; carried goal NOT delivered. Deliver it manually once the session is up: /goal $(cat "$GOALFILE")"
         else
-          # Ready: let the input box settle a beat, then queue the goal (mirrors
-          # the tmux worker's sleep-1 before its goal paste).
+          # Waits a second for the input box to settle, then queues the goal.
           sleep 1
           log "claude ready; re-establishing carried goal"
           GOALCMD="/goal $(cat "$GOALFILE")"
@@ -1092,12 +749,8 @@ OSA2
     log "waking; detached session=$SESSION cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    # Same trick as the iTerm2 relaunch: the shell in the new window evaluates
-    # $(cat msgfile) itself, so the message never touches argv or tmux quoting —
-    # [LAW:effects-at-boundaries] the only escaping is _relaunch_line's, of the
-    # paths and flags, never the message content. CLAUDE_BIN is the absolute path
-    # resolved in the launcher, not the bare "claude" the login shell about to
-    # spawn might or might not still have on its PATH.
+    # The new window's shell reads the message from the file, so the message never reaches argv or tmux quoting.
+    # Only the paths and flags are escaped, by _relaunch_line. CLAUDE_BIN is the absolute path resolved by the launcher.
     RELAUNCH=$(_relaunch_line "$CLAUDE_BIN")
     if ! tmux new-session -d -s "$SESSION" -c "$CWD" "$RELAUNCH" 2>>/dev/stderr; then
       log "ERROR: could not create detached tmux session $SESSION; nothing delivered"
@@ -1105,9 +758,7 @@ OSA2
     fi
     log "detached session $SESSION created; waiting for claude to become ready"
 
-    # [LAW:no-silent-failure] poll for the fresh boot's banner rather than a
-    # blind sleep — the same readiness contract the iTerm2 worker uses, so the
-    # goal is never queued into a window whose input box isn't up yet.
+    # Polls for the fresh boot's banner, as the iTerm2 worker does, so the goal is never queued before the input box is up.
     READY=""
     DEADLINE=$(( $(date +%s) + CLAUDE_READY_TIMEOUT_SECONDS ))
     while [[ $(date +%s) -le $DEADLINE ]]; do
@@ -1124,57 +775,22 @@ OSA2
       if [[ -s "$GOALFILE" ]]; then
         log "carried goal NOT delivered: /goal $(cat "$GOALFILE")"
       fi
-      # Tear the new session down before giving up. A readiness timeout does NOT
-      # mean nothing happened on the new side: the handoff message rides in the
-      # `tmux new-session` argv, so the successor is already carrying it and a boot
-      # that lands one second past the deadline would leave TWO live agents — the
-      # old one never retired, the new one working the handoff — which is the exact
-      # invariant this transport exists to provide. Collapsing back to "the old
-      # process is the only one" is the only outcome that keeps it, and it also
-      # stops a hung session lingering as an orphan nobody discovers.
-      # [LAW:no-silent-failure] the `|| true` is the narrow legitimate case: a
-      # session that never existed, or already died, is the state this line is
-      # trying to reach, so its failure is genuinely irrelevant to everything
-      # downstream — and the timeout itself is already reported, loudly, above.
-      # SESSION is only ever torn down here; retiring the OLD process instead
-      # would be the wrong direction, per the note below.
+      # A timeout does not mean nothing started: the message is already in the new session's argv, and a late
+      # boot would leave two live agents. So the new session is torn down, and the old process is left running.
+      # The `|| true` covers a session that is already gone, which is the state this line is meant to reach.
       tmux kill-session -t "$SESSION" 2>/dev/null || true
       log "detached session $SESSION torn down; the old process remains the only live agent"
-      # Leave the old process alone: a spawn that never came up is not grounds
-      # to kill the one process that was actually still running.
       exit 1
     fi
 
     log "claude ready in $SESSION"
 
-    # The successor is confirmed up and has the message; retire the old
-    # process so this handoff leaves exactly one live agent, the same
-    # guarantee the tmux (in-place reset) and iTerm2 (kill+relaunch)
-    # transports already give. TERM first, escalate to KILL if it lingers —
-    # identical escalation to the iTerm2 worker's.
-    #
-    # [LAW:no-ambient-temporal-coupling] this runs BEFORE the optional goal
-    # delivery below, and the ordering is the whole enforcement. Readiness is
-    # retirement's only precondition and it is already established above; goal
-    # delivery is optional and fallible, and under the script's `set -e` a single
-    # failing tmux command down there would abort the worker with the old process
-    # still live — an optional step silently suppressing the mandatory one. Ordered
-    # this way that cannot happen, and it cannot come back the next time a fallible
-    # command is added below, which is what guarding each command in turn would
-    # depend on. The iTerm2 worker already retires before it delivers.
-    #
-    # [LAW:parse-dont-validate] `kill -0` answers "is some process alive at this
-    # pid," which is not the question. The identity captured with the pid in the
-    # launcher is re-read here and compared: a pid the OS reissued during the delay
-    # and readiness wait reads as a different process and is left alone. A pid
-    # holding nothing reads as empty, which matches no captured identity — the
-    # gone case and the reused case take the same arm because they license the same
-    # action, which is none.
+    # The successor is up and has the message, so the old process is retired now, TERM first and KILL if it
+    # lingers. Retirement runs before the optional goal delivery, so a failure there cannot leave the old
+    # process running.
     if _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"; then
       kill -TERM "$OLD_CLAUDE_PID" 2>/dev/null || true
-      # The poll stops for BOTH endings, because they license the same action: the captured
-      # process exited, or the pid now holds someone else. Waiting on bare liveness instead
-      # would keep spinning against a stranger and then escalate to it.
+      # The poll stops when the captured process has exited or the pid holds another process.
       for _ in $(seq 1 20); do
         _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT" || break
         sleep 0.5

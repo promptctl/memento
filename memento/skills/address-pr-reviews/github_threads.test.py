@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
 """Tests for github_threads' pagination and response-shape handling.
 
-This module is what finds OPEN review findings on a PR, so a silent partial
-fetch here reports a clean review on a PR that still has outstanding findings.
-Every test below therefore fakes a `gh` that pages, and asserts the WHOLE set
-comes back — not that the call was made.
-
-The fake stands at the subprocess seam (`github_threads.subprocess`), which is
-the outermost edge this module owns: everything inside it — argv construction,
-`-f`/`-F` flag selection, cursor threading, JSON parsing, JSONL splitting —
-runs for real. Nothing here reaches into a private helper's internals, so the
-loops can be rewritten freely as long as they still return every page.
-[LAW:behavior-not-structure]
-
-No test touches the network; the fake refuses any argv it was not taught.
-
-Run: python3 github_threads.test.py
+Each test fakes a `gh` that pages and asserts that the whole set is returned. The fake sits at the
+subprocess seam (`github_threads.subprocess`), so argv construction, cursor threading, and JSON and
+JSONL parsing all run for real. No test uses the network, and the fake refuses any argv it was not
+taught. Run with: python3 github_threads.test.py
 """
 
 import importlib.util
@@ -52,8 +41,7 @@ def check_raises(name, exc_type, fn, must_mention=()):
 
 
 def check_returns(name, fn, expected):
-    """A success path asserted so that raising is a reported failure, not a
-    traceback that aborts the run before the later checks get to speak."""
+    """Runs `fn` and reports an exception as a failed check instead of aborting the run."""
     try:
         got = fn()
     except BaseException as e:  # noqa: BLE001 - raising IS the failure here
@@ -66,10 +54,9 @@ def check_returns(name, fn, expected):
 
 
 class FakeGh:
-    """A `gh` binary made of data. Substituted for the subprocess module.
+    """A fake `gh` that stands in for the subprocess module.
 
-    Two things it deliberately refuses rather than tolerates: an argv the test
-    did not teach it, and more calls than any correct loop could make. The
+    It refuses an argv the test did not teach it, and more calls than any correct loop could make. The
     second is what turns a runaway pagination loop into a failed test instead
     of a hung suite.
     """
@@ -97,7 +84,7 @@ def install(handler):
 
 
 def gh_vars(args):
-    """The `-f`/`-F key=value` pairs off a gh argv, as gh would read them."""
+    """Returns the `-f`/`-F key=value` pairs from a gh argv."""
     out = {}
     i = 0
     while i < len(args):
@@ -142,11 +129,9 @@ def comments_page(nodes, has_next=False, end=None):
 
 
 def paged_graphql(thread_pages, comment_pages=None):
-    """A gh whose GraphQL answers are keyed by the cursor it was handed.
+    """Returns a fake gh whose GraphQL answers are keyed by cursor.
 
-    An ABSENT cursor variable is the first page — that is the contract
-    `_graphql` documents (omitted, not empty). A cursor sent as the empty
-    string is a bug this fake refuses to paper over.
+    An absent cursor variable selects the first page. A cursor sent as an empty string is refused.
     """
     comment_pages = comment_pages or {}
 
@@ -209,9 +194,7 @@ check("comments: every page accumulates onto the thread",
 
 
 # --- cursor omission is end-of-pages, not a page to fetch -----------------
-# A final page reports hasNextPage false and OMITS endCursor entirely. The loop
-# must stop there rather than fetching a null cursor (which re-reads page one
-# forever) or treating the missing field as a hard error.
+# A final page with hasNextPage false and no endCursor ends the walk without an error.
 
 fake = install(paged_graphql({
     None: threads_page([thread_node("t1", [comment("bot", "one")])], has_next=True,
@@ -230,16 +213,9 @@ check("cursor omission: no extra page was requested",
 
 
 # --- hasNextPage false is the whole answer, cursor present or not ----------
-# The case above omits endCursor on the last page, but that is the SHAPE THE
-# FIXTURE HAPPENED TO PICK, not the shape GitHub sends: a real final page
-# carries a perfectly good endCursor naming its own last node, and only
-# hasNextPage says the walk is over. A loop that consulted the cursor's
-# presence instead of hasNextPage would pass every test above and then walk
-# forever against the real API on the very first call — page one of a
-# single-page PR is a final page. So the terminating signal is asserted
-# against the shape production actually returns, on both loops at once: the
-# threads page and the comments block below it each end with hasNextPage
-# false AND a live cursor. [LAW:verifiable-goals]
+# GitHub's final pages also carry a valid endCursor, so this case must not be the only one: the
+# walk ends on hasNextPage, not on the cursor's presence. Both loops are checked with a final page
+# that has hasNextPage false and a live cursor.
 
 fake = install(paged_graphql({
     None: threads_page([thread_node("t1", [comment("bot", "one")],
@@ -255,13 +231,8 @@ check("terminal page: the live cursor was not followed",
 
 
 # --- a promised page nobody named is a loud error, never a quiet stop ------
-# hasNextPage true with endCursor null/absent is the malformed shape Relay's
-# convention forbids and GitHub's contract does not guarantee against. Looping
-# on the null cursor would make `_graphql` omit it and re-read page one forever;
-# stopping would return a partial set as if it were whole. Both are silent, so
-# the contract is: RAISE, and name the PR. Each case below asserts the raise AND
-# that no further page was requested — a hang would blow FakeGh.CALL_CAP with a
-# "runaway pagination" message that mentions neither, so it fails too.
+# hasNextPage true with no endCursor must raise and name the PR. Each case below also asserts that
+# no further page was requested.
 
 for label, bad_page_info in [
     ("endCursor null", {"hasNextPage": True, "endCursor": None}),
@@ -282,8 +253,7 @@ for label, bad_page_info in [
 
 
 def unnamed_comment_page(args):
-    """First thread page is well-formed; the thread's comments promise a page
-    the response never names."""
+    """Returns a well-formed first thread page whose comments promise a next page that is never named."""
     variables = gh_vars(args)
     if "reviewThreads(" in variables["query"]:
         return json.dumps(threads_page([thread_node(
@@ -300,9 +270,8 @@ check("comments: no comment page was requested with a null cursor",
 
 
 # --- --paginate + --jq JSONL concatenation in change_requests -------------
-# Real gh applies the --jq filter per page and concatenates the results, so the
-# body is JSONL spanning page boundaries — with a trailing newline per page,
-# which is why blank lines have to survive parsing.
+# gh applies --jq per page and concatenates the output as JSONL, with a newline per page, so blank
+# lines must be skipped while parsing.
 
 def reviews_handler(args):
     if args[:2] != ["api", "--paginate"]:
@@ -334,9 +303,7 @@ check("change_requests: only the blocking reviews, in the contract's projection"
 check("change_requests: its own gh call walks every page",
       len(fake.calls) == 2 and "--paginate" in fake.calls[1], f"got {fake.calls}")
 
-# [LAW:single-enforcer] the one blocking-review rule change_requests and
-# action_provider.body_findings both route through — so the dismiss set and the
-# body-finding read cannot disagree about which reviews block.
+# change_requests and action_provider.body_findings share one blocking-review rule.
 check("is_blocking_review: CHANGES_REQUESTED blocks, no other state does",
       gt.is_blocking_review({"state": "CHANGES_REQUESTED"})
       and not gt.is_blocking_review({"state": "COMMENTED"})
@@ -346,10 +313,8 @@ check("is_blocking_review: CHANGES_REQUESTED blocks, no other state does",
 
 
 # --- the jq filter itself, through a real jq -------------------------------
-# A fake gh hands back whatever the test wrote, so nothing above can see the
-# filter regress (a `state` clause creeping back in, say). Running the real
-# string through jq over a raw reviews page does. jq is required, not
-# optional: a skipped check is a silent one. [LAW:no-silent-failure]
+# The fake gh returns what the test wrote, so this check runs the real jq filter over a raw reviews
+# page to catch a regression in the filter. jq is required: a skipped check would pass silently.
 
 import shutil  # noqa: E402
 import subprocess as real_subprocess  # noqa: E402
@@ -424,10 +389,8 @@ check_raises("shape: null data.node in the comment page names that field",
 
 
 # --- the verified mutations: a no-op must not pass as done ----------------
-# resolve() and dismiss_review() exist so the review loop cannot march on with
-# a thread still open or a review still blocking. Their whole value is the
-# confirmation check, so each is asserted from both sides: the confirmed shape
-# returns, and an unconfirmed one raises naming what it acted on.
+# resolve() and dismiss_review() are checked for both outcomes: a confirmed response returns, and an
+# unconfirmed one raises, naming the thread or review it acted on.
 
 
 def resolve_handler(confirmation):

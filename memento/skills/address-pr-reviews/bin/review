@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-"""review — CLI entrypoint over the address-pr-reviews provider library.
+"""Command-line entry point over the address-pr-reviews provider library.
 
-One command per operation the SKILL.md loop needs, so agents never hand-write
-`python3 -c` glue or raw graphql. Stdout is always the operation's JSON;
-errors are human-readable on stderr with a nonzero exit.
-
-    review caps
-    review setup-check [OWNER REPO]
-    review wait <pr>
-    review fetch <pr>
-    review change-requests <pr>
-    review resolve <thread-id>
-    review reply <thread-id> --body <text>
-    review dismiss <pr> <review-id> --message <text>
-    review trigger <pr>
-
-<pr> is a full PR URL or a bare number (resolved against the cwd's repo).
+Each subcommand prints its JSON result to stdout. Errors go to stderr with a nonzero exit. A PR
+argument is a full URL or a bare number, resolved against the current directory's repo.
 """
 
 from __future__ import annotations
@@ -26,9 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# [LAW:one-source-of-truth] the skill directory is derived from this file's
-# REAL location — resolve() walks through the ~/.claude/skills symlink — so
-# sibling modules import identically from either invocation path.
+# Resolved through symlinks, so sibling modules import the same from any invocation path.
 SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
@@ -37,14 +22,11 @@ import provider_loader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Input parsing — checkpoints that hand back stamped values
+# Input parsing
 # ---------------------------------------------------------------------------
 
 def pr_url(ref: str) -> str:
-    """Parse a PR reference (full URL or bare number) into a canonical PR URL.
-
-    [LAW:parse-dont-validate] this is the one checkpoint for PR references;
-    every handler downstream receives a URL already known to be well-formed.
+    """Returns a PR URL for a full URL or a bare number. Raises ValueError for a malformed URL.
     """
     if ref.isdigit():
         url = github_threads.gh("pr", "view", ref, "--json", "url", "--jq", ".url")
@@ -59,8 +41,7 @@ def pr_url(ref: str) -> str:
 
 
 def repo_slug(owner: str | None, repo: str | None) -> tuple[str, str]:
-    """Return (owner, repo) — the explicit pair, or inferred from the cwd's
-    GitHub remote. Argparse guarantees the pair arrives whole or not at all."""
+    """Returns (owner, repo): the explicit pair, or the current directory's GitHub remote."""
     if owner is not None and repo is not None:
         return owner, repo
     data = json.loads(github_threads.gh("repo", "view", "--json", "owner,name"))
@@ -68,10 +49,7 @@ def repo_slug(owner: str | None, repo: str | None) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Handlers — each returns (payload, failure_message | None).
-# [LAW:dataflow-not-control-flow] every handler prints its payload and exits
-# by the same path; success-vs-failure is a value the handler returns, not a
-# side branch in main.
+# Handlers return (payload, failure_message or None). main prints the payload and reports the failure.
 # ---------------------------------------------------------------------------
 
 def cmd_caps(provider, args) -> tuple[dict, str | None]:
@@ -87,8 +65,7 @@ def cmd_setup_check(provider, args) -> tuple[dict, str | None]:
 
 def cmd_wait(provider, args) -> tuple[dict, str | None]:
     result = provider.wait(pr_url(args.pr))
-    # [LAW:no-silent-failure] a non-success conclusion means the reviewer
-    # errored — its findings are absent, not empty. Surface the run URL.
+    # A non-success conclusion means the reviewer errored, so its findings are absent. The run URL is shown.
     failure = None if result["conclusion"] == "success" else (
         f"review run concluded {result['conclusion']!r}, not success — "
         f"findings are absent, not empty. Run: {result.get('url')}"
@@ -109,8 +86,7 @@ def cmd_resolve(provider, args) -> tuple[dict, str | None]:
 
 
 def cmd_reply(provider, args) -> tuple[dict, str | None]:
-    # The thread-reply mutation formerly inlined in SKILL.md's plan/confirm
-    # phases; confirmation of the created comment id is the success signal.
+    # The reply counts as posted only when GitHub returns the id of the created comment.
     comment_id = github_threads.gh(
         "api", "graphql",
         "-f", "query=mutation($id:ID!,$body:String!){"
@@ -122,7 +98,7 @@ def cmd_reply(provider, args) -> tuple[dict, str | None]:
         "--jq", ".data.addPullRequestReviewThreadReply.comment.id",
     )
     if not comment_id or comment_id == "null":
-        # [LAW:no-silent-failure] no confirmed comment id means no reply.
+        # No comment id means the reply was not posted.
         raise RuntimeError(
             f"addPullRequestReviewThreadReply returned no comment id for "
             f"{args.thread_id} — the reply was NOT posted."
@@ -154,8 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # [LAW:types-are-the-program] each subcommand declares the capability flag
-    # it needs; the single gate in main() reads it. Ungated commands carry None.
+    # Each subcommand declares the capability it needs, and main() gates on it. Ungated commands carry None.
     def add(name, func, capability=None, help=None):
         p = sub.add_parser(name, help=help)
         p.set_defaults(func=func, capability=capability)
@@ -213,7 +188,7 @@ def main() -> int:
 
     try:
         provider = provider_loader.get(args.provider)
-        # [LAW:single-enforcer] the one capability gate for every subcommand.
+        # Capability gate for every subcommand.
         if args.capability and not provider.CAPABILITIES.get(args.capability):
             raise RuntimeError(
                 f"provider '{provider.__name__}' does not support "

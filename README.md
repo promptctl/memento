@@ -305,9 +305,8 @@ base to add to and refuses. Anywhere a ceiling is resolved, a layer that cannot 
 still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
-and hands the hook's `reason` back to the agent as its next instruction: commit or push
-everything outstanding first, then run the `finalize-session` launcher with a handoff
-message. The launcher writes the handoff to disk and resets the session into it.
+and hands the hook's `reason` back to the agent as its next instruction: run the
+`finalize-session` launcher with a handoff message. The launcher writes the handoff to disk and resets the session into it.
 
 What that reason asks for depends on how far past the ceiling the session is. Until the count
 reaches 100,000 tokens past it (`GRACE` in `memento/lib/ceiling_config.py`), the agent is told to

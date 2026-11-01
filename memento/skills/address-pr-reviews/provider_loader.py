@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Load the active PR review provider.
+"""Loads the active PR review provider module and validates it against the provider contract.
 
-Reads provider.json (or PR_REVIEW_PROVIDER env var) from this directory,
-imports the named module, and validates CAPABILITIES before returning it.
-
-Usage:
-    import provider_loader
-    provider = provider_loader.get()
-    result = provider.fetch(pr_url)
+The provider name comes from an explicit argument, then PR_REVIEW_PROVIDER, then provider.json in
+this directory. The module is `<name>_provider.py` here and must declare CAPABILITIES and the
+functions `wait` and `fetch`.
 """
 
 from __future__ import annotations
@@ -21,9 +17,8 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).parent
 CONFIG_FILE = SKILL_DIR / "provider.json"
 
-# [LAW:one-source-of-truth] the capability→required-function mapping is declared
-# once here; both the required-key set and the validator derive from it. Adding a
-# capability means one entry, not edits scattered across the loader.
+# Maps each capability to the functions it requires. The required-key set and the validator both
+# derive from this mapping, so a new capability is one entry here.
 CAPABILITY_FUNCS = {
     "resolve":        ["resolve"],
     "trigger":        ["trigger"],
@@ -34,12 +29,10 @@ REQUIRED_CAPABILITIES = set(CAPABILITY_FUNCS)
 
 
 def get(name: str | None = None) -> object:
-    """Return the active provider module, validated against the contract.
+    """Returns the active provider module, validated against the contract.
 
-    [LAW:dataflow-not-control-flow] provider selection is a value with one
-    precedence chain: explicit `name` arg > PR_REVIEW_PROVIDER env > provider.json.
-    The explicit arg lets a caller pin a provider for one session without
-    mutating the global default. [LAW:no-shared-mutable-globals]
+    Precedence: the `name` argument, then PR_REVIEW_PROVIDER, then provider.json. An explicit
+    argument selects a provider for that call only and does not change the default.
     """
     name = _resolve_name(name)
     module = _load_module(name)
@@ -70,8 +63,7 @@ def _load_module(name: str) -> object:
             f"Provider module not found: {path}\n"
             f"Available providers: {_available()}"
         )
-    # [LAW:single-enforcer] sibling imports (shared modules like github_threads)
-    # resolve here, once, for every provider — not per-provider path hacks.
+    # Sibling modules such as github_threads become importable for every provider from here.
     if str(SKILL_DIR) not in sys.path:
         sys.path.insert(0, str(SKILL_DIR))
     spec = importlib.util.spec_from_file_location(f"{name}_provider", path)
