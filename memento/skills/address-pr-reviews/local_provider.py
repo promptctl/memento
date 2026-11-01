@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""Local PR review provider — stub for a locally-running review agent.
+"""Stub PR review provider for a locally run review agent.
 
-This module satisfies the provider contract interface and raises
-NotImplementedError on every method until the local agent is implemented.
-
-To implement:
-1. Decide how the local agent is invoked (binary, Python script, claude -p, etc.)
-2. Implement `wait` (or make it a synchronous no-op if `fetch` blocks)
-3. Implement `fetch` to run the agent and emit canonical findings JSON
-4. If the agent can mark findings as done, implement `resolve`
-5. Add a `setup_check` that verifies the binary / model is available
-6. Update CAPABILITIES to reflect what's actually implemented
-7. Set provider.json to {"provider": "local"}
-
-See PROVIDER_CONTRACT.md for the full interface spec.
+Each contract function raises NotImplementedError until the agent is wired in. The interface is
+specified in PROVIDER_CONTRACT.md.
 """
 
 from __future__ import annotations

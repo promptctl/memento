@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for the `ceiling` command.
 
-Each case runs the real command as a subprocess against a scratch config home and a scratch git
-repo, then asserts what the files say and what the command printed. [LAW:behavior-not-structure]
-it is driven the way an agent drives it, so a rewrite of the internals cannot break these.
-
-The cases that matter most run the real Stop hook afterwards and compare its resolved ceiling to
-the one this command reported. That agreement is the contract - two programs, one number - and it
-is the only thing that proves a ceiling this command wrote is a ceiling the gate enforces.
-
-Run: python3 ceiling.test.py
+Each case runs the real command as a subprocess against a scratch config home and git repo, then
+asserts on the files written and the output printed. The cases that matter most also run the real
+Stop hook and check that it resolves the same ceiling the command reported. Run with: python3 ceiling.test.py
 """
 
 import atexit
@@ -22,21 +16,19 @@ import tempfile
 
 SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The command installs memento's cc-candybar plugin under XDG_DATA_HOME; every child this suite runs
-# inherits a scratch one, so no run reaches the plugin root of the machine it runs on.
+# Gives every child a scratch XDG_DATA_HOME, so the plugin install never touches the real one.
 os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "ceiling")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
-# The file-format facts come from the module the command and the hook both read them from, so a
-# fixture here cannot drift from the files production writes. [LAW:one-source-of-truth]
+# The file-format constants come from the module the command and the hook both use, so fixtures
+# match the files production writes.
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, PROJECT_CONFIG_DIR  # noqa: E402
 
-# What `+100_000` resolves to from the shipped default, derived so retuning that default moves the
-# expectation with it rather than failing every case built on it. [LAW:one-source-of-truth]
+# Derived from the shipped default, so changing the default updates the expectation too.
 RAISED = DEFAULT_CEILING + 100_000
 
 SESSION = "sess-1"
@@ -54,10 +46,10 @@ def scratch_dir():
 
 
 def world(user_conf=None, project_conf=None, session_conf=None, git=True):
-    """A config home and a repo with a subdirectory, each layer written where a person writes it.
+    """Creates a config home and a repo with a `sub` directory, and writes each given layer to its file.
 
-    Returns (home, repo). Layers are driven through the real files rather than through flags, so
-    these cases exercise the paths the command actually resolves."""
+    Layers go through real files rather than flags, so the tests exercise the paths the command
+    resolves. Returns (home, repo)."""
     home, repo = scratch_dir(), scratch_dir()
     os.makedirs(os.path.join(repo, "sub"))
     if git:
@@ -73,11 +65,9 @@ def world(user_conf=None, project_conf=None, session_conf=None, git=True):
 
 
 def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None, shadowing=None):
-    """Invoke the command as the skill invokes it. Every ambient config is stripped: a developer's
-    own ceiling or CLAUDE_PROJECT_DIR must not decide a test.
+    """Runs the command as the skill does, with ambient config removed so a developer's own settings cannot affect a test.
 
-    `anchor` sets CLAUDE_PROJECT_DIR, for the cases where the session's project and the directory
-    the process happens to stand in are deliberately not the same place."""
+    `anchor` sets CLAUDE_PROJECT_DIR, for cases where the session's project differs from the working directory."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME", "CLAUDE_CODE_SESSION_ID")}
     env["MEMENTO_CONFIG_HOME"] = home
@@ -95,14 +85,10 @@ def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None, shadowi
 
 
 def aged_argparse():
-    """A directory that, placed on a child's PYTHONPATH, makes its argparse behave as every
-    argparse before 3.13 did.
+    """Returns a directory whose sitecustomize.py restores the pre-3.13 argparse negative-number matcher.
 
-    3.13 widened the regex argparse uses to tell a negative number from an unrecognised option.
-    This interpreter is past that, so a value like `-50_000` parses here whether or not the command
-    does anything to protect it, and a case asserting that it works would pass against a command
-    that had no guard at all. Restoring the old matcher is what makes the guard testable rather
-    than merely present. [LAW:verifiable-goals]"""
+    On 3.13 and later, `-50_000` parses without any guard in the command, so placing this on PYTHONPATH
+    is what makes the guard observable."""
     directory = scratch_dir()
     with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
         handle.write("import argparse, re\n"
@@ -115,17 +101,10 @@ def aged_argparse():
 
 
 def meddling_writer(text, target=None):
-    """A directory that, on a child's PYTHONPATH, has another writer land between the read the
-    command compares against and the write it is about to make.
+    """Returns a directory whose sitecustomize.py writes `text` between the command's staging step and its comparison.
 
-    The command's check is against a race, and a race left to chance is a case that passes by
-    running too fast. The staging pass is the one seam those reads straddle, so patching it makes
-    the collision happen on every run instead of almost never. [LAW:verifiable-goals]
-
-    With no `target` the writer lands on each destination, which is what the command compares file
-    by file. A named one is for the other check: the ceiling a signed request adds to is resolved
-    from layers that are not destinations at all, so moving that means writing a file no destination
-    comparison looks at."""
+    This makes the race happen on every run. With no `target`, the text lands on each destination. A named
+    `target` is a layer the command reads but does not write, which exercises the second resolution."""
     directory = scratch_dir()
     with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
         handle.write(f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\n"
@@ -142,8 +121,7 @@ def meddling_writer(text, target=None):
 
 
 ECHOING_GIT = """#!/bin/sh
-# `rev-parse` answers an option it does not know by printing it back and exiting 0, so this is every
-# question asked of a git too old for it.
+# Echoes any `--` option back and exits 0, as an old `git rev-parse` does for unknown options.
 for argument in "$@"; do
   case "$argument" in --*) echo "$argument" ;; esac
 done
@@ -152,11 +130,7 @@ exit 0
 
 
 def stub_git(behaviour):
-    """A directory holding a `git` that behaves as named, for placing ahead of a child's PATH.
-
-    Which git a session runs is not something a case can install, and the behaviour that matters
-    here is exactly stateable without one. [LAW:verifiable-goals] a case that needed an old git on
-    the machine is a case nobody runs."""
+    """Returns a directory holding a `git` with the given script, for placing first on PATH."""
     directory = scratch_dir()
     standing_in = os.path.join(directory, "git")
     with open(standing_in, "w") as handle:
@@ -179,8 +153,7 @@ def repo_with_commit(path):
 
 
 def gate(home, repo, tokens, session=SESSION):
-    """The real Stop hook, at a token count, against the same layers. Returns (verdict, ceiling)
-    read from its log line - the hook's own statement of which number won."""
+    """Runs the real Stop hook at a token count. Returns (verdict, ceiling), read from the hook's log line."""
     transcript = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, dir=SCRATCH)
     transcript.write(json.dumps({"type": "user", "isSidechain": False,
                                  "message": {"content": "hi"}}) + "\n")
@@ -201,8 +174,7 @@ def gate(home, repo, tokens, session=SESSION):
     emitted = json.loads(done.stdout) if done.stdout.strip() else None
     line = open(log).read().strip().split("\n")[-1]
     verdict = "block" if emitted and emitted.get("decision") == "block" else "allow"
-    # Read as a float, because a lifted ceiling is logged as `inf` - which is the hook agreeing
-    # with the command about a session that has no ceiling at all, not a malformed line.
+    # A lifted ceiling is logged as `inf`, so the value is read as a float.
     return verdict, float(line.split("ceiling=")[1].split()[0])
 
 
@@ -294,9 +266,7 @@ check("a unit suffix is refused, naming what the setting accepts",
       code == 1 and "100k" in err and "off" in err, f"{code} {err}")
 check("and writes nothing on the way out", session_conf(home) is None, str(session_conf(home)))
 
-# The documented `-50_000` against an argparse that calls a leading `-` an option unless the token
-# is plain digits. Every Python before 3.13 is that argparse, and there it took the value for an
-# option, never reached the grammar, and exited 2 on a usage error.
+# `-50_000` against an argparse that treats a leading `-` as an option, as Python before 3.13 does.
 home, repo = world()
 code, out, err = run(home, repo, "set", "session", "-50_000", pythonpath=aged_argparse())
 check("a negative adjustment is a value and not an option on every interpreter",
@@ -369,17 +339,15 @@ check("a project move starts from the user layer where that is what stands benea
 
 home, repo = world(git=False)
 code, out, err = run(home, repo, "set", "project", "+100_000")
-# git's own words, not a paraphrase of them: the refusal quotes the reason rather than asserting a
-# cause this command cannot check.
+# Asserts git's own error text, which the command passes through.
 check("outside a git repository a project move refuses rather than guessing a root",
       code == 1 and "fatal: not a git repository" in err, f"{code} {err}")
 check("and writes nothing, including the session layer",
       project_conf(repo) is None and session_conf(home) is None,
       f"{project_conf(repo)} {session_conf(home)}")
 
-# A git too old for one of these questions does not refuse either: `rev-parse` prints an option it
-# does not know back and exits 0, so the answer is the question, and a path built out of that is a
-# `.promptctl` directory named after a flag - written, reported, walked through by nothing.
+# A git too old for a question echoes it back as the answer. The command must refuse that rather than
+# write a file named after the flag.
 home, repo = world()
 code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(ECHOING_GIT))
 check("a git that hands a question back has not answered it",
@@ -389,9 +357,8 @@ check("and no config lands in a directory named after a flag",
       and [name for name in os.listdir(repo) if name.startswith("--")] == [],
       f"{project_conf(repo)} {sorted(os.listdir(repo))}")
 
-# The project is the session's project, not whichever directory something last ran `cd` into.
-# Every other case here runs with the anchor and the working directory in the same place, which is
-# precisely where a lookup that asked the working directory could not be seen to be asking it.
+# The project is the anchored one, not the working directory. Other cases run with both in one place,
+# so this case is the one that tells them apart.
 home, repo = world()
 elsewhere = scratch_dir()
 subprocess.run(["git", "init", "-q", elsewhere], check=True, capture_output=True)
@@ -414,8 +381,7 @@ code, out, err = run(home, repo, "set", "project", "400_000")
 check("a move says what the file held, so the number is not lost silently",
       code == 0 and "replacing 900_000" in out, out)
 
-# A project move does not inherit one session's private allowance, and does not overwrite it either:
-# the session's own layer still sits on top of whatever the project now says.
+# A project move ignores the session's own layer, which stays in force over the result.
 home, repo = world(session_conf="ceiling = 900_000\n")
 code, out, err = run(home, repo, "set", "project", "+100_000")
 check("a project move starts from the project, not from the room one session gave itself",
@@ -426,9 +392,8 @@ check("and leaves that session's own layer in force over it",
 
 # --- one project, and no further ---------------------------------------------------------
 
-# The requirement this command was built for: a change reaches the project it was made in and
-# nothing else. The user layer is the one file that would carry a ceiling to every project on the
-# machine, so no scope may write it - and a second repo must come out untouched.
+# A change reaches only the project it was made in. No scope may write the user layer, and another
+# project must stay untouched.
 home, repo = world()
 other = scratch_dir()
 os.makedirs(os.path.join(other, PROJECT_CONFIG_DIR))
@@ -475,15 +440,14 @@ check("clearing a project that never set a ceiling removes nothing and says so",
       code == 0 and "absent" not in out and "removed" not in out
       and "project layer     (none)" in out, f"{code} {out}")
 
-# Nothing stands, so nothing needs creating, so no repository root needs finding. A clear that
-# borrowed the write site would refuse this - and refuse it talking about writing.
+# With nothing to remove, no repository root is needed. A clear that asked for one would refuse with a
+# message about writing.
 home, repo = world(git=False)
 code, out, err = run(home, repo, "clear", "project")
 check("clearing a project outside a git repository is not an error when nothing is there to clear",
       code == 0 and "project layer     (none)" in out, f"{code} {out} {err}")
 
-# The file the hook is dying on is the file `clear` exists to remove, so the reader that refuses it
-# must not be the reader standing between the two.
+# `clear` must not parse the file it removes, since parsing is what fails on a broken layer.
 home, repo = world(session_conf="ceiling = 400000\nceiling = 500000\n")
 code, out, err = run(home, repo, "clear", "session")
 check("a layer too broken to parse is still one this command can take away",
@@ -491,15 +455,13 @@ check("a layer too broken to parse is still one this command can take away",
 check("and it says what it could not read instead of dying on the way to the unlink",
       "unreadable" in out and "twice" in out, out)
 
-# Tolerance goes exactly that far: a layer nobody asked to remove is still refused loudly, because
-# a ceiling computed from a file that does not parse is a ceiling nobody set.
+# Only `clear` tolerates a broken layer. Any command that resolves a ceiling from it still refuses.
 home, repo = world(user_conf="ceiling = 400000\nceiling = 500000\n")
 code, out, err = run(home, repo, "show")
 check("a malformed layer is still refused wherever a ceiling is resolved from it",
       code == 1 and "twice" in err, f"{code} {err}")
 
-# Unreadable is wider than unparseable, and the hook dies on all of it alike. A file whose bytes are
-# not text is as much a file `clear` exists to take away as one holding a key twice.
+# A file whose bytes are not text is also one `clear` must be able to remove.
 home, repo = world()
 bad_bytes = os.path.join(home, "sessions", SESSION, CONFIG_NAME)
 os.makedirs(os.path.dirname(bad_bytes), exist_ok=True)
@@ -529,9 +491,8 @@ check("and that one says what it could not read too", "unreadable" in out, out)
 
 # --- a layer replaced, rather than read ---------------------------------------------------
 
-# A count states a ceiling outright, so the layer it replaces is one it never has to read. `clear`
-# was given that reasoning last round and `set` was not, which left a broken layer fixable only by
-# removing it first.
+# A count states a ceiling outright and never reads the layer it replaces, so `set` can overwrite a
+# layer that does not parse.
 BROKEN = "ceiling = 400000\nceiling = 500000\n"
 home, repo = world(session_conf=BROKEN)
 code, out, err = run(home, repo, "set", "session", "400_000")
@@ -543,8 +504,7 @@ code, out, err = run(home, repo, "set", "session", "off")
 check("and off replaces it too, for the same reason", code == 0 and session_conf(home) ==
       "ceiling = off\n", f"{code} {out} {err}")
 
-# An adjustment is the case that genuinely needs the number beneath, and a file that does not parse
-# has none to give. Reading the default instead would resolve to a ceiling nobody asked for.
+# An adjustment needs the number beneath, and a file that does not parse has none to give.
 home, repo = world(session_conf=BROKEN)
 code, out, err = run(home, repo, "set", "session", "+50_000")
 check("an adjustment over the same file still refuses, having no base to add to",
@@ -560,9 +520,8 @@ check("an absolute project move replaces a malformed project layer",
 
 # --- a destination that moved under the command -------------------------------------------
 
-# The project layer is shared, and since this command exists two sessions can adjust it at once.
-# Both would read the same number beneath and the later write would drop the earlier one, with each
-# report truthful about its own view and neither mentioning the loss.
+# The project layer is shared, so two sessions can adjust it at once. Each would read the same number,
+# and the later write would drop the earlier change without either report mentioning it.
 home, repo = world(session_conf="ceiling = 900000\n")
 code, out, err = run(home, repo, "set", "session", "400_000",
                      pythonpath=meddling_writer("ceiling = 777000\n"))
@@ -571,9 +530,8 @@ check("a destination that changed since it was read stops the write",
 check("and the change that landed there is the one left standing",
       session_conf(home) == "ceiling = 777000\n", str(session_conf(home)))
 
-# What a write rests on is the number, and the layers that number comes from are not all
-# destinations: the user layer is in a project-scoped base and is written by nothing here, so it can
-# move with every destination sitting still. Comparing the files would see nothing to stop.
+# A write rests on a number, and some layers beneath it are not destinations. The user layer can
+# change while no destination does, so only the second resolution catches that.
 home, repo = world(user_conf="ceiling = 300000\n")
 code, out, err = run(home, repo, "set", "project", "+50_000",
                      pythonpath=meddling_writer("ceiling = 900000\n",
@@ -585,8 +543,7 @@ check("and neither destination is written",
       project_conf(repo) is None and session_conf(home) is None,
       f"{project_conf(repo)} {session_conf(home)}")
 
-# The limit of that check, and the case that fails if the second resolution is an eager one: a count
-# states a ceiling outright, reads no base, and so has nothing beneath it that could refuse it.
+# A count reads no base, so a change beneath it does not stop the write.
 home, repo = world(user_conf="ceiling = 300000\n")
 code, out, err = run(home, repo, "set", "project", "300_000",
                      pythonpath=meddling_writer("ceiling = 900000\n",
@@ -596,8 +553,8 @@ check("a count asks for no base, so a change underneath it writes anyway",
 
 # --- nothing staged left behind -----------------------------------------------------------
 
-# A `memento.conf.<pid>` is read by nothing here, which is exactly why leaving one would be
-# invisible. The staging write is refused by a directory that cannot be written into.
+# A leftover `memento.conf.<pid>` is read by nothing here, so the test checks that none remains. The
+# staging write is refused by a read-only directory.
 home, repo = world()
 holding = os.path.join(repo, PROJECT_CONFIG_DIR)
 os.makedirs(holding)
@@ -615,8 +572,8 @@ check("and it refuses in this command's own shape rather than as a traceback",
 
 # --- a filesystem that said no ------------------------------------------------------------
 
-# An unlink asks permission of the parent directory rather than of the file. The exit contract
-# promises the file and the reason, which an errno carries and a traceback does not.
+# unlink needs write permission on the parent directory, not the file. The command must report that
+# as its own error, not as a traceback.
 home, repo = world(project_conf="ceiling = 350000\n")
 holding = os.path.join(repo, PROJECT_CONFIG_DIR)
 os.chmod(holding, 0o500)
@@ -642,8 +599,8 @@ check("a layer the filesystem will not open refuses the same way",
 
 # --- which checkout the project is --------------------------------------------------------
 
-# A worktree's project is the checkout it belongs to: a file at the worktree's own root would
-# govern it only until that worktree is deleted.
+# A worktree's project is the checkout it belongs to, since a file at the worktree's root stops
+# applying once the worktree is deleted.
 home = scratch_dir()
 main = repo_with_commit(os.path.join(scratch_dir(), "main"))
 linked = os.path.join(scratch_dir(), "linked")
@@ -655,9 +612,8 @@ check("a project move from a linked worktree writes the checkout it belongs to",
 check("and leaves no second project file at the worktree's own root",
       project_conf(linked) is None, str(project_conf(linked)))
 
-# A submodule's git dir is the superproject's `.git/modules/<name>`, whose parent is inside git's
-# own storage. No walk up from the submodule passes through there, so a file written there would be
-# reported as written and would govern nothing.
+# A submodule's git dir sits in the superproject's storage, which no walk up from the submodule
+# reaches. The project file must be written at the submodule's own root.
 home = scratch_dir()
 superproject = repo_with_commit(os.path.join(scratch_dir(), "super"))
 vendored = repo_with_commit(os.path.join(scratch_dir(), "vendored"))
@@ -685,8 +641,8 @@ after, ceiling = gate(home, repo, 5_000_000)
 check("a session whose ceiling this command lifted is not blocked",
       after == "allow", f"{after} {ceiling}")
 
-# The number the command printed and the number the gate enforced are the same number, measured
-# at both ends. A project move is the case where they could differ, so it is the one tested.
+# The ceiling the command reports must match the ceiling the gate enforces. A project move is tested
+# because it is the case where they could diverge.
 home, repo = world()
 code, out, err = run(home, repo, "set", "project", "400_000")
 verdict, enforced = gate(home, repo, 450_000)
@@ -696,9 +652,8 @@ verdict, enforced = gate(home, repo, 350_000, session="sess-3")
 check("and a session under it is allowed",
       verdict == "allow" and enforced == 400_000, f"{verdict} {enforced}")
 
-# A project move made mid-session reaches the session that made it at its next stop: the hook reads
-# the layers live, so a session that has already stopped is in no different position from one that
-# has not.
+# The hook reads the layers live, so a project move reaches a session at its next stop, including a
+# session that has already stopped once.
 home, repo = world()
 verdict, enforced = gate(home, repo, RAISED + 10_000)
 check("a session's stop before the move reads the default", enforced == DEFAULT_CEILING, str(enforced))

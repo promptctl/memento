@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""GitHub review-thread primitives shared by every provider whose findings
-land as PR review threads.
+"""GitHub review-thread primitives shared by providers whose findings are PR review threads.
 
-[LAW:one-source-of-truth] the GraphQL thread read, the canonical Finding
-shape, and the verified resolve mutation live here once. A provider that
-posts ordinary GitHub review threads imports these instead of minting a
-second copy that drifts.
+The GraphQL thread read, the canonical finding shape, and the verified resolve mutation are defined
+here once, so providers that post review threads import them instead of keeping copies.
 """
 
 from __future__ import annotations
@@ -16,7 +13,7 @@ import subprocess
 
 
 def gh(*args: str) -> str:
-    """All shell-outs through one function. [LAW:single-enforcer]"""
+    """Runs `gh` with the given arguments and returns its stripped stdout."""
     return subprocess.check_output(
         ["gh", *args], text=True, stderr=subprocess.PIPE
     ).strip()
@@ -34,16 +31,11 @@ def head_sha(owner: str, repo: str, pr_num: int) -> str:
 
 
 def paginated(endpoint: str, jq: str) -> list[dict]:
-    """Every object `jq` emits over every page of a REST list endpoint.
+    """Returns the objects `jq` emits across every page of a REST list endpoint.
 
-    `--paginate` walks the whole list, so completeness is structural rather
-    than a count checked afterwards. With `--jq`, gh applies the filter per
-    page and concatenates the results, so a filter emitting one object per
-    line yields JSONL across the whole set — the one shape that survives page
-    boundaries. (A filter wrapping each page in `[...]` would emit one array
-    *per page* and not parse as a single document; `--slurp` cannot be
-    combined with `--jq`.) [LAW:one-source-of-truth] that gh/jq fact lives here
-    once, for every reader of a paginated list.
+    `gh --paginate` applies `--jq` per page and concatenates the output, so the filter must emit one
+    object per line. A filter that wraps each page in an array does not parse as one document, and
+    `--slurp` cannot be combined with `--jq`.
     """
     out = gh("api", "--paginate", endpoint, "--jq", jq)
     return [json.loads(line) for line in out.splitlines() if line.strip()]
@@ -71,14 +63,11 @@ _COMMENTS_QUERY = (
 
 
 def _graphql(query: str, **variables) -> dict:
-    """One GraphQL shell-out. [LAW:single-enforcer]
+    """Runs one GraphQL query.
 
-    [LAW:dataflow-not-control-flow] the variable's Python type picks the flag:
-    `gh -F` type-infers its value, which would coerce an all-digit cursor or node
-    id into a number and break the query, so strings go through `-f` (always raw)
-    and ints through `-F`. A `None` cursor is *omitted* rather than sent empty —
-    an undeclared nullable variable is null to GraphQL, whereas `-f cursor=` is
-    the empty string, which is not a valid cursor.
+    Strings go through `-f`, which sends them raw, and ints through `-F`. `-F` would type-infer an
+    all-digit cursor or id into a number. A `None` variable is omitted, so GraphQL reads it as null
+    rather than as the empty string, which is not a valid cursor.
     """
     args = ["api", "graphql", "-f", f"query={query}"]
     for key, value in variables.items():
@@ -89,16 +78,11 @@ def _graphql(query: str, **variables) -> dict:
 
 
 def _response_path(data: dict, *path: str, subject: str) -> dict:
-    """Walk the response path a query asked for, or name the field that failed.
+    """Returns the value at a response path, or raises naming the field that is null.
 
-    [LAW:single-enforcer] the one place this module asks "did GraphQL give us the
-    shape we asked for". Every null along the path comes back with HTTP 200, so
-    without this the only signal is a bare `TypeError: 'NoneType' object is not
-    subscriptable` at whichever accessor happened to touch it first — and each
-    accessor would otherwise carry its own hand-written copy of the check.
-
-    [LAW:no-silent-failure] a null on the path means the object is missing or
-    inaccessible, which is an error, never an empty result set.
+    GraphQL returns HTTP 200 with nulls for inaccessible objects. Without this check the failure
+    would surface as a TypeError far from its cause. A null on the path is an error, never an empty
+    result.
     """
     node: object = data
     for depth, field in enumerate(path):
@@ -114,20 +98,10 @@ def _response_path(data: dict, *path: str, subject: str) -> dict:
 
 
 def _next_cursor(block: dict, *, subject: str) -> str | None:
-    """The cursor naming the page after this one, or None when this page is last.
+    """Returns the cursor for the next page, or None if this page is the last.
 
-    [LAW:single-enforcer] the one place this module decides whether pagination
-    continues, so both loops obey the same rule and neither can drift into
-    trusting a convention the other checks.
-
-    [LAW:no-silent-failure] `hasNextPage` true paired with no `endCursor` is a
-    contradiction — another page is promised and nothing names it. Relay's
-    convention says it cannot happen; GitHub's contract does not guarantee it.
-    Both of the alternatives to raising are worse than a loud error: looping on
-    a null cursor makes `_graphql` omit the argument and re-read page one
-    forever (an unbounded hang with no error and no timeout), and stopping here
-    would return a partial set as if it were whole — the exact silent partial
-    fetch this pagination exists to prevent.
+    `hasNextPage` with no `endCursor` raises. Returning None would present a partial set as complete,
+    and reusing a null cursor would re-read the first page forever.
     """
     page_info = block["pageInfo"]
     if not page_info["hasNextPage"]:
@@ -152,13 +126,10 @@ def _page_of_threads(owner: str, repo: str, pr_num: int, cursor: str | None) -> 
 
 
 def _complete_comments(thread: dict) -> None:
-    """Walk a single thread's remaining comment pages onto its first page.
+    """Appends one thread's remaining comment pages to its first page.
 
-    Nested connections are why this loop is hand-written rather than delegated to
-    `gh --paginate`: that flag walks one top-level connection, and the comment
-    pages hang off each thread node. A truncated chain is not cosmetic — the loop
-    reads `thread_comments` to see its own prior plan and the reviewer's replies,
-    so dropping the tail would re-plan a finding that was already answered.
+    This loop is written by hand because `gh --paginate` walks only one top-level connection, and
+    each thread's comments are a nested connection.
     """
     subject = f"comments of review thread {thread['id']}"
     block = thread["comments"]
@@ -171,18 +142,9 @@ def _complete_comments(thread: dict) -> None:
 
 
 def _fetch_threads(owner: str, repo: str, pr_num: int) -> list[dict]:
-    """Every review thread on the PR, with every comment on each.
+    """Returns every review thread on the PR, with all of its comments.
 
-    Completeness is structural: both loops run until GitHub reports `hasNextPage`
-    false, so there is no post-hoc count to compare against a page cap. The
-    previous version read one page and raised when it filled, which was the right
-    refusal — a partial set read as complete would report a PR clean while
-    findings sat unread — but a PR that survives several review rounds crosses 100
-    threads as a matter of course, and at that point the loop cannot run at all.
-    [LAW:no-silent-failure] is satisfied by returning the whole set, not by
-    detecting that we failed to — and when a page promises a successor it does
-    not name, `_next_cursor` raises rather than let an unwalkable set pass as
-    complete or the loop spin forever.
+    Both loops run until `hasNextPage` is false, so the result is the whole set or the call raises.
     """
     threads: list[dict] = []
     cursor: str | None = None
@@ -198,9 +160,7 @@ def _fetch_threads(owner: str, repo: str, pr_num: int) -> list[dict]:
 
 
 def _build_findings(threads: list[dict]) -> list[dict]:
-    """[LAW:dataflow-not-control-flow] one shape for every finding — reviewer-
-    authored and human-authored threads are the same primitive, never separate
-    code paths."""
+    """Builds canonical findings from threads. Reviewer and human threads share one shape."""
     findings = []
     for t in threads:
         nodes = t.get("comments", {}).get("nodes") or []
@@ -229,8 +189,8 @@ def fetch(pr_url: str) -> dict:
 
 
 def resolve(thread_id: str) -> dict:
-    """Resolve one review thread and verify GitHub confirms it.
-    [LAW:no-silent-failure] raises RuntimeError if confirmation is absent."""
+    """Resolves one review thread and returns only after GitHub confirms it. Raises RuntimeError if it
+    does not."""
     confirmed = gh(
         "api", "graphql",
         "-f", "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id})"
@@ -246,11 +206,7 @@ def resolve(thread_id: str) -> dict:
     return {"thread_id": thread_id, "is_resolved": True}
 
 
-# Which reviews are the automated reviewer's is decided HERE, once, for every
-# consumer — the dismiss set and the reviewed-verdict alike. `.user.type` is the
-# discriminator: the reviewer posts through the Actions token as a Bot and a
-# person posts as a User, whatever state either review carries, so Bot vs User
-# is exactly automated-reviewer vs human. [LAW:single-enforcer]
+# Selects the automated reviewer's reviews. Its reviews have `.user.type` "Bot" and people's are "User".
 _BOT_REVIEWS_JQ = (
     '.[] | select(.user.type=="Bot")'
     ' | {review_id: .id, author: .user.login, commit_id, state, body}'
@@ -258,44 +214,32 @@ _BOT_REVIEWS_JQ = (
 
 
 def bot_reviews(pr_url: str) -> list[dict]:
-    """Every review the automated reviewer has posted on the PR, oldest first —
-    `{review_id, author, commit_id, state, body}` each.
+    """Returns every automated-reviewer review on the PR, oldest first, as
+    `{review_id, author, commit_id, state, body}` entries.
 
-    A PR that survives several review rounds accumulates a review per round per
-    re-run and crosses 100 easily; a single-page read would silently omit the
-    newest review, which is the one the reviewed-verdict reasons about, or the
-    blocking one the dismiss set must clear.
+    Reads every page, since a PR with many rounds can exceed one page and a single-page read would
+    drop the newest review.
     """
     owner, repo, pr_num = parse_pr(pr_url)
     return paginated(f"repos/{owner}/{repo}/pulls/{pr_num}/reviews", _BOT_REVIEWS_JQ)
 
 
 def is_blocking_review(review: dict) -> bool:
-    """[LAW:single-enforcer] The one rule for "this automated-reviewer review blocks
-    the PR", over a `bot_reviews` entry. Both consumers call it — the dismiss set
-    (`change_requests`) and the out-of-diff finding read (`action_provider.body_findings`)
-    — so neither can classify a review as blocking that the other would not: the rule
-    is single-sourced, not two literals that agree until one is edited.
-    [LAW:one-source-of-truth]
+    """Returns True if an automated-reviewer review blocks the PR, given a `bot_reviews` entry.
 
-    This shares the predicate, not the read: each consumer calls `bot_reviews` for
-    its own snapshot. That is sound because the reviewer only changes a PR's reviews
-    on a re-review, which a round triggers by pushing — so within one round, between
-    two adjacent reads with no push, the two snapshots hold the same reviews."""
+    `change_requests` and `action_provider.body_findings` both use this predicate. Each calls
+    `bot_reviews` for its own read; the reviewer changes reviews only on a re-review after a push,
+    so two reads with no push between them see the same reviews.
+    """
     return review["state"] == "CHANGES_REQUESTED"
 
 
 def change_requests(pr_url: str) -> dict:
-    """Return the automated reviewer's blocking reviews — the CHANGES_REQUESTED
-    reviews this round must dismiss once its findings are addressed.
+    """Returns the automated reviewer's CHANGES_REQUESTED reviews that this round must dismiss.
 
-    [LAW:no-silent-failure] scoped to the automated reviewer by `bot_reviews`: a
-    human's CHANGES_REQUESTED is cleared only by that human re-reviewing, never
-    auto-dismissed.
-
-    Read at fetch-time and dismissed by id at round end. [LAW:one-source-of-truth]
-    the dismiss set is what was read and addressed, never re-derived after a push
-    — the push's fresh re-review carries a new id this read never saw.
+    Human reviews are never included, so a human's request is cleared only by that human. The result
+    is read when findings are fetched and dismissed by id afterwards; reviews created by a later push
+    are not in it.
     """
     return {"reviews": [
         {"review_id": r["review_id"], "author": r["author"], "commit_id": r["commit_id"]}
@@ -304,9 +248,9 @@ def change_requests(pr_url: str) -> dict:
 
 
 def dismiss_review(pr_url: str, review_id: int, message: str) -> dict:
-    """Dismiss one stale CHANGES_REQUESTED review with an explanatory message
-    and verify GitHub recorded the dismissal.
-    [LAW:no-silent-failure] raises RuntimeError if the review is not DISMISSED."""
+    """Dismisses one review with a message and returns only after GitHub confirms the dismissal.
+
+    Raises RuntimeError if the review is not DISMISSED afterwards."""
     owner, repo, pr_num = parse_pr(pr_url)
     state = gh(
         "api", "--method", "PUT",

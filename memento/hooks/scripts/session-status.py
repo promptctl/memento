@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""A session that starts or resumes has its ceiling on cc-candybar's bar from its first frame.
+"""Publishes the session's ceiling status to cc-candybar's bar at SessionStart.
 
-The Stop hook writes the session's status at every stop, but a session that has not yet ended a
-turn has had no stop, and the bar's ceiling segment stays hidden until a status exists. This writes
-it at SessionStart, for the sources that begin a session here: `startup` and `resume`. `clear` has
-its own hook, which drops the session's override before writing; `compact` changes nothing the
-status says.
-
-Publishing is this hook's whole job, so a failure to publish is its failure: logged, then raised,
-as the clear hook does with its own. [LAW:no-silent-failure]
+Runs for the `startup` and `resume` sources. The Stop hook writes the status only at a stop, so
+without this the bar's ceiling segment stays hidden until the first turn ends. `clear` is handled
+by clear-session-ceiling.py, and `compact` leaves the status unchanged. A failed publish is logged
+and re-raised.
 """
 
 import os

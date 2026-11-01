@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
 """Tests for finalize-session's tmux pane discovery.
 
-These drive the launcher exactly as an agent does - argv in, `--dry-run` report
-out - and assert which transport and which pane it selected.
-[LAW:behavior-not-structure] nothing here reaches inside _discover_tmux_pane, so
-the walk can be rewritten freely as long as the pane it picks stays right.
-
-The process tree is REAL. `nest` builds a chain of genuine processes above the
-launcher, so the walk runs against the real ps, real pids, and real elapsed
-times; a synthetic process table would only test the parser against this file's
-own fiction, and could not notice `ps -eo` failing on some platform. tmux is the
-one fixture, because a pane's dead-but-still-listed state cannot be conjured on
-demand, and the forging ps in the pid-reuse case wraps the real one rather than
-replacing it.
-
-The detached-transport cases have a claude process of their own, planted in the
-chain: `nest` re-execs itself under the name `claude` at the top hop, so
-`_find_claude_pid` finds a process this suite owns and can name. It is a real
-process in the real ancestry, matched by the real walk - the fixture is the NAME
-and nothing else. Before that, those cases passed only because the walk climbed
-past the chain into whatever real `claude` was running the suite, so a plain CI
-runner with no claude-named ancestor saw them DECLINE instead of DETACH and the
-suite failed for a reason having nothing to do with the code under test.
+Each case runs the launcher as an agent does (argv in, `--dry-run` report out)
+and asserts which transport and pane it selected. The process tree is real:
+`nest` builds a chain of genuine processes above the launcher, so the walk runs
+against real ps output, pids, and elapsed times. tmux is the only fixture, and the
+ps wrapper in the pid-reuse case forges one ancestor's age while delegating
+everything else to the real ps. The detached-transport cases plant a process
+named `claude` in that chain, so the claude lookup finds a process this suite
+owns rather than whatever claude runs on the host.
 
 Run: python3 finalize-session.test.py
 """
@@ -47,9 +34,8 @@ def check(name, condition, detail=""):
 
 
 # --- fixtures -------------------------------------------------------------
-# A pane record is `id pid dead`. ROOTPID in the pid column stands for the pid
-# `nest` published: the process at the top of the chain, and therefore a genuine
-# ancestor of the launcher.
+# A pane record is `id pid dead`. ROOTPID in the pid column stands for the
+# top-of-chain pid that `nest` publishes, a real ancestor of the launcher.
 
 TMUX = r"""#!/bin/bash
 # Fixture tmux. $FIXTURE_PANES holds one `id pid dead` record per line - panes as
@@ -304,12 +290,10 @@ FIXTURES = tempfile.mkdtemp(prefix="finalize-fixtures.")
 install(FIXTURES, "tmux", TMUX)
 install(FIXTURES, "claude", CLAUDE)
 NEST_BIN = install(FIXTURES, "nest", NEST)
-# The argv0 the planted claude hop runs under. Names, not files: `exec -a` needs
-# nothing on disk, and the launcher reads only what ps reports. The first is the
-# one name the ancestry walk always looked for; the second is what a daemon-hosted
-# session actually runs as - `claude` on PATH is a symlink into the versioned
-# install and the daemon execs through the link's target, so the basename is a
-# version number and nothing in argv0 says `claude` except the directory.
+# argv0 names for the planted claude hop. They are names, not files: `exec -a`
+# needs nothing on disk. The first is the name the ancestry walk looks for; the
+# second mimics a daemon-hosted session, whose argv0 is the versioned install
+# path rather than `claude`.
 NEST_AS_CLAUDE = os.path.join(FIXTURES, "as-claude", "claude")
 NEST_AS_VERSIONED_CLAUDE = os.path.join(FIXTURES, "claude", "versions", "2.1.270")
 FORGE_DIR = os.path.join(FIXTURES, "forge")
@@ -323,19 +307,10 @@ os.mkdir(MUTE_DIR)
 install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
 
 # The real ps, except that the `-o command=` read of the planted claude fails.
-#
-# The launcher used to read a found claude's command line twice - once to find it,
-# once to read its flags - and a process gone between the two reads relaunched
-# flagless. There is one read now, so the gap this used to place a death in no
-# longer exists; what is left to pin is that the one read failing is never read
-# as a claude launched with no flags. $FIXTURE_PS_MODE picks which failure,
-# because a process that has just exited has two and only one is visible to an
-# exit-status check: `status` is a nonzero exit, `empty` is exit 0 printing
-# nothing - a live pid whose argv the platform withholds.
-#
-# The identity read (`lstart=,command=`), the ancestry hops (`-o ppid=`) and the
-# whole-table walk (`-eo pid=,ppid=,etime=`) carry different field lists and pass
-# through untouched, the same selectivity discipline the muting ps above keeps.
+# $FIXTURE_PS_MODE picks the failure: `status` is a nonzero exit, `empty` is exit 0
+# printing nothing (a live pid whose argv the platform withholds). The identity
+# read, the ancestry hops, and the whole-table walk use different field lists and
+# pass through untouched.
 PS_ROOT_COMMAND = r"""#!/bin/bash
 set -uo pipefail
 fields=""; want=""; prev=""
@@ -355,14 +330,11 @@ PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
 os.mkdir(PS_ROOT_COMMAND_DIR)
 install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
 
-# A `date` that removes a directory on its first call and then behaves normally.
-#
-# This is how the launcher's OWN directory is made to disappear mid-run without a
-# race: the launcher stamps the handoff filename with `date` well before it
-# resolves its own path, so the removal lands at a defined point between the two
-# rather than whenever a background `rm` happens to win. The condition being
-# modelled - a script whose directory is unlinked under a long-running session -
-# is real; only its timing is pinned.
+# A `date` that removes a directory on its first call, then behaves normally.
+# This makes the launcher's own directory disappear mid-run at a fixed point: the
+# launcher stamps the handoff filename with `date` before it resolves its own path,
+# so the removal lands between those two steps. It models a script whose directory
+# is unlinked under a running session.
 DATE_RMDIR = r"""#!/bin/bash
 set -uo pipefail
 if [ -n "${FIXTURE_RM_DIR:-}" ] && [ -e "$FIXTURE_RM_DIR" ]; then
@@ -373,20 +345,16 @@ exec /bin/date "$@"
 DATE_RMDIR_DIR = os.path.join(FIXTURES, "datermdir")
 os.mkdir(DATE_RMDIR_DIR)
 install(DATE_RMDIR_DIR, "date", DATE_RMDIR)
-# A tmpdir with no room in it, which is a fixture and not an environment because
-# the environment cannot say it: macOS `mktemp -t` reads the Darwin per-user temp
-# dir and ignores $TMPDIR outright, so pointing $TMPDIR at an unwritable or
-# absent path there yields a perfectly good tempfile. Only a mktemp that refuses
-# states the condition on every platform.
+# A mktemp that refuses, so the launcher sees a tmpdir with no room in it. The
+# environment cannot produce this portably: macOS `mktemp -t` ignores $TMPDIR, so
+# only a refusing mktemp fails on every platform.
 NO_TMPDIR_BIN = os.path.join(FIXTURES, "notmpdir")
 os.mkdir(NO_TMPDIR_BIN)
 install(NO_TMPDIR_BIN, "mktemp", '#!/bin/bash\necho "mktemp: no space left on device" >&2\nexit 1\n')
 
-# The same condition, narrowed to the LOG tempfile. The blanket refusal above
-# cannot express the post-write case at all: it takes the goal tempfile too, so
-# the launcher dies before the handoff is ever written and the failure that
-# strands a recorded handoff never happens. Selecting on the purpose in argv is
-# what lets the goal tempfile succeed and the write land first.
+# A mktemp that refuses only for the log tempfile. The blanket refusal above also
+# blocks the goal tempfile, so the launcher dies before the handoff is written. This
+# narrower version lets the handoff land first.
 NO_LOGFILE_BIN = os.path.join(FIXTURES, "nologfile")
 os.mkdir(NO_LOGFILE_BIN)
 # `mktemp` by absolute path, not by name: this directory goes on the front of
@@ -400,10 +368,9 @@ done
 exec /usr/bin/mktemp "$@"
 ''')
 
-# A mktemp that SUCCEEDS and hands back a path nothing can be written to, for the
-# goal tempfile only. It is the write at line 557 that has to fail here, not the
-# mktemp before it, so the handoff lands on disk first and the refusal is one that
-# has something to preserve.
+# A mktemp that succeeds but returns an unwritable path, for the goal tempfile
+# only. The write that must fail is the goal write, not the mktemp before it, so
+# the handoff is already on disk when the refusal happens.
 BAD_GOALPATH_BIN = os.path.join(FIXTURES, "badgoalpath")
 os.mkdir(BAD_GOALPATH_BIN)
 install(BAD_GOALPATH_BIN, "mktemp", '''#!/bin/bash
@@ -415,13 +382,10 @@ done
 exec /usr/bin/mktemp "$@"
 ''')
 
-# A launcher whose working directory no longer exists, which is what a removed
-# worktree or a reaped scratch dir leaves a long-running session sitting in. The
-# condition is REAL, not simulated: this hop cds into a directory and removes it,
-# so the kernel genuinely has no path for the cwd it hands the launcher, and
-# `pwd -P` fails the way it would in the field. Nothing here mentions `pwd` - the
-# case asserts the exit contract, so any other unguarded give-up along this path
-# would be caught by the same fixture. [LAW:behavior-not-structure]
+# A launcher whose working directory no longer exists, as after a removed worktree.
+# The hop cds into a directory and removes it, so the kernel has no path for the cwd
+# it hands the launcher, and `pwd -P` fails. The case asserts only the exit contract,
+# so any other unguarded failure on this path is caught too.
 CWDGONE = r"""#!/bin/bash
 set -uo pipefail
 d=$(mktemp -d "${TMPDIR:-/tmp}/cwdgone.XXXXXX") || exit 1
@@ -431,21 +395,12 @@ exec "$@"
 """
 CWDGONE_BIN = install(FIXTURES, "cwdgone", CWDGONE)
 
-# A PATH holding everything the launcher needs and provably no tmux. The absence
-# has to be BUILT, not observed: tmux lives in /usr/bin on every mainstream Linux
-# package, so "the real directories happen to have no tmux" is a fact about this
-# machine - true where Homebrew keeps tmux in /opt, false on the platforms whose
-# `ps` the real process tree exists to exercise. Asserting it would fail the
-# whole suite on a correct implementation.
-#
-# The hazard is confined to the tmux-absent case, which runs with FIXTURES off
-# PATH. Everywhere else FIXTURES comes first and the fixture tmux shadows any
-# real one, wherever the host keeps it.
-# It mirrors REAL_DIRS entry for entry rather than listing what the launcher
-# needs. A hand-kept list rots the moment the launcher grows a call, and it fails
-# as rc 127 inside a case about something else - which is exactly what the first
-# version of this did, having omitted `dirname` and `basename`. Subtracting one
-# name from the real environment cannot drift that way.
+# A PATH with everything the launcher needs and no tmux. The absence is built, not
+# observed, because the real directories may or may not hold tmux depending on the
+# host. The tmux-absent case runs with FIXTURES off PATH; elsewhere FIXTURES comes
+# first and the fixture tmux shadows any real one.
+# It mirrors REAL_DIRS entry for entry, so it cannot go stale as the launcher's
+# required tools change.
 NO_TMUX_BIN = os.path.join(FIXTURES, "notmux")
 os.mkdir(NO_TMUX_BIN)
 for directory in REAL_DIRS.split(":"):
@@ -456,10 +411,8 @@ for directory in REAL_DIRS.split(":"):
         if entry != "tmux" and not os.path.lexists(link):
             os.symlink(os.path.join(directory, entry), link)
 
-# A live process that is provably not an ancestor of the launcher: the runner is
-# an ancestor of every `nest` chain, so a child of the runner is their sibling.
-# Structural, unlike naming a low pid and hoping the platform has one - the same
-# host-assumption the tmux directory above exists to avoid.
+# A live process that is not an ancestor of the launcher. The runner is an ancestor
+# of every `nest` chain, so a child of the runner is a sibling of the chain.
 STRANGER = subprocess.Popen(["sleep", "600"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -472,16 +425,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
-    `dry_run` is the value of $FINALIZE_DRY_RUN rather than a flag deciding
-    whether to set it: the variable is always in the environment and the empty
-    string is what the launcher reads as off, so a case that needs the real
-    transport path travels the same code here as every dry-run case.
+    `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
+    so the real transport path runs the same code as the dry-run cases.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
-    # The two PATHs are different shapes rather than one with an entry dropped:
-    # the tmux-absent case must not carry REAL_DIRS at all, because that is
-    # precisely where a packaged tmux lives.
+    # The tmux-absent case uses NO_TMUX_BIN alone: it must not include REAL_DIRS,
+    # since that is where a packaged tmux would be found.
     path = [FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN]
     if forge_age is not None:
         path.insert(0, FORGE_DIR)
@@ -495,10 +445,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # claude; the fixture above says why a process that has just exited has both.
     if ps_root_command is not None:
         path.insert(0, PS_ROOT_COMMAND_DIR)
-    # The launcher invoked through a directory of its own that the fixture `date`
-    # deletes on its first call. A symlink, so what disappears is the path the
-    # launcher resolves $0 through and never the file itself - bash holds the script
-    # open and reads on, which is exactly the field condition.
+    # The launcher is invoked through a symlinked directory that the fixture `date`
+    # deletes on its first call. The symlink is what disappears, not the script file,
+    # so the launcher keeps running as it would in the field.
     selfdir = None
     if self_dir_gone:
         selfdir = os.path.join(workdir, "selfdir")
@@ -543,32 +492,29 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["NEST_REHOST_AT"] = str(rehost_at)
     if tmux_pane is not None:
         env["TMUX_PANE"] = tmux_pane
-    # The handoff is durable by design, so EVERY case must redirect it - one that
-    # did not would write into the developer's real ~/.claude/memento/handoffs and
-    # leave it there, since nothing downstream deletes a handoff any more. The
-    # default lands inside the workdir this case already tears down; a case that
-    # wants to read the handoff back passes a directory it owns instead.
+    # Every case must redirect the handoff directory, because handoffs are durable
+    # and an unredirected run would leave files in the real ~/.claude/memento/handoffs.
+    # The default is inside this case's workdir, which is removed; a case that reads
+    # the handoff back passes its own directory.
     env["MEMENTO_HANDOFF_DIR"] = handoff_dir or os.path.join(workdir, "handoffs")
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
-        # The cwd-removing hop sits between the chain and the launcher, so the
-        # ancestry the walk climbs is unchanged and only the launcher's own cwd is
-        # gone - the fixture states one condition and not two.
+        # The cwd-removing hop sits between the chain and the launcher. The ancestry
+        # is unchanged; only the launcher's own cwd is gone.
         launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
         argv = [NEST_BIN, str(depth)] + entry + [message]
-        # A daemon host above the whole chain, pane included: the host of some
-        # other session, which this one must not mistake for its own. The trailing
-        # `exit` keeps bash from exec'ing the chain in place of the host process.
+        # An outer daemon host wraps the whole chain, with its own pane, so the launcher
+        # must not mistake another session's host for its own. The trailing `exit` keeps
+        # bash from exec-ing the chain in place of the host process.
         if outer_host:
             argv = ["/bin/bash", "-c", 'exec -a "claude --bg-pty-host" /bin/bash -c \'"$@"; exit $?\' host "$@"', "wrap"] + argv
         done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
-        # The chain's top pid, read before the workdir goes away. It names both the
-        # pane fixtures' ROOTPID and the planted claude - they are one process - so
-        # an assertion can say which process the launcher picked, not merely that it
-        # picked one.
+        # The chain's top pid, read before the workdir is removed. It is both the pane
+        # fixtures' ROOTPID and the planted claude, so assertions can name the exact
+        # process the launcher picked.
         with open(pidfile) as handle:
             done.root_pid = handle.read().strip()
         try:
@@ -583,27 +529,19 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
 
 DECLINED = "declined"
 DETACHED = "detached"
-# One code for every way the launcher declines to finish, which is the contract
-# its usage block states: "2 it could not - argv, setup, or transport". Refused
-# argv, an unmakeable tempfile and no transport to deliver into are three routes
-# to one fact, so they assert one constant. NO_TRANSPORT_RC is that constant
-# under the name the pane-resolution cases below already read by.
+# Every way the launcher declines to finish shares one exit code, as its usage block
+# states: 2 for refused argv, setup, or transport. NO_TRANSPORT_RC is that code under
+# the name the pane-resolution cases use.
 REFUSED_RC = 2
 NO_TRANSPORT_RC = REFUSED_RC
 
 
 def picked(done):
-    """The pane id the launcher resolved to, DETACHED when it fell all the way
-    to the fresh-window transport, or DECLINED when it found no transport at
-    all and said so with the no-transport exit code.
+    """Return the pane id the launcher picked, DETACHED for the fresh-window
+    transport, or DECLINED for the no-transport exit code.
 
-    [LAW:parse-dont-validate] returning a bare None for the no-decision case
-    would be an answer-shaped void: a launcher that deliberately declined and
-    one that crashed on its way to an answer would read identically, and every
-    negative case below would pass on either. So the exit code is read here,
-    once, and a run that is neither a pane, a detached pick, nor a clean
-    decline comes back as its own report - a value no assertion matches,
-    carrying the evidence into the failure message.
+    Any other outcome returns a diagnostic string that no assertion matches, so a
+    crash cannot read as a decline.
     """
     for line in done.stdout.splitlines():
         if line.startswith("[dry-run] transport=tmux target=target-for-"):
@@ -618,13 +556,12 @@ def picked(done):
 
 
 # --- preconditions --------------------------------------------------------
-# [LAW:verifiable-goals] a suite that silently tested the wrong binary, or found
-# a real tmux where it meant to find none, would pass while proving nothing.
+# These confirm the suite tests the intended binary and a tmux-free PATH. Without
+# them, a wrong binary or a real tmux would let the suite pass while proving nothing.
 
 check("the launcher under test exists and is executable", os.access(LAUNCHER, os.X_OK), LAUNCHER)
-# This pins the constructed directory, not the host. Asking whether REAL_DIRS
-# holds a tmux would answer a question about the machine and fail the entire
-# suite on any Linux that packages one into /usr/bin.
+# This checks the constructed directory, not the host: asking whether REAL_DIRS holds
+# tmux would fail the whole suite on any host that packages one into /usr/bin.
 check("the tmux-absent PATH contains no tmux",
       shutil.which("tmux", path=NO_TMUX_BIN) is None, NO_TMUX_BIN)
 check("the tmux-absent PATH can still run the launcher",
@@ -632,28 +569,22 @@ check("the tmux-absent PATH can still run the launcher",
       "the launcher's `#!/usr/bin/env bash` resolves bash through PATH")
 
 # --- the flag namespace's border ------------------------------------------
-# These drive the launcher directly, with no `nest` chain: argv is refused (or
-# the usage printed) before any transport is looked for, so the process tree is
-# not part of the contract under test.
+# These drive the launcher directly, with no `nest` chain: argv is refused (or the
+# usage printed) before any transport is looked for, so the process tree is not under
+# test.
 #
-# Every case asserts what landed in the handoff directory, not merely the exit
-# code. The failure this border closes was never a wrong exit code - it was a
-# handoff RECORDED from a mistyped flag and delivered to the next agent as its
-# opening prompt, so "refused" has to mean "wrote nothing" to mean anything.
+# Each case asserts what landed in the handoff directory, not only the exit code. A
+# refused argv must write nothing.
 
 
 
 def argv_case(*args, path_prefix=""):
-    """Run the launcher with this argv against a handoff directory of its own.
+    """Run the launcher with these args against a handoff directory of its own.
 
-    Returns (completed process, [handoff bodies it wrote]) - the bodies rather
-    than the filenames, because the bug being pinned is about what a handoff
-    SAYS, and a filename cannot tell a recorded typo from a recorded message.
-    Dry-run, because these cases are about the argv border and the record it
-    leaves; the transport is exercised elsewhere. `path_prefix` goes ahead of the
-    fixtures, never in place of them: a caller that could replace the PATH could
-    also lose the fixture tmux and refuse for want of a transport - the same
-    exit code as an argv refusal, proving nothing about argv.
+    Returns (completed process, list of handoff bodies written). Bodies are returned
+    rather than filenames, since the checks concern what a handoff says. The run is
+    dry, and `path_prefix` is prepended to the fixture PATH, never substituted for
+    it, so a missing transport cannot masquerade as an argv refusal.
     """
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
@@ -663,9 +594,9 @@ def argv_case(*args, path_prefix=""):
             [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 # The pane's process is this runner, which the launcher descends
-                 # from as it would from a real pane's shell; a pid nothing
-                 # descends from reads as hosted when the suite runs under a host.
+                 # The pane's process is this runner, so the launcher descends from it as
+                 # it would from a real pane's shell. Without that ancestry the pid reads
+                 # as hosted when the suite runs under a host.
                  "TMUX_PANE": "%99", "FIXTURE_PANES": f"%99 {os.getpid()} 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
@@ -679,64 +610,52 @@ check("--help prints the usage and records nothing",
       done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
       f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
 
-# The typo, which is the dangerous one: it looks like a flag, it is not one, and
-# before the border it became the next agent's entire instructions - silently,
-# with a zero exit code and a reset chasing it.
+# A mistyped flag looks like an option but is not one. Without the border it would be
+# recorded as the handoff and delivered to the next agent as its instructions.
 done, bodies = argv_case("--rest", "compact", "real work goes here")
 check("a mistyped flag is refused rather than recorded as the handoff",
       done.returncode == REFUSED_RC and "--rest" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The other side of the border, and the reason it is drawn at two dashes: every
-# flag this tool takes has two, so a single-dash token is a near-miss of nothing
-# and refusing it would be refusing prose for its first character. `-h` is the
-# case a reader expects to be a flag and is not.
+# Only a two-dash token is a flag, so a single-dash token is message text. `-h` is the
+# case a reader would expect to be a flag and is not.
 for text in ("-h", "- shipped the parser"):
     done, bodies = argv_case(text)
     check(f"a single-dash token is message text: {text!r}",
           done.returncode == 0 and len(bodies) == 1 and text in bodies[0],
           f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The newline clause. No flag spans a line, so a multi-line argument is prose
-# however it opens - and the close-out's handoff is routinely a multi-line recap,
-# written by a session with no context left to spend on a parse error.
+# No flag spans a line, so a multi-line argument is message text however it starts.
+# Handoffs are often multi-line recaps.
 recap = "--goal was already passed\nso this line is recap, not argv"
 done, bodies = argv_case(recap)
 check("a multi-line message is text even when it opens with two dashes",
       done.returncode == 0 and len(bodies) == 1 and recap in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The release valve, for the one case the two clauses above leave ambiguous: a
-# single-line message that is itself a two-dash word. Without it the border would
-# have made that handoff unrepresentable - a narrowing, not a tightening.
+# The escape hatch for a single-line message that is itself a two-dash word. Without
+# it that handoff could not be recorded.
 done, bodies = argv_case("--", "--help")
 check("-- hands a lone two-dash word through to the handoff",
       done.returncode == 0 and len(bodies) == 1 and "\n--help\n" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The launcher's other refusal, and the reason the usage block can promise one
-# failure code. A tempfile it cannot make used to end the run on mktemp's own
-# status - a code the contract does not mention, under a message naming neither
-# this tool nor what it was trying to write. The mktemp comes before the handoff
-# is written, so nothing recorded is part of the contract here too.
+# A tempfile the launcher cannot create is refused with its own message and the
+# contract's exit code. The goal mktemp runs before the handoff is written, so nothing
+# is recorded.
 done, bodies = argv_case("a real handoff", path_prefix=NO_TMPDIR_BIN)
 check("a tempfile it cannot make is refused as the launcher, not as mktemp",
       done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The same refusal from the other side of the write, which is a different promise.
-# The goal tempfile is made before the handoff exists, so the case above is right
-# to assert nothing was recorded. Every LOG tempfile is made after it, and a
-# refusal there that named only the tool would leave a recorded handoff sitting on
-# disk with nothing pointing at it - the outcome the no-transport branch spells
-# out in full. Reaching it takes the launcher off dry-run, because every dry-run
-# arm exits before the log tempfile, and takes a mktemp that refuses only the log,
-# so the goal tempfile still succeeds and the write still lands.
+# A refusal while creating the log tempfile happens after the handoff is written, so
+# the launcher must name the recorded handoff's path. Reaching this branch requires
+# leaving dry-run, since every dry-run branch exits before the log tempfile; a mktemp
+# that refuses only the log leaves the goal tempfile and the write intact.
 #
-# Nothing is spawned: the refusal comes before the nohup. And the assertion is its
-# own control, which is why there is no second run - it demands a recorded body AND
-# its path in stderr, so a fixture that refused every mktemp would die at the goal
-# tempfile with nothing written and fail this case rather than pass it.
+# Nothing is spawned, because the refusal comes before the nohup. The assertion
+# requires a recorded body and its path in stderr, so a fixture that refused every
+# mktemp would fail here rather than pass.
 logfail_dir = tempfile.mkdtemp(prefix="finalize-logfail.")
 done = run(dry_run="", log_mktemp_fails=True, handoff_dir=logfail_dir)
 recorded = sorted(os.listdir(logfail_dir))
@@ -746,17 +665,12 @@ check("a tempfile it cannot make after the handoff is written says where the han
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
 
-# The give-up nothing had converted. Every explicit `|| _refuse` was in place and
-# this path still left through `set -e`: past the handoff write, the detached
-# transport read its working directory with a bare command substitution, so a
-# session whose cwd had been unlinked ended on that command's own status - 1, a
-# code the usage block does not name - under a message naming neither this tool
-# nor the complete handoff it had already written.
+# A give-up path with no explicit guard: the detached transport reads its working
+# directory with a bare command substitution, so an unlinked cwd exits on that
+# command's status instead of the launcher's own refusal.
 #
-# What is asserted is the contract, not the mechanism that now holds it: exit 2
-# and the preserved path. "NOT delivered" is the discriminating string - only the
-# launcher's own refusal says it, so a shell error that happened to carry the
-# right status could not satisfy this case.
+# The case asserts the contract: exit 2 and the path of the preserved handoff. "NOT
+# delivered" is the discriminating string, since only the launcher's refusal prints it.
 cwdgone_dir = tempfile.mkdtemp(prefix="finalize-cwdgone.")
 done = run(panes=None, handoff_dir=cwdgone_dir, cwd_gone=True)
 recorded = sorted(os.listdir(cwdgone_dir))
@@ -767,14 +681,9 @@ check("a give-up with no guard of its own still exits 2 and names the preserved 
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(cwdgone_dir, ignore_errors=True)
 
-# The flags the successor is relaunched under. A failing `ps` used to be
-# discarded by the substitution wrapping it - the flag parser read an empty
-# string and succeeded - so a claude process that exited during the close-out
-# handed its successor no --model, no --permission-mode and no
-# --dangerously-skip-permissions, and reported that as a scheduled handoff at
-# exit 0. A successor silently running under different permissions than the
-# session it replaced is the failure this forbids, so the assertion is the
-# refusal and not merely a non-zero status.
+# The flags the successor is relaunched under. A failing `ps` must refuse the handoff
+# rather than relaunch the successor without its --model or permission flags. The
+# assertion checks the refusal, not only a non-zero status.
 nocmd_dir = tempfile.mkdtemp(prefix="finalize-nocmd.")
 done = run(panes=None, handoff_dir=nocmd_dir, ps_root_command="status")
 recorded = sorted(os.listdir(nocmd_dir))
@@ -812,16 +721,11 @@ check("a launcher whose own directory is gone refuses instead of scheduling noth
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(selfgone_dir, ignore_errors=True)
 
-# The two writes, which were unguarded until the helper above owned every refusal.
-# Under `set -e` a failed redirection ended the launcher on the redirection's own
-# status - 1, not the 2 the usage block promises for "it could not" - under bash's
-# message, which names bash and the path and not this tool.
+# Both writes are guarded, so a failed redirection exits 2 with the launcher's
+# message rather than bash's status and message.
 #
-# The handoff write, reached by a directory that exists and refuses writes:
-# `mkdir -p` succeeds on a directory already there, so the guard before it passes
-# and the write is the first thing to fail. Nothing is recorded, so this refusal
-# must NOT offer a preserved handoff - asserted, because an empty $RECORDED that
-# started naming a half-written file would be this fix inverted.
+# The handoff write, reached through an existing directory that refuses writes.
+# Nothing is recorded, so the refusal must not name a preserved handoff.
 rodir = tempfile.mkdtemp(prefix="finalize-ro.")
 handoffs_ro = os.path.join(rodir, "handoffs")
 os.mkdir(handoffs_ro, 0o500)
@@ -830,10 +734,8 @@ try:
         [LAUNCHER, "a real handoff"], text=True, capture_output=True, timeout=30,
         env={"PATH": REAL_DIRS, "HOME": rodir, "TMPDIR": rodir,
              "MEMENTO_HANDOFF_DIR": handoffs_ro})
-    # The refusal's own sentence, not merely the string "finalize-session:": bash
-    # prefixes its redirection error with $0, which ends in the launcher's name, so
-    # the bare prefix is present on exactly the unguarded behavior this case exists
-    # to forbid. Asserting the sentence is what separates the launcher from the shell.
+    # Assert the launcher's full sentence: bash's redirection error also contains the
+    # launcher's name, so a bare prefix match would not separate the two.
     check("a handoff it cannot write is refused as the launcher, not as the shell",
           done.returncode == REFUSED_RC
           and "finalize-session: cannot write the handoff to" in done.stderr
@@ -843,10 +745,9 @@ finally:
     os.chmod(handoffs_ro, 0o700)
     shutil.rmtree(rodir, ignore_errors=True)
 
-# The goal write, which is past the handoff write and so must name what it leaves
-# behind. The path it names is read back out of the handoff's own body rather than
-# reconstructed here: the file states where it lives, and the refusal has to agree
-# with it, so the two representations are checked against each other.
+# The goal write comes after the handoff write, so its refusal must name the preserved
+# handoff. The path is read back from the handoff body, and the refusal is checked
+# against that file.
 done, bodies = argv_case("a real handoff", path_prefix=BAD_GOALPATH_BIN)
 msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
 check("a carried goal it cannot write still says where the handoff is",
@@ -879,10 +780,9 @@ done = run(depth=3, panes="%1 4 0\n%99 ROOTPID 0\n%7 5 0")
 check("picks the pane that owns it, not the first pane listed",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# A daemon host is a boundary (promptctl-handoff-yg0). The chain is the one seen
-# 2026-09-28: pane shell -> claude (the spawner) -> `claude --bg-pty-host` ->
-# claude (this session) -> shell. The pane above the host shows the spawner's
-# session, so delivering there sent /clear into it mid-task. Both claudes are
+# A daemon host is a pane boundary: a hosted session must not deliver into a pane
+# above its host, which shows the spawner's session. The chain is pane shell,
+# spawner claude, `claude --bg-pty-host`, session claude, shell. Both claudes are
 # planted, so the finder has the spawner's to wrongly pick.
 PANES_ABOVE_HOST = f"%99 ROOTPID 0\n%77 {STRANGER.pid} 0"
 done = run(depth=5, rehost_at=3, claude_at=[5, 2], panes=PANES_ABOVE_HOST)
@@ -926,27 +826,21 @@ check("a handoff message containing --bg-pty-host does not trip the boundary",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # --- no pane to be had, but tmux still gives a transport --------------------
-# [LAW:no-mode-explosion] owner decision 2026-08-23: every session gets the same
-# capability, no subclass excluded. Refusing a PANE is still correct in every
-# case below - the walk's job is unchanged - but refusing a pane no longer means
-# refusing to deliver AT ALL, because the launcher falls to the detached
-# transport whenever a claude process is findable to relaunch. Every chain here
-# plants one at its top hop, so that process is always findable; DECLINED survives
-# only where tmux itself is unreachable to spawn a fresh window with.
+# Refusing a pane is still correct, but it does not mean refusing to deliver: the
+# launcher falls back to the detached transport whenever a claude process can be
+# found. Every chain here plants one at its top hop, so DECLINED remains only where
+# tmux cannot be reached to spawn a fresh window.
 
 done = run(panes=None)
 check("no tmux server: falls to the detached transport", picked(done) == DETACHED, picked(done))
-# Which claude, exactly. DETACHED alone cannot tell the planted process from an
-# ambient one four levels above the test runner, and that is precisely the
-# distinction that decides whether these cases pass on a machine that is not
-# already inside a Claude Code session. Naming the pid closes it.
+# Which claude, exactly. DETACHED alone cannot distinguish the planted process from
+# an ambient claude above the test runner, so the pid is named.
 check("the detached transport relaunches as the planted claude, not an ambient one",
       f"claude_pid={done.root_pid} " in done.stdout,
       f"root_pid={done.root_pid} out={done.stdout!r} err={done.stderr!r}")
-# A pid alone cannot license a kill 40 seconds later, so the launcher captures what
-# the pid is HOLDING and hands that down to the worker to re-check. The captured
-# text has to describe the process actually found - a constant, or the pid restated,
-# would satisfy "non-empty" and prove nothing.
+# The launcher captures what the pid is holding and hands it to the worker to re-check
+# before any kill. The captured text must describe the process actually found; a
+# constant or the bare pid would pass a non-empty check and prove nothing.
 check("the launcher captures the old process's identity, not just its pid",
       any(line.startswith("[dry-run] old-process identity: ") and NEST_AS_CLAUDE in line
           for line in done.stdout.splitlines()),
@@ -958,47 +852,39 @@ def identity_names(done, name):
                for line in done.stdout.splitlines())
 
 
-# The shape a daemon-hosted session really has (observed 2026-09-13, memento
-# 0.7.0): the process is `.../claude/versions/2.1.270 --session-id ...`, its
-# parent is the same binary as `--bg-pty-host`, and above that is pid 1. Matched
-# by basename, the walk climbs past both and reaches nothing; the naming assertion
-# is what stops a walk that climbs into an ambient claude from passing instead.
+# The shape of a daemon-hosted session: the process is `.../claude/versions/<ver>
+# --session-id ...`, its parent is the same binary with `--bg-pty-host`, and above
+# that is pid 1. Matching by basename climbs past both and reaches nothing; the
+# naming assertion stops a walk that climbs into an ambient claude from passing.
 done = run(panes=None, as_claude=NEST_AS_VERSIONED_CLAUDE)
 check("a claude running as the versioned binary path is found, not walked past",
       picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout
       and identity_names(done, NEST_AS_VERSIONED_CLAUDE),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The versioned path is matched as argv0 and nowhere else. The daemon's own
-# `--bg-pty-host` process names that path as an ARGUMENT (`claude --bg-pty-host
-# <sock> -- .../claude/versions/2.1.283 --session-id ...`), and so would a shell
-# whose command text merely mentions the directory; a match on the whole line
-# accepts either as "the claude" and TERMs it - the host, and every session under
-# it. Planted at the top hop under a plain name, with the versioned path in its
-# argv: the launcher must walk past it. What it finds above is the runner's own
-# ancestry - a real claude on a developer's machine, nothing on CI - so the
-# assertion is that the planted pid was not the pick, not what the pick was.
+# The versioned path is matched only as argv0. The daemon's `--bg-pty-host` process
+# and a shell can both contain that path as an argument, and matching the whole
+# command line would accept them as the claude and terminate the host along with
+# every session under it. This process has a plain name with the versioned path in
+# its argv, so the launcher must walk past it. The pick is whatever the ambient
+# ancestry yields, so the assertion is only that the planted pid was not picked.
 done = run(panes=None, as_claude=os.path.join(FIXTURES, "not-claude", "zsh"),
            message=f"ls {NEST_AS_VERSIONED_CLAUDE}; handoff")
 check("a versioned claude path in the arguments, not argv0, is not a claude",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# Claude Code names the session's own pid to every tool call as $CLAUDE_PID, and
-# that named pid wins over anything ancestry would find: here the chain still
-# plants a claude at its top hop, and the launcher must relaunch as the named one
-# instead. A planted process rather than a stranger, because the walk has to match
-# it as a claude too - and it is not in this launcher's ancestry at all, so only
-# the environment can be how it was found. It lives in a session of its own so the
-# whole group can be torn down: nest runs its command as a child, and a terminated
-# nest would leave the sleep behind.
+# $CLAUDE_PID names the session's own pid for every tool call, and the named pid wins
+# over ancestry. The chain still plants a claude at its top hop, and the launcher must
+# relaunch the named one instead. The named process is not in this launcher's ancestry,
+# so only the environment can explain how it was found. It runs in its own session so
+# the whole group can be terminated, since nest runs its command as a child.
 NAMED_CLAUDE = subprocess.Popen(
     [NEST_BIN, "0", "sleep", "600"],
     env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-# The rename happens inside nest's own startup, after Popen returns; the launcher
-# reading argv0 before the `exec -a` lands would see `/bin/bash` and refuse for
-# a reason that is this case's timing, not the launcher's judgement.
+# The rename happens during nest's startup, after Popen returns. Without waiting for
+# it, the launcher would read argv0 as /bin/bash and refuse for a timing reason.
 for _ in range(100):
     if subprocess.run(["ps", "-o", "command=", "-p", str(NAMED_CLAUDE.pid)],
                       capture_output=True, text=True).stdout.startswith(NEST_AS_CLAUDE + " "):
@@ -1015,22 +901,19 @@ finally:
     os.killpg(NAMED_CLAUDE.pid, 15)
     NAMED_CLAUDE.wait()
 
-# A named pid that is not a claude is a refusal, not a place to start climbing
-# from. STRANGER's ancestry is this test runner's ancestry, which on a developer's
-# machine ends in a real claude session: a walk from the stranger finds that one
-# and the worker kills it. The chain still plants its own claude at the top hop,
-# and that one is not reachable either - the environment named a pid, and the
-# named pid is the whole of the answer.
+# A named pid that is not a claude is refused, not used as a starting point for the
+# walk. STRANGER's ancestry is this runner's ancestry, which may end in a real claude
+# session that the walk would find and terminate. The planted claude is unreachable
+# here too: the named pid is the whole answer.
 done = run(panes=None, claude_pid=STRANGER.pid)
 check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
       done.returncode == NO_TRANSPORT_RC
       and "cannot locate the claude process" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A `--print` claude is an SDK bridge: headless, no input box, nothing a fresh
-# tmux window could stand in for. Relaunching it interactively and TERMing the
-# bridge severs whatever remote client was driving it. The shape is the live one
-# (pid 59899, 2026-09-27), forged onto the planted hop.
+# A `--print` claude is a headless SDK bridge with no input box, so a fresh tmux
+# window cannot stand in for it. Relaunching it interactively would sever the remote
+# client driving it. The command line is forged onto the planted hop.
 done = run(panes=None, forge_command=(
     "/x/claude/versions/2.1.283 --print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_1"
     " --session-id cse_1 --input-format stream-json --model claude-opus-5-5"))
@@ -1038,12 +921,10 @@ check("a headless (--print) claude is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The daemon's pty host runs the same binary, and it is what the ancestry walk
-# meets next when it walks past a session it declined. TERMing the host takes
-# every session it hosts with it, so it is declined the same way: by its flags.
-# Both walks continue into the runner's ancestry - a real claude on a developer's
-# machine, nothing on CI - so the assertion is that the planted pid was not the
-# pick, not what the pick was.
+# The daemon's pty host runs the same binary, and the ancestry walk meets it after
+# declining a session. Terminating the host would take every session it hosts, so it
+# is declined by its flags too. Both walks continue into the runner's ancestry, so the
+# assertion is only that the planted pid was not picked.
 done = run(panes=None, forge_command=(
     "/x/claude --bg-pty-host /tmp/cc-daemon/pty/a.sock 148 38 --"
     " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions"))
@@ -1051,21 +932,20 @@ check("the daemon's --bg-pty-host process is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The headless test reads the flag region and nothing after it. A session born
-# from a prior handoff carries that handoff as its positional prompt, unquoted in
-# ps output, and a handoff can say `--print` in prose - this one does.
+# The headless check reads only the flag region. A session started from a prior
+# handoff carries that handoff as its positional prompt, unquoted in ps output, and
+# the prompt can contain `--print` in prose.
 done = run(panes=None, forge_command=(
     "/x/claude --permission-mode plan the ceiling hook ignores --print sessions; run /next"))
 check("a prompt that mentions --print does not make the session headless",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The relaunch line is parsed by a shell (tmux's default-shell, or the one iTerm2
-# types into). The live flags `--model opus[1m]` (2026-09-29) are a glob there:
-# zsh aborts on the no-match and the successor never starts; a quote in the
-# handoff's path unbalances the line the same way. The dry run prints the line the
-# worker runs, so it goes through zsh as the user's shell would read it, and
-# through bash's failglob, and must come back out as the exact argv.
+# The relaunch line is parsed by a shell (tmux's default-shell, or the terminal's). An
+# unquoted `--model opus[1m]` is a glob there, which zsh aborts on when nothing matches,
+# and a quote in the handoff's path unbalances the line. The dry run prints the line the
+# worker runs; it is checked through zsh and through bash's failglob and must yield the
+# exact argv.
 quoted_dir = tempfile.mkdtemp(prefix="o'neil [1m] ")
 done = run(panes=None, handoff_dir=quoted_dir, forge_command=(
     "/x/claude --model opus[1m] --permission-mode bypassPermissions run /next"))
@@ -1082,11 +962,10 @@ for shell in shells:
           f"line={line!r} parsed={parsed!r} out={done.stdout!r}")
 shutil.rmtree(quoted_dir)
 
-# The flags a daemon-hosted session is launched with, in the order the daemon
-# writes them: harness flags first, `--permission-mode` last. Every one before it
-# has to be consumed together with its value, or the value reads as the prompt
-# and the scan halts with nothing - the successor relaunched under no permission
-# mode, reported as delivered.
+# The flags a daemon-hosted session is launched with, in the order the daemon writes
+# them: harness flags first, `--permission-mode` last. Each flag before it must be
+# consumed with its value, or the value is read as the prompt and the scan halts before
+# the permission mode.
 DAEMON_ARGV = ("/x/claude/versions/2.1.283 --session-id a00eaf96 --fork-session"
                " --resume /x/p.jsonl --allowed-tools mcp__a --allowed-tools mcp__b"
                " --permission-mode bypassPermissions")
@@ -1095,11 +974,10 @@ check("a daemon-hosted session's harness flags are consumed and its permission m
       picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# Every flag claude takes is dropped with the values its arity says it has, so the
-# flag that matters is still reached. Before, `--allowed-tools Read Edit` consumed
-# one value and `Edit` halted the scan as the prompt - the flagless relaunch,
-# reported as delivered. The prompt here is a recap dense with dash tokens, as a
-# handoff flattened onto one line by ps is: none of them may be read as a flag.
+# Each flag claude takes is dropped with the number of values its arity specifies, so
+# the flag that matters is still reached. The prompt here is a recap dense with dash
+# tokens, as a handoff flattened onto one line by ps would be, and none of them may be
+# read as a flag.
 done = run(panes=None, forge_command=(
     "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug api -w --effort high"
     " --permission-mode plan === recap === - shipped --print support - fixed"
@@ -1108,26 +986,24 @@ check("variadic and boolean flags are dropped by arity and the scan halts at the
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A flag the table does not have: whether the token after it is its value or the
-# prompt is unknowable, and both guesses are wrong somewhere. It is refused with
-# the handoff on disk and the flag named, never relaunched under whichever flags
-# the guess left.
+# A flag the table does not know: whether the next token is its value or the prompt
+# cannot be determined. The launcher refuses, names the flag, and leaves the handoff on
+# disk rather than guessing.
 done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
 check("an unknown claude flag is a refusal naming the flag, not a guess at the prompt",
       done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
       and "--frobnicate" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The daemon itself: a subcommand where a session's prompt would be. Walked past
-# like the pty host it spawns; the assertion is the same shape, for the same
-# ambient-claude reason.
+# The daemon itself: a subcommand where a session's prompt would be. The walk passes it
+# like the pty host it spawns, so the assertion has the same shape.
 done = run(panes=None, forge_command="/x/claude daemon run")
 check("a claude subcommand (daemon run) is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A pre-warmed spare, as ps shows one live: its subcommand spelling first. Before,
-# `bg-spare` read as the prompt and the spare as a flagless session to kill.
+# A pre-warmed spare, as ps shows one live: its subcommand spelling must not be read
+# as the prompt.
 done = run(panes=None, forge_command="/x/claude bg-spare --bg-spare /tmp/cc/spare/b3.claim.sock")
 check("a daemon spare (bg-spare --bg-spare) is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
@@ -1147,31 +1023,20 @@ check("a non-numeric $CLAUDE_PID is refused cleanly",
       and "integer expression" not in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# An identity read that SUCCEEDS and says nothing. `ps` exits 0 with empty output
-# for a pid whose holder exited between the ancestry lookup and the query, so the
-# exit code alone reports "fine" over an answer that identifies nobody. Read as an
-# identity, that emptiness is fatal at exactly one remove: the launcher would hand
-# "" to the worker, the worker's own re-read of a since-reissued pid would also
-# come back "", the two would compare EQUAL, and the worker would send TERM/KILL to
-# whatever stranger now holds that pid. So the launcher refuses here, and the
-# assertion names the refusal - exit code and reason - rather than merely nonzero,
-# because a chain that never found a claude at all also exits 2.
-#
-# This has to be pinned at the LAUNCHER. At the worker the same guard is a genuine
-# no-op: `IDENT_NOW=$(_process_identity "$PID") || IDENT_NOW=""` yields the same
-# empty string whether the function returns 1 or returns 0 holding nothing, so no
-# worker case can tell the two apart. Only a caller that treats failure as a hard
-# stop can.
+# An identity read that succeeds with empty output is refused rather than accepted:
+# `ps` exits 0 for a pid whose holder exited, and the worker would then compare two
+# empty strings and could signal a stranger now holding that pid. The assertion checks
+# the refusal reason, since a chain with no claude also exits 2. This must be pinned at
+# the launcher, because the worker's `IDENT_NOW=$(_process_identity "$PID") ||
+# IDENT_NOW=""` yields the same empty string on failure as on success-with-nothing.
 done = run(panes=None, mute_identity=True)
 check("an identity read that succeeds but names nobody is a refusal, not an empty identity",
       done.returncode == NO_TRANSPORT_RC
       and "cannot read the identity of claude process" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# The control, under the same wrapper: everything ps answers apart from that one
-# field list still answers truthfully, so the ancestry hops and the whole-table
-# `ps -eo` walk resolve the pane exactly as they do without it. Without this, a
-# wrapper that broke ps outright would produce the refusal above for a reason
-# having nothing to do with the identity read.
+# The control: under the same wrapper, the ancestry hops and the whole-table walk still
+# resolve the pane. Without it, a wrapper that broke ps outright would produce the
+# refusal above for an unrelated reason.
 check("the identity-muting ps leaves the ancestry walk intact",
       picked(run(depth=2, mute_identity=True)) == "%99",
       "without this the mute wrapper, not the identity guard, could be doing the work")
@@ -1182,30 +1047,26 @@ check("a server with no panes falls to the detached transport", picked(done) == 
 done = run(tmux_on_path=False)
 check("tmux absent from PATH: this is the one true decline - nothing left to spawn a window with",
       picked(done) == DECLINED, picked(done))
-# [LAW:single-enforcer] the exit code is the whole of the no-transport report,
-# pinned once here against the sole remaining decline case, rather than
-# re-asserted beside every refused-pane case below (which no longer decline).
+# The exit code is the whole no-transport report. It is pinned once here, against the
+# sole remaining decline case, rather than beside every refused-pane case below.
 check("declining is reported by exit code, not by prose alone",
       done.returncode == NO_TRANSPORT_RC, f"rc={done.returncode}")
-# The decline is the documented recovery route - the one case where a handoff is
-# recorded and provably undelivered - and the notice now comes from the shared
-# refusal rather than from three echoes here, so it is worth pinning at this site
-# too: a refactor that dropped the interpolation would leave the exit code intact.
+# The decline is the documented recovery route: the handoff is recorded and provably
+# undelivered. The notice comes from the shared refusal, so this case pins it too, since
+# a refactor could drop the interpolation while the exit code stays intact.
 check("and it still says the handoff is preserved, and where",
       "NOT delivered" in done.stderr and ".md" in done.stderr, f"err={done.stderr!r}")
 
-# The promise in one case: a live pane, owned by a real process, that no ancestor
-# accounts for - and it must be refused rather than claimed for want of anything
-# better. Nothing else in the suite forces a rejection: every other pane is dead,
-# out of ancestry AND out of the walk's reach, or genuinely owned. Refusing this
-# pane still lands on the detached transport, not on silence.
+# A live pane owned by a process that no ancestor accounts for must be refused, not
+# claimed. Every other pane in the suite is dead, outside the ancestry, or out of the
+# walk's reach, so this is the only case that forces a rejection. Refusing it still
+# lands on the detached transport.
 done = run(depth=2, panes=f"%5 {STRANGER.pid} 0")
 check("a live pane owned by a stranger is refused, not claimed - falls to detached",
       picked(done) == DETACHED, picked(done))
 
-# Distinct from the case above, and easy to mistake for it: the walk exits at
-# `pid + 0 <= 1` on reaching init, so a pane_pid of 1 is never even tested
-# against the ancestry. This pins that termination guard, not the descent match.
+# A pane_pid of 1 is never tested against the ancestry, because the walk stops at init
+# (`pid + 0 <= 1`). This pins that termination guard, not the descent match.
 done = run(depth=2, panes="%5 1 0")
 check("the walk stops at init rather than climbing past it - falls to detached",
       picked(done) == DETACHED, picked(done))
@@ -1220,32 +1081,22 @@ done = run(depth=2, panes="%99 ROOTPID 1\n%98 ROOTPID 0")
 check("a live pane is still found past a dead one holding the same pid",
       picked(done) == "%98", f"rc={done.returncode} out={done.stdout!r}")
 
-# The same two panes in the other order, and the reversal is the entire point.
-# Liveness is checked twice on two different paths - the walk screens what enters
-# discovery, `_pane_target` screens the inherited $TMUX_PANE - and every dead-pane
-# case above is decided by the SECOND one: the walk hands its answer straight to
-# `_pane_target`, so a dead pane the walk wrongly admitted is refused downstream
-# before any assertion here can see it, and all those cases read DETACHED either
-# way. Deleting the walk's liveness whitelist left the suite fully green (verified
-# by mutation), which would have let a later reader delete `_pane_target`'s check
-# too, believing the walk covered it, with neither guard live and nothing red.
+# Liveness is checked on two paths: the walk screens what enters discovery, and
+# `_pane_target` screens the inherited $TMUX_PANE. Every dead-pane case above is decided
+# by the second, so this case pins the walk's own check, which mutation testing showed
+# the suite would otherwise miss.
 #
-# Order breaks the tie because the walk keeps ONE pane per pid, last row winning.
-# Listed live-then-dead, a walk that screens for liveness keeps %98 and resolves;
-# one that does not lets the dead %99 overwrite it, and the answer collapses to
-# DETACHED. Only the walk's own check can produce %98 here.
+# Order matters because the walk keeps one pane per pid, last row winning: listed
+# live-then-dead, a walk that screens for liveness keeps %98, while one that does not
+# lets the dead %99 overwrite it.
 done = run(depth=2, panes="%98 ROOTPID 0\n%99 ROOTPID 1")
 check("a dead pane listed after a live one does not displace it in the walk",
       picked(done) == "%98", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A pane record with no dead column: the fixture's `read` leaves $dead empty, so
-# #{pane_dead} expands to nothing - which is precisely what a tmux predating that
-# format emits, since tmux renders an unknown field as the empty string rather
-# than leaving the token literal. The row reaches awk with three fields, and a
-# guard written as `$4 != 1` would read the uninitialised $4 as alive and admit
-# the pane, turning the whole dead-pane check off with nothing to show for it.
-# The positive cases above are this one's counterpart: they supply the column and
-# resolve.
+# A pane record with no dead column: `#{pane_dead}` expands to nothing, as in a tmux
+# that predates the format. The row then has three fields, and a guard written as
+# `$4 != 1` would read the unset $4 as alive and admit the pane. The positive cases
+# above supply the column and resolve.
 done = run(depth=2, panes="%99 ROOTPID")
 check("a pane whose liveness tmux never stated is refused, not assumed - falls to detached",
       picked(done) == DETACHED, picked(done))
@@ -1253,112 +1104,88 @@ check("a pane whose liveness tmux never stated is refused, not assumed - falls t
 done = run(depth=2, sleep=2, forge_age="00:00")
 check("an ancestor younger than its own descendant is refused as a recycled pid - falls to detached",
       picked(done) == DETACHED, picked(done))
-# The control runs UNDER the forging ps, differing only in the value written.
-# Re-running the chain without the wrapper would leave the one spurious-pass mode
-# open that `picked()` cannot see: a mangled process table declining cleanly with
-# the no-transport code, for a reason having nothing to do with the age check.
-# Only a run that forges and still resolves proves the wrapper leaves the subject
-# intact.
+# The control runs under the forging ps, differing only in the value written. Without
+# it, a mangled process table could decline cleanly with the no-transport code for a
+# reason unrelated to the age check. Only a run that forges and still resolves shows
+# the wrapper leaves the subject intact.
 check("the same forged pid resolves when the age is older instead of younger",
       picked(run(depth=2, sleep=2, forge_age="99:00:00")) == "%99",
       "without this the forging fixture, not the age check, could be doing the work")
 
-# The walk refuses an elapsed time it cannot read rather than folding it into an
-# age of zero, and pinning that needs a value the format rejects which ageof()
-# still reads as LARGE. Garbage that folds to zero (`abc`) proves nothing here:
-# zero is younger than the descendant, so the age check refuses it and the format
-# guard could be deleted with no case noticing. `1:2:3:4` has too many fields for
-# [[dd-]hh:]mm:ss yet folds to ~62 hours, so it clears the age comparison and only
-# the format check stands between it and a claimed pane.
+# The walk refuses an elapsed time it cannot parse rather than treating it as age zero.
+# Pinning that takes a value the format rejects but ageof() still reads as large. `abc`
+# folds to zero, which the age check already refuses, so the format guard would go
+# untested. `1:2:3:4` has too many fields for [[dd-]hh:]mm:ss yet folds to about 62
+# hours, so only the format check can refuse it.
 done = run(depth=2, sleep=2, forge_age="1:2:3:4")
 check("an elapsed time the walk cannot read refuses the pane - falls to detached",
       picked(done) == DETACHED, picked(done))
 
 # --- precedence -----------------------------------------------------------
-# Both candidates must be resolvable, or the case cannot see which one won. An
-# earlier version handed discovery the unresolvable `%5 1 0` set, so $TMUX_PANE
-# was the only answer available and %42 came back under either ordering - a check
-# that read as pinning precedence while pinning nothing. Here discovery can reach
-# %99 and the environment names %42, so the two genuinely compete.
+# Both candidates must be resolvable, or the case cannot tell which one won. Here
+# discovery can reach %99 and the environment names %42, so the two genuinely compete.
 
 done = run(depth=2, panes=f"%99 ROOTPID 0\n%42 {STRANGER.pid} 0", tmux_pane="%42")
 check("an inherited $TMUX_PANE wins outright and discovery never runs",
       picked(done) == "%42", f"rc={done.returncode} out={done.stdout!r}")
 
-# A $TMUX_PANE naming a pane that has since gone - the map outliving its
-# territory, which is the whole reason discovery exists. It must not be able to
-# consume the attempt: tmux answers display-message for an unowned pane with exit
-# 0 and empty fields, so the target renders as the bare ":." - non-empty, and a
-# live tmux address for whatever pane is current. Taking it would hand the session
-# to whichever window the user happened to be looking at.
+# A $TMUX_PANE naming a pane that has since gone must not consume the attempt. tmux
+# answers display-message for an unowned pane with exit 0 and empty fields, so the
+# target renders as the bare ":." (a live address for the current pane). Taking it
+# would hand the session to whichever window is focused.
 done = run(depth=2, tmux_pane="%4242")
 check("a stale $TMUX_PANE hands the question on and discovery answers it",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# And with nothing to fall back to, the answer is still no pane - never the ":."
-# that an unresolvable id renders into - though the launcher still has the
-# detached transport left to try.
+# With nothing to fall back to, the answer is still no pane, never the ':.' an
+# unresolvable id renders into. The launcher still has the detached transport to try.
 done = run(depth=2, panes="%5 1 0", tmux_pane="%4242")
 check("a stale $TMUX_PANE with nothing to discover falls to detached rather than guessing a pane",
       picked(done) == DETACHED, picked(done))
 
-# Owning a pane and displaying a live process are different facts, and
-# remain-on-exit is what separates them: tmux keeps answering for a pane whose
-# process has exited. So an inherited $TMUX_PANE can name a pane that is real,
-# owned, and dead - it echoes its own id back exactly as a live one does, and an
-# id-only check would take it, skip discovery, and send the handoff into a corpse.
+# Owning a pane and displaying a live process are different facts; remain-on-exit keeps
+# tmux answering for a pane whose process has exited. An inherited $TMUX_PANE can name
+# such a dead pane, which echoes its id just as a live one does, so an id-only check
+# would send the handoff into it.
 done = run(depth=2, panes=f"%99 ROOTPID 0\n%77 {STRANGER.pid} 1", tmux_pane="%77")
 check("an inherited $TMUX_PANE naming a dead pane loses to a live discovered one",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
-# ':.' is what an unresolvable pane id renders into, and it is not inert - tmux
-# reads it as current-session:current-window.current-pane and hands back a real,
-# live pane. Liveness cannot refuse it, because the pane it resolves to IS alive;
-# only comparing the echoed id against the id asked for can. %77 is listed first
-# so 'current' is a pane the ancestry does not own, which is what makes taking it
-# a wrong answer rather than a lucky one.
+# ':.' is what an unresolvable pane id renders into, and tmux resolves it to the
+# current pane, which is live. Liveness cannot refuse it, so only comparing the echoed
+# id against the id requested can. %77 is listed first so 'current' is a pane the
+# ancestry does not own, which makes taking it a wrong answer rather than a lucky one.
 done = run(depth=2, panes=f"%77 {STRANGER.pid} 0\n%99 ROOTPID 0", tmux_pane=":.")
 check("a $TMUX_PANE that resolves to someone else's live pane is refused",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
 # --- the detached worker: what it retires, and in what order ----------------
-# Everything above drives the LAUNCHER in dry-run, so the promise the detached
-# transport makes at the other end - after the handoff, exactly one live agent -
-# had no coverage at all. These cases run the real worker against the fixture tmux
-# and a real victim process, and each is decided by whether a process is alive or
-# dead when it finishes, never by a log line claiming one or the other.
+# The launcher cases above run in dry-run, so the detached transport's promise (after
+# the handoff, exactly one live agent) is not covered there. These cases run the real
+# worker against the fixture tmux and a real victim process, and each is decided by
+# whether a process is alive or dead when it finishes.
 
 
-# A victim that refuses SIGTERM, so retirement has to escalate. The default `sleep 600`
-# dies on the first signal and therefore never reaches the KILL branch at all, which is
-# how that branch went uncovered.
+# A victim that ignores SIGTERM, so retirement has to escalate to KILL. The default
+# `sleep 600` dies on the first signal and never reaches the KILL branch.
 #
-# ITS `ps` COMMAND STRING MUST BE STABLE FROM BIRTH, which is the whole reason this is not
-# a python victim. `sys.executable` was tried and is flaky by nature, not by timing: the
-# interpreter REWRITES its own command string during startup, so a reading taken at launch
-# (".../bin/python3.14 -c ...") stops matching the reading taken seconds later
-# (".../Python.app/Contents/MacOS/Python -c ..."). The retirement code then correctly
-# refuses to signal what looks like a different process, and the case fails - about one run
-# in three. A fixture whose identity mutates cannot be used to test a mechanism whose whole
-# job is proving identity has NOT changed.
-#
-# The trailing `sleep 1` loop keeps the shell blocked without a long-lived child: when KILL
-# lands on the shell, the one sleep in flight is orphaned for at most a second and reaps
-# itself, so the case leaves nothing behind.
+# The victim's `ps` command string must stay stable from birth, so it is a shell rather
+# than a python process: the interpreter rewrites its own command string during startup,
+# and retirement correctly refuses to signal a process whose identity changed. The
+# trailing `sleep 1` loop keeps the shell blocked without a long-lived child, so when KILL
+# lands on the shell, the orphaned sleep exits within a second and the case leaves
+# nothing behind.
 IGNORES_TERM = ["/bin/bash", "-c", 'trap "" TERM; while :; do sleep 1; done']
 
 
 def worker_case(identity, goal="", fail_on=None, pane_text=None, victim=("sleep", "600")):
     """Run one detached worker over a real process standing in for the old claude.
 
-    Returns (retired, done): whether the victim was actually signalled, and the
-    worker's own result, carrying `done.tmux_log` - every tmux argv the worker
-    issued. The identity handed to the worker is read with the same `ps` fields
-    the launcher captures, so `identity="match"` passes the genuine article
-    rather than something shaped like it; `identity="reused"` keeps that reading
-    and swaps the command out, which is what the pid holds after the OS reissues
-    it to a stranger. `pane_text` is what the new session's pane shows, so a
-    session that never finishes booting is expressed as a value, not a mode.
+    Returns (retired, done): whether the victim was signalled, and the worker's
+    result, where `done.tmux_log` lists every tmux argv the worker issued. The
+    identity is read with the same `ps` fields the launcher captures; identity="match"
+    passes that reading, and identity="reused" swaps the command out, as happens when
+    the OS reissues the pid. `pane_text` sets what the new session's pane shows.
     """
     proc = subprocess.Popen(list(victim),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1371,9 +1198,8 @@ def worker_case(identity, goal="", fail_on=None, pane_text=None, victim=("sleep"
         ident = real
     else:
         ident = real.replace(" ".join(victim), "vi Makefile")
-        # A substitution that matched nothing would hand the worker the REAL identity
-        # under the name "reused", and the case would assert that a matching process is
-        # left alone - passing while testing the opposite of its name.
+        # A substitution that matches nothing would leave the real identity under the name
+        # "reused", and the case would pass while testing the opposite.
         assert ident != real, f"reused-identity fixture altered nothing: {real!r}"
     workdir = tempfile.mkdtemp(prefix="finalize-worker.")
     msgfile = os.path.join(workdir, "msg")
@@ -1411,9 +1237,8 @@ def worker_case(identity, goal="", fail_on=None, pane_text=None, victim=("sleep"
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-# Each worker sleeps out the full HANDOFF_DELAY_SECONDS, so the cases run
-# alongside each other rather than one after another. They share nothing: each
-# owns its victim process and its own workdir.
+# Each worker sleeps out the full handoff delay, so the cases run concurrently. Each
+# owns its victim process and workdir.
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     same_pid = pool.submit(worker_case, "match")
     reused_pid = pool.submit(worker_case, "reused")
@@ -1421,65 +1246,58 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     # worker's `set -euo pipefail` aborts the script on the spot.
     goal_fails = pool.submit(worker_case, "match", goal="ship the thing",
                              fail_on="load-buffer")
-    # The spawn that never happens, and the spawn that never comes up: the worker's
-    # two "the successor is not there" arms. Both promise the old process is left
-    # running, and until now that promise was made only in a comment.
+    # The spawn that never happens and the spawn that never comes up are the worker's
+    # two "successor is not there" arms. Both leave the old process running.
     spawn_fails = pool.submit(worker_case, "match", fail_on="new-session")
-    # A pane that shows something other than the boot banner for the whole
-    # readiness window - the slow or wedged boot. This one sleeps out the full
-    # CLAUDE_READY_TIMEOUT_SECONDS on top of the handoff delay, so it is the
-    # longest case in the suite.
+    # A pane that shows something other than the boot banner for the whole readiness
+    # window, as in a slow or wedged boot. It waits out the full ready timeout on top of
+    # the handoff delay, so it is the longest case.
     never_ready = pool.submit(worker_case, "match", goal="ship the thing",
                               pane_text="waiting for the shell to start")
     # A victim that ignores TERM, which is the only way to reach the KILL escalation.
-    # Every other case here dies on the first signal, so that branch - and the identity
-    # re-check guarding it - ran in no test at all until this one.
+    # Every other case here dies on the first signal.
     survives_term = pool.submit(worker_case, "match", victim=IGNORES_TERM)
 
 retired, done = same_pid.result()
 check("the worker retires the old process it was given",
       retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The window between capturing the pid and signalling it runs to ~41s (the delay
-# plus the readiness wait), which is ample room for the OS to hand that pid to
-# something else. `kill -0` cannot see that happen - it answers "something is
-# alive here", which is true of the stranger too.
+# The window between capturing the pid and signalling it spans the handoff delay and
+# the readiness wait, which is ample time for the OS to reissue the pid. `kill -0`
+# cannot detect that, since it reports only that something is alive.
 retired, done = reused_pid.result()
 check("a pid reissued to another process during the wait is not signalled",
       not retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 check("and the worker says why it left that pid alone",
       "not the process captured at launch" in done.stdout, f"out={done.stdout!r}")
 
-# Ordering, not guarding, is what protects the single-live-agent guarantee: the
-# goal delivery below the retirement is optional and fallible, and `set -e` turns
-# any failure there into an immediate abort. Retirement happens first, so the
-# abort finds nothing left to suppress.
+# Ordering, not a guard, protects the single-live-agent guarantee: the goal delivery
+# below retirement is optional and fallible, and `set -e` aborts on its failure.
+# Retirement runs first, so the abort has nothing left to suppress.
 retired, done = goal_fails.result()
 check("a failed goal delivery cannot leave the old process alive",
       retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A successor that could not be spawned at all. The old process is the only agent
-# there is, so it must still be running when the worker gives up - and the worker
-# must say it failed rather than exiting 0 over a handoff that never landed.
+# A successor that cannot be spawned at all. The old process is the only agent, so it
+# must still run when the worker gives up, and the worker must report the failure
+# rather than exit 0.
 retired, done = spawn_fails.result()
 check("a session that cannot be created leaves the old process running",
       not retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 check("and the failed spawn is reported as a failure, not a quiet no-op",
       done.returncode == 1 and "could not create detached tmux session" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# Nothing was created, so nothing is torn down. This is the counterpart that keeps
-# the teardown assertion below honest: a worker that killed the session on every
-# failure path would satisfy that one while being wrong here.
+# Nothing was created, so nothing is torn down. This keeps the teardown assertion below
+# honest: a worker that killed the session on every failure path would pass that one
+# while being wrong here.
 check("a spawn that never happened tears nothing down",
       "kill-session" not in done.tmux_log, f"tmux_log={done.tmux_log!r}")
 
-# The dangerous one. The handoff message rides in the `tmux new-session` argv, so a
-# readiness timeout does not mean the successor got nothing - it usually means the
-# successor is still booting. Left alone, a boot finishing one second past the
-# deadline yields two live agents: the old one never retired, the new one already
-# working the handoff. The worker collapses that back to one by tearing the new
-# session down, and only the tmux log can show it happened; the worker's own log
-# line would say so either way.
+# A readiness timeout does not mean the successor got nothing: the handoff rides in the
+# `tmux new-session` argv, and the successor is usually still booting. If that boot
+# finishes after the deadline, two live agents would exist, so the worker tears the new
+# session down. Only the tmux log shows this, since the worker's own log line says the
+# same either way.
 retired, done = never_ready.result()
 check("a successor that never becomes ready is torn down, not left racing the old process",
       "kill-session -t fixture-session" in done.tmux_log,
@@ -1491,10 +1309,8 @@ check("and the timeout is reported as a failure, with the undelivered goal named
       and "carried goal NOT delivered" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# Retirement escalates when TERM is refused. Worth its own case because the branch
-# decides to send SIGKILL, and until now nothing in the suite reached it - every other
-# victim dies on the first signal, so the escalation and the identity check standing in
-# front of it were both unexecuted code.
+# Retirement escalates when TERM is refused. Every other victim dies on the first
+# signal, so without this case the KILL branch would never run.
 retired, done = survives_term.result()
 check("a process that refuses TERM is still retired, by escalation to KILL",
       retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -1506,19 +1322,16 @@ check("and the escalation says so, rather than the pid quietly disappearing",
 # ---------------------------------------------------------------------------
 # The handoff is durable, and every delivery names it.
 #
-# A handoff that exists only in flight is one bad paste from gone. These cases
-# pin the property that makes the transport's failures survivable: the payload
-# is on disk before any transport is chosen, no code path removes it, and the
-# message carries its own path so a reader who got a mangled copy can find the
-# whole one. [LAW:one-source-of-truth]
+# A handoff that exists only in flight is lost on the first failed paste. These cases
+# check that the payload is on disk before any transport is chosen, that no code path
+# removes it, and that the message carries its own path.
 # ---------------------------------------------------------------------------
 
 def tmux_worker_case(pane_text, timeout="2"):
     """Run one tmux worker and report what it did with the handoff.
 
-    Returns (done, msgfile, tmux_log). `pane_text` is what capture-pane shows, so
-    "the reset never registered" is a value rather than a mode - the same shape
-    the detached worker's readiness fixture already uses.
+    Returns (done, whether the handoff file still exists, tmux log). `pane_text` is
+    what capture-pane shows, so a reset that never registers is a value, not a mode.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     msgfile = os.path.join(workdir, "handoff.md")
@@ -1555,12 +1368,9 @@ check("a reset the worker can see delivers the handoff",
 check("and the handoff file outlives the worker that delivered it",
       survived, f"out={done.stdout!r}")
 
-# The regression itself. The reset is typed while the pane's agent is still
-# mid-turn, so Claude queues it and the banner does not appear inside any fixed
-# window. The old worker read that as a misfire, refused to send, and let its
-# EXIT trap delete the handoff - a cleared session whose whole content was the
-# note that the handoff was lost. Ordering is preserved by tmux type-ahead, so
-# sending is always right; withholding never was.
+# The reset can be typed while the agent is still mid-turn, so Claude queues it and the
+# banner may not appear within any fixed window. Tmux type-ahead preserves ordering, so
+# the worker sends regardless and never deletes a handoff it could not confirm.
 done, survived, log = never.result()
 check("a reset the worker never sees still delivers the handoff",
       "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
@@ -1590,14 +1400,14 @@ finally:
 STRANGER.terminate()
 STRANGER.wait()
 # --- a handoff hands off: record and reset are one act ----------------------------------
-# There is no flag that records the message and leaves the session running. Every run picks
-# a transport, and the message is on disk before it does. [LAW:no-mode-explosion]
+# There is no flag that records a handoff without resetting the session. Every run picks
+# a transport after the message is on disk.
 
 done = run()
 check("every run resets: a transport is chosen with no flag asked for",
       "transport=" in done.stdout and "handoff recorded" not in done.stdout, done.stdout[:200])
-# The removed flag, in the value-carrying forms callers used to write. A launcher that grew
-# the arm back would accept these, so a bare `--reset` (refused either way) proves nothing.
+# The removed flag, in the value-carrying forms callers used to pass. A bare `--reset`
+# is refused either way, so it would prove nothing.
 for mode in ("clear", "compact"):
     done, bodies = argv_case("--reset", mode, "real work goes here")
     check(f"--reset {mode} is refused as the unknown flag it now is",

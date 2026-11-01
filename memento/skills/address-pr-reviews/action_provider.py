@@ -1,23 +1,10 @@
 #!/usr/bin/env python3
-"""GitHub Action PR review provider — implements the provider contract for the
-coding-agent-review GitHub Action reviewer.
+"""GitHub Action PR review provider for the coding-agent-review reviewer.
 
-The reviewer is a GitHub Action (brandon-fryslie/coding-agent-review)
-that runs on pull_request (opened, synchronize) and posts a formal PR review
-with inline comments — i.e. ordinary resolvable review threads, authored by
-github-actions.
-
-Lifecycle owner is the *workflow run*, not `reviewRequests`. [LAW:no-ambient-temporal-coupling]
-`wait` blocks on that owner — the run keyed to the current head SHA — never
-on event-stream timing or comment counts.
-
-Most findings land as review threads. The ones the reviewer could not anchor to a
-diff line — an issue in a file this PR made stale but did not touch — it cannot post
-inline, so it renders them in the CHANGES_REQUESTED review BODY instead, under a
-fixed heading (copirate-code-review-agent src/transport.js, renderFindingSection).
-Both are the same finding set the reviewer split by whether an anchor was accepted,
-so `fetch` reconstitutes both into one canonical stream — there is no second source,
-only a second rendering. [LAW:one-source-of-truth]
+The reviewer runs on pull_request and posts a formal review whose inline comments are ordinary
+resolvable review threads. Findings it cannot anchor to a diff line appear in its CHANGES_REQUESTED
+review body under a fixed heading. `fetch` returns both forms as one list, and `wait` tracks the
+workflow run for the current head SHA.
 """
 
 from __future__ import annotations
@@ -28,12 +15,8 @@ import subprocess
 import time
 from typing import Optional
 
-# [LAW:one-source-of-truth] the Finding shape, thread read, verified resolve, and
-# the blocking-review rule are the shared GitHub primitives — used here, never
-# copied. resolve/change_requests/dismiss_review are re-exported unchanged; `fetch`
-# is not (it is defined below, wrapping github_threads.fetch with body findings).
-# Import resolution is owned by provider_loader (loaded path) or script-mode
-# sys.path (direct).
+# resolve, change_requests and dismiss_review come from github_threads unchanged. `fetch` is defined
+# below, since it adds the body findings.
 import github_threads
 from github_threads import (  # noqa: F401  (contract surface)
     resolve,
@@ -48,7 +31,7 @@ CAPABILITIES = {
     "dismiss_review": True,   # github-actions posts a dismissible CHANGES_REQUESTED review
 }
 
-# The workflow file this provider watches. [LAW:one-source-of-truth]
+# The workflow file this provider watches.
 WORKFLOW_FILE = "code-review.yml"
 
 REGISTER_TIMEOUT_S = 300
@@ -75,41 +58,22 @@ def _latest_run(owner: str, repo: str, sha: str) -> Optional[dict]:
 # Findings the reviewer could not post inline
 # ---------------------------------------------------------------------------
 
-# [LAW:one-source-of-truth] The reviewer's own section headings, mirrored from
-# copirate-code-review-agent src/transport.js (renderUnanchoredSection /
-# renderDisplacedSection). A finding whose line is not in the diff (or whose
-# inline comment the host refused) reaches the reader in the review BODY under
-# exactly one of these, and transport.js calls the first string "a CONTRACT, not
-# a label" — the worker is told it three times as the promised destination.
-# Renaming there without renaming here leaves two maps of one section disagreeing,
-# so the strings are matched literally and the source is cited. "### Changed
-# files NOT reviewed" is deliberately NOT here: it is a coverage report, not a
-# finding.
+# Headings the reviewer uses for findings it could not post inline. They are matched literally and
+# copied from copirate-code-review-agent src/transport.js.
 BODY_FINDING_HEADINGS = frozenset({
     "### Findings outside the reviewed diff",
     "### Findings the host would not post inline",
 })
 
-# [LAW:parse-dont-validate] One item line as the producer wrote it:
-# `- ` + codeSpan(`path:line`) + ` — ` + severity-tagged body (transport.js
-# renderFindingSection). The fence is one-or-more backticks with an optional pad
-# space when the path itself contains a backtick, so `+ and the optional spaces
-# mirror codeSpan exactly.
-#
-# One finding is one physical line: transport.js runs every finding body through
-# flattenBody, which collapses VERTICAL_SEPARATORS (\n \r \u2028 \u2029) to spaces
-# before rendering, so a finding never wraps and there is no continuation line for
-# the scan to drop. What CAN vary is a `- ` item line the reviewer's grammar shifts
-# under us; that is the silent loss this parser refuses, so a `- ` line the regex
-# rejects is surfaced with a null anchor below, never skipped.
+# One item line as the reviewer writes it: `- ` + a code span of `path:line` + ` — ` + the body. The
+# code span's backtick fence may be padded when the path contains a backtick. Each finding is one
+# physical line; a `- ` line this regex rejects is still returned, with a null anchor, never skipped.
 _BODY_ITEM_RE = re.compile(r"^-\s+(`+) ?(.*?) ?\1 — (.*)$")
 
 
 def _split_path_line(span: str) -> tuple[Optional[str], Optional[int]]:
-    """`path:line` → (path, line). The line is the last colon-separated segment
-    when it is all digits, so a path that itself contains colons keeps them. A
-    span with no numeric tail keeps the whole thing as the path and reports no
-    line rather than inventing one."""
+    """Splits `path:line` into (path, line). Colons earlier in the path are kept. A span with no
+    numeric tail returns (span, None)."""
     head, sep, tail = span.rpartition(":")
     if sep and tail.isdigit():
         return head, int(tail)
@@ -117,22 +81,15 @@ def _split_path_line(span: str) -> tuple[Optional[str], Optional[int]]:
 
 
 def parse_body_findings(body: str, author: str) -> list[dict]:
-    """[LAW:effects-at-boundaries] Pure. Turn a review body into the canonical
-    findings the reviewer rendered there because no diff line could anchor them —
-    one per item line under a body-finding heading, empty for a body with none.
+    """Returns the findings listed under body-finding headings in a review body. Returns [] if there are none.
 
-    A body finding has no thread: `thread_id` is null and it is unresolvable, so
-    its disposition is the dismissal of the blocking review it lives in, not a
-    `resolve` call. `is_resolved` is False for the same reason every entry here is
-    pending — the body is read from a review that is still CHANGES_REQUESTED.
+    A body finding has no thread, so `thread_id` is None and it is cleared by dismissing its review,
+    not by `resolve`.
     """
     findings: list[dict] = []
     in_section = False
     for line in body.splitlines():
-        # A section runs from its heading until the next heading of ANY level, so
-        # any ATX heading ends it — the reviewer's own tail (verdict, footer,
-        # markers) carries no `- ` items, and matching only `### ` would let a
-        # bullet under a later `##`/`#` heading read as a phantom finding.
+        # Any ATX heading ends a section, so a `- ` bullet under a later heading is not read as a finding.
         if re.match(r"#{1,6} ", line):
             in_section = line.rstrip() in BODY_FINDING_HEADINGS
             continue
@@ -157,13 +114,10 @@ def parse_body_findings(body: str, author: str) -> list[dict]:
 
 
 def body_findings(reviews: list[dict]) -> list[dict]:
-    """[LAW:effects-at-boundaries] Pure. Every body finding across the reviewer's
-    blocking reviews (the `bot_reviews` shape). [LAW:single-enforcer] the blocking
-    test is `github_threads.is_blocking_review` — the very predicate `change_requests`
-    uses — so neither applies a different blocking rule than the other (the rule is
-    single-sourced there; see its note on why sharing the predicate, not one snapshot,
-    is sound). A dismissed review has left that state, so its body findings are
-    disposed and no longer read. [LAW:one-source-of-truth]"""
+    """Returns every body finding across the blocking reviews in `reviews` (the `bot_reviews` shape).
+
+    Blocking is decided by `github_threads.is_blocking_review`, the same predicate `change_requests`
+    uses. A dismissed review no longer blocks, so its findings are no longer returned."""
     return [
         f
         for r in reviews if github_threads.is_blocking_review(r)
@@ -172,10 +126,7 @@ def body_findings(reviews: list[dict]) -> list[dict]:
 
 
 def fetch(pr_url: str) -> dict:
-    """Every pending finding on the PR: the inline review threads AND the
-    out-of-diff findings the reviewer rendered in its blocking-review bodies.
-    [LAW:one-source-of-truth] the two renderings the reviewer split its findings
-    across, rejoined into the one canonical stream this loop trusts."""
+    """Returns every pending finding: inline review threads plus body findings from blocking reviews."""
     data = github_threads.fetch(pr_url)
     data["findings"].extend(body_findings(github_threads.bot_reviews(pr_url)))
     return data
@@ -248,15 +199,13 @@ def wait(pr_url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Contract: fetch is defined above (threads joined with body findings). resolve
-# is re-exported from github_threads — a body finding has no thread to resolve,
-# so only thread findings reach it.
+# Contract: fetch is defined above. resolve is re-exported from github_threads, since a body finding
+# has no thread to resolve.
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# CLI shim — lets the provider be invoked directly. The skill's SKILL.md
-# drives the provider through provider_loader, not this module.
+# CLI shim so the provider can run directly. The skill loads it through provider_loader.
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

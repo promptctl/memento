@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""The context-ceiling log: one line per hook run, in one shape, whichever hook wrote it.
+"""Writes the context-ceiling log: one line per hook run, in the same format from every hook.
 
-[LAW:no-silent-failure] a hook that allows emits nothing, and so does one that never ran; the log
-is the only place that difference exists. Two hooks write it - the Stop gate that decides on a
-ceiling, and the SessionStart hook that drops a session's override on `/clear` - and a line one
-of them wrote has to read like a line the other wrote, so a reader grepping for a session finds
-both. [LAW:one-source-of-truth] The writer lives here, beside the config module both hooks
-already import from, rather than in either hook: a hook reads stdin at import and cannot lend a
-function to the other.
+The Stop gate and the SessionStart clear hook both write here, so a grep for a session matches
+lines from either. The writer lives in this module because each hook script runs its logic at
+import time and cannot be imported by the other.
 """
 
 import fcntl
@@ -23,14 +19,10 @@ LOG_CAP = 2_000_000
 
 
 def hook_payload(name, event):
-    """The payload on stdin, for a hook registered on one event.
+    """Reads the hook payload from stdin and checks that it is for the expected event.
 
-    [LAW:parse-dont-validate] the crossing from bytes on stdin to the one dict every hook then
-    reads its session and paths from, made once here for both hooks rather than once in each. What
-    is not a JSON object has no session to act on, and a payload for another event means
-    hooks.json has drifted from the script - acting on it anyway is how a session gets gated on a
-    number that is not its own, or has an override dropped that it still means to have. Both exit
-    with the reason, which the caller's guard records before re-raising. [LAW:no-silent-failure]"""
+    Exits with a reason if stdin is not a JSON object or if its hook_event_name is not `event`.
+    The caller logs that exit before re-raising it."""
     hook = json.load(sys.stdin)
     if not isinstance(hook, dict):
         sys.exit(f"memento {name}: stdin must be a JSON object, got {type(hook).__name__}.")
@@ -41,18 +33,15 @@ def hook_payload(name, event):
 
 
 def reason_of(failure):
-    """A failure as one log field: a SystemExit's curated message, which it carries in `code`, or an
-    error's type and args, so a KeyError reads as `KeyError: 'cwd'` rather than a bare `'cwd'`.
-    [LAW:one-source-of-truth] every hook's line spells its failures alike."""
+    """Formats a failure as one log field: a SystemExit's message, or the exception type and args."""
     return (failure.code if isinstance(failure, SystemExit)
             else f"{type(failure).__name__}: {failure}")
 
 
 def log(hook, verdict, **fields):
-    """Append one line: when, which session and event, the fields the hook decided on, and the
-    verdict. Its own failure is reported but not fatal - raising would take the gate down with the
-    instrumentation. `fields` are the hook's own facts, `key=value` each, so a Stop line carries
-    the count and the ceiling that won and a clear line carries the file it removed."""
+    """Appends one line with the time, session, event, the caller's `key=value` fields, and the verdict.
+
+    A write failure is printed to stderr and not raised, so logging cannot disable the hook."""
     facts = " ".join(f"{key}={value}" for key, value in fields.items())
     line = (f"{datetime.now().isoformat(timespec='seconds')} "
             f"session={str(hook.get('session_id'))[:8]} event={hook.get('hook_event_name')} "

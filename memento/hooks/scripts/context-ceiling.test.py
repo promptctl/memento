@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for the context-ceiling hook.
 
-Each case feeds a synthetic transcript and the payload Claude Code actually delivers, to
-the hook as a subprocess, and asserts the JSON it emits. [LAW:behavior-not-structure] it is
-driven the way the harness drives it, so a rewrite of the internals cannot break these.
-
-Run: python3 context-ceiling.test.py
+Each case feeds a synthetic transcript and the payload Claude Code delivers to the hook as a
+subprocess, then asserts the JSON it emits. Run with `python3 context-ceiling.test.py`.
 """
 
 import atexit
@@ -35,9 +32,8 @@ PLUGIN = os.path.dirname(os.path.dirname(HERE))
 LIB = os.path.join(PLUGIN, "lib")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
-# [LAW:one-source-of-truth] every case drives the threshold explicitly, so the shipped
-# default lives in ceiling_config alone and retuning it cannot break these. A fixture
-# magnitude, not a second copy of that number.
+# Every case passes its threshold explicitly, so the shipped default lives only in ceiling_config
+# and retuning it cannot break these. The fixture magnitude is not a second copy of that number.
 TEST_CEILING = 100_000
 USER_CEILING = f"ceiling = {TEST_CEILING}\n"
 OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
@@ -100,12 +96,10 @@ def run(records, event="Stop", stop_hook_active=False,
         hook=HOOK, user_conf=USER_CEILING, project_conf=None, session_conf=None,
         project=None, config_home=None, xdg=None, extra_env=None,
         session=SESSION):
-    """Invoke the hook as Claude Code does. Returns (exit code, parsed stdout, stderr).
-
-    The threshold is written where a person writes one, so the suite drives the hook through
-    the surface it ships. user_conf=None writes no file at all, which is how a case reaches the
-    shipped default. Every config layer is rooted in scratch and every ambient one is stripped:
-    a developer's own ceiling, project or CLAUDE_PROJECT_DIR must not decide a test."""
+    """Invoke the hook as Claude Code does and return (exit code, parsed stdout, stderr). Every
+    config layer is rooted in scratch space and ambient ones (CLAUDE_PROJECT_DIR, XDG_CONFIG_HOME)
+    are stripped, so a developer's own config cannot decide a test. user_conf=None writes no user
+    layer, so the case reaches the shipped default."""
     handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     handle.write("".join(json.dumps(r) + "\n" for r in records))
     handle.close()
@@ -156,10 +150,9 @@ check("over the ceiling, the stop is blocked", out and out.get("decision") == "b
 # what it is told is to finish the unit it is in and close out after, not to drop it where it stands.
 code, out, _ = run([user, assistant(OVER)])
 
-# A finishing block restarts the turn, and the agent then works through its unit inside that turn, so
-# the stop that ends it arrives marked as following a block. Past the limit, that stop is the one
-# the limit exists for. The block reaches the transcript as the harness writes it, and the case below
-# builds it from the hook's own output.
+# A finishing block restarts the turn, and the stop that ends that turn is marked as following a
+# block. Past the limit, that stop is the one the limit exists for. The case below builds the block
+# from the hook's own output, as the harness would write it.
 _, finishing, _ = run([user, assistant(OVER)])
 _, closing, _ = run([user, assistant(PAST_LIMIT)])
 
@@ -214,17 +207,15 @@ code, out, _ = run([user, assistant(OVER),
                     tool_result(content="reminder: run finalize-session")])
 check("a command that only mentions the close-out is not credited as running it",
       out and out.get("decision") == "block", str(out))
-# Bash is the one tool whose output the agent writes, by choosing the command that prints it, so
-# a rendered line proves nothing on its own. Naming the launcher is what this call cannot do
-# without saying out loud what it is imitating.
+# Bash output is written by the agent's own command, so a rendered line inside a command proves
+# nothing. A case that echoes the line must not be credited.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command": f"echo '{SCHEDULED}'"}),
                     tool_result(content=SCHEDULED)])
 check("a command that echoes the launcher's line is not the launcher",
       out and out.get("decision") == "block", str(out))
-# Naming the launcher in the same breath does not rescue it. A real invocation cannot carry the
-# report it produces - the log path is made by mktemp while it runs - so the line's presence in
-# the command is what separates printing it from causing it.
+# A real invocation cannot carry the report it produces, because the log path is made while it runs.
+# So the line's presence in the command separates printing it from causing it.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command":
                         f"echo 'Reminder to run finalize-session next time. {SCHEDULED}'"}),
@@ -279,10 +270,9 @@ check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
 
 # --- the ceiling is a live read of the layers at every stop ---------------------------------
 
-# Nothing is frozen per session. A shared layer edited, deleted or created under a running session is
-# what that session is gated on at its next stop - delivered as a close-out instruction, since Stop is
-# the only event this runs on, never as a denial. Each case runs one session more than once against one
-# config home, because a second stop seeing the change is the whole of what is under test.
+# Nothing is frozen per session, so a shared layer edited, deleted or created while a session runs
+# governs its next stop. Each case therefore runs one session more than once against one config home.
+# The effect at a stop is a block, since Stop is the only event this runs on.
 
 home = scratch_dir()
 code, out, _ = run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
@@ -313,9 +303,8 @@ check("a session layer written mid-session raises the ceiling on the very next s
 
 # --- a session override resets with the session, /clear included ------------------------------
 
-# A kill-and-relaunch reset gets a new session id and so drops its override by construction. `/clear`
-# keeps the id, so a SessionStart hook matched to it removes the file, and the successor context runs
-# under the user and project layers until it sets its own.
+# A kill-and-relaunch reset gets a new session id and drops its override. `/clear` keeps the id, so
+# the SessionStart hook matched to it removes the override file.
 
 def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None):
     """Invoke the SessionStart hook as Claude Code does on /clear. Returns (exit code, stderr)."""
@@ -373,9 +362,8 @@ check("a ceiling that does not parse fails loudly",
 code, out, err = run([user, assistant(OVER)], user_conf="ceilling = 350000\n")
 check("a misspelled key fails loudly rather than reading as a setting nobody made",
       code == 1, f"{code} {err}")
-# Bytes that are not text are the one shape of "not this format" that used to arrive as a traceback,
-# and a traceback out of a Stop hook is a gate Claude Code treats as non-blocking: off, with nothing
-# anywhere stating why.
+# Bytes that are not text must fail loudly, because a traceback from a Stop hook leaves the gate off
+# with nothing stating why.
 bytes_home = scratch_dir()
 with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
     handle.write(b"ceiling = 35\xff0000\n")
@@ -398,10 +386,9 @@ code, out, err = run([user, assistant(OVER)],
                      user_conf="ceiling = 300000\nceiling = 400000\n")
 check("one key set twice in one file fails loudly",
       code == 1, f"{code} {err}")
-# The shared fold is the one that gets written down, so it is the one that must not be allowed to
-# resolve negative: `-50000` recorded is `-50000` read back as an *adjustment*, which resolves to
-# a positive 200,000 nobody set and never trips the check below. Caught in review; the exit had
-# stopped firing for this input entirely, on the recording stop as well as every later one.
+# The shared fold is the value written down, so it must not resolve negative. A recorded negative
+# read back as an adjustment resolves to a positive value nobody set, which passes the check below.
+# This case asserts the fold is rejected at the recording stop as well as at later ones.
 code, out, err = run([user, assistant(OVER)],
                      user_conf=f"ceiling = -{DEFAULT_CEILING + 50_000}\n")
 check("a shared fold that resolves below zero fails loudly rather than being recorded",
@@ -412,9 +399,8 @@ code, out, err = run([user, assistant(OVER)], user_conf="ceiling = 10000\n",
 check("adjustments that resolve below zero fail loudly",
       code == 1, f"{code} {err}")
 
-# The disabling word is matched on what was written, not on what is left after the digit
-# separators come out - `o_f_f` is a typo, and reading it as `off` would take the gate down
-# by way of a misspelling, which is the one outcome this section exists to prevent.
+# The disabling word is matched on the text as written, not after digit separators are removed.
+# `o_f_f` is a typo and must not switch the gate off.
 code, out, err = run([user, assistant(5_000_000)], user_conf="ceiling = o_f_f\n")
 check("'o_f_f' is a typo rather than a way to switch the gate off",
       code == 1, f"{code} {err}")
@@ -435,9 +421,8 @@ for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
     check(f"{malformed!r} is not a number of tokens", code == 1,
           f"{code} {err}")
 
-# The session id becomes a path exactly once, so that is where its shape is settled. An
-# absolute id would discard the sessions directory outright; a relative one would climb out
-# of it. Either reads a config no layer of this design points at.
+# The session id becomes a path in one place, so its shape is checked there. An absolute id would
+# discard the sessions directory, and a relative one could climb out of it.
 for escape in ("/tmp", "../..", "a/b", "..", "./..", "..//", ".", "/"):
     code, out, err = run([user, assistant(OVER)], session=escape,
                          user_conf="ceiling = 300000\n")

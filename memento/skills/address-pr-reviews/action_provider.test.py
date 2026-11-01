@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Tests for the action provider's body findings.
+"""Tests for the action provider's body findings and their merge with review threads.
 
-A finding the reviewer could not post inline lands in the CHANGES_REQUESTED review
-body; `fetch` must surface it alongside the review threads. The parse is exercised
-on data; the `fetch` case fakes `gh` at the subprocess seam
-(`github_threads.subprocess`) so argv construction, JSONL splitting and the thread
-read all run for real. No test touches the network.
-
-Run: python3 action_provider.test.py
+Findings the reviewer could not post inline appear in the CHANGES_REQUESTED review body, and `fetch`
+must return them with the threads. `gh` is faked at the subprocess seam, so argv construction and
+JSONL parsing run for real, and no test uses the network. Run with: python3 action_provider.test.py
 """
 
 import json
@@ -46,14 +42,10 @@ class FakeGh:
 
 
 # --- body findings: what the reviewer could not post inline -----------------
-# A finding whose line is not in the PR's diff cannot be an inline comment, so the
-# reviewer renders it in the CHANGES_REQUESTED review BODY under a fixed heading. A
-# `fetch` that read threads alone reported these PRs clean and dismissed the block
-# unread — the bug this parser closes. Every case asserts the WHOLE finding a body
-# yields, so the parse can be rewritten freely as long as it still surfaces each one.
-# [LAW:behavior-not-structure]
+# A finding whose line is not in the PR's diff is rendered in the review body under a fixed heading.
+# Each case asserts the whole finding that a body yields.
 
-# PR #7's real review body (head d4410c2) — the one the ticket observed reading clean.
+# A real review body from PR #7, used as a fixture.
 PR7_BODY = (
     "## CoPirate Code Review\n\n"
     "This PR renames the memento.conf setting from `context_ceiling` to `ceiling`.\n\n"
@@ -133,8 +125,7 @@ find_body(
     "### Findings outside the reviewed diff\nx\n\n- `README.md` — **[S1]** whole-file note",
     [one("README.md", None, "**[S1]** whole-file note")])
 
-# [LAW:no-silent-failure] an item the grammar does not recognize is surfaced with a
-# null anchor, never dropped — dropping it would be the exact silent loss this closes.
+# An item the grammar does not recognize is still returned, with a null anchor.
 find_body(
     "an unparseable item is surfaced with a null anchor, not dropped",
     "### Findings outside the reviewed diff\nx\n\n- a finding with no code span at all",

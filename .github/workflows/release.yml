@@ -1,8 +1,7 @@
 name: release
 
-# One process for every promptctl plugin repo. The implementation lives in
-# promptctl/.github, with the procedure in its RELEASING.md. This file only
-# says when it runs. [LAW:one-source-of-truth]
+# Calls the shared promptctl release workflow, whose implementation lives in promptctl/.github.
+# This file sets only the trigger: a tag matching `*--v*`.
 
 on:
   push:

@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for `review wait` in bin/review.
+"""Tests for `cmd_wait` in bin/review.
 
-`cmd_wait` turns a run the loop must not trust — a reviewer that errored —
-into a nonzero exit. The verdict is asserted on the (result, failure) pair
-for each shape a provider can return, never on how the branch is spelled.
-[LAW:behavior-not-structure]
-
-Run: python3 review_cli.test.py
+A reviewer run that errored must become a nonzero exit. Each case asserts the (result, failure)
+pair a provider can return. Run with: python3 review_cli.test.py
 """
 
 import importlib.machinery

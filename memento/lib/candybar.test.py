@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Tests for memento's cc-candybar plugin: the folder memento installs and the status it writes.
+"""Tests for the cc-candybar integration: the installed plugin folder and the status files it writes.
 
-Every case runs memento's real programs as subprocesses - the hooks with a payload on stdin, and
-the `ceiling` command a session's status names, started as cc-candybar's run starts it - under a
-scratch config home and a scratch XDG_DATA_HOME, then reads what landed on disk. [LAW:behavior-not-structure]
-cc-candybar reads only those files, so they are the contract.
-
-Run: python3 candybar.test.py
+Each case runs the real hook and `ceiling` programs as subprocesses under scratch directories, then
+checks the files on disk, since cc-candybar reads only those files. Run with: python3 candybar.test.py
 """
 
 import atexit
@@ -43,8 +39,8 @@ def check(name, condition, detail=""):
 
 
 class World:
-    """A config home, a project, a plugin root and a log, all scratch; `storage` says whether a
-    cc-candybar daemon has loaded the plugin and created its session folder."""
+    """A scratch config home, project, plugin root and log. `storage` controls whether the plugin's
+    session folder exists, as it does once cc-candybar has loaded the plugin."""
 
     def __init__(self, storage=True, user_conf=None):
         self.root = tempfile.mkdtemp(dir=SCRATCH)
@@ -77,12 +73,12 @@ class World:
                               capture_output=True, cwd=cwd, env=env or self.env())
 
     def where(self):
-        """What every status carries: the config home and the session's `ceiling` command."""
+        """Returns the `home` and `command` fields every status carries."""
         return {"home": self.home, "command": CEILING}
 
     def ceiling(self, *argv, program=None, cwd=None):
-        """`ceiling` as cc-candybar's run starts it: the session's id and project in the
-        environment, in whatever directory the caller names."""
+        """Runs `ceiling` as cc-candybar runs it: the session's id and project are in the environment,
+        and the working directory is the one given."""
         return subprocess.run([*(program or [sys.executable, CEILING]), *argv], text=True,
                               capture_output=True, cwd=cwd or self.project,
                               env=self.env(CLAUDE_CODE_SESSION_ID=SESSION,
@@ -210,8 +206,8 @@ check("which runs from the plugin's folder, as the plugin's actions do",
 check("and every action runs the command the status names",
       open(SHIPPED).read().count('run: ["{{ .plugins.memento.status.command }}"') == 4)
 
-# A config home named relative to the session's directory names another directory where
-# cc-candybar runs the command, so the status carries it absolute.
+# A relative config home would resolve differently where cc-candybar runs the command, so the status
+# must store it as an absolute path.
 w = World()
 env = w.env(MEMENTO_CONFIG_HOME=os.path.relpath(w.home, w.project))
 w.hook(STATUS_HOOK, "SessionStart", cwd=w.project, env=env, source="startup")
@@ -231,8 +227,8 @@ check("a status that cannot be written exits 3, and the move it follows stands",
       done.returncode == 3 and "cc-candybar status not written" in done.stderr
       and f"this session        {DEFAULT_CEILING + 100_000:,}" in done.stdout,
       (done.returncode, done.stderr, done.stdout))
-# A publish that fails for any reason, not only the filesystem's, is the same exit 3: a copy of
-# this plugin whose manifest names no version cannot stamp its definition.
+# A publish that fails for any reason, not only a filesystem error, also exits 3. Here the manifest
+# has no version, so the definition cannot be stamped.
 broken = os.path.join(tempfile.mkdtemp(dir=SCRATCH), "memento")
 shutil.copytree(PLUGIN, broken)
 with open(os.path.join(broken, ".claude-plugin", "plugin.json"), "w") as handle:
