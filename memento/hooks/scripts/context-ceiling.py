@@ -91,14 +91,14 @@ Running it records the handoff and resets this session into it. Load Skill(memen
 FINISHING = Band("finish",
     "CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. "
     + FINISHING_MARK
-    + """ - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run:""" + CLOSE_OUT
+    + """ - the PR, the ticket, the task you were handed - and close out the moment it is done. Do not start another unit: the thought "the next ticket is small, I'll take it too" is starting one, and it belongs to the next session. If the unit is already done, or you are between units, close out now. If you are mid-unit and ended this turn only to wait on something (a background task, CI), end your turn again: that stop goes through, unless the session has reached {limit:,} by then, in which case this hook blocks it once more to make you close out wherever you stand. You do not track the count - this hook does. To close out, run:""" + CLOSE_OUT
     + "Do not move the ceiling to make room, and do not ask the user whether to finalize.",
     "memento: this session is past the {ceiling:,} ceiling at ~{tokens:,} tokens and stopped again "
     "without closing out, so the stop proceeds. It may finish the unit of work it is in; at "
     "{limit:,} it is made to close out.")
 
 CLOSING = Band("block",
-    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Commit or push everything outstanding first - a handoff across a reset loses whatever is not committed - then run the close-out:""" + CLOSE_OUT
+    """CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling and the {limit:,} hard limit. Close it out now so the next session can pick the work back up. Run the close-out:""" + CLOSE_OUT
     + "Do not start new work, do not move the ceiling to make room, and do not ask the user whether to finalize.",
     "memento: context ceiling breached (~{tokens:,} > {ceiling:,}) and this session has spent its "
     "one forced close-out attempt, so the stop proceeds. If the close-out did not run, the next "
