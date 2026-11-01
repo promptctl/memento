@@ -35,12 +35,6 @@ TAIL_CHUNK = 256 * 1024
 # in are required, while the prose and source text are not. The test suite checks this pattern
 # against the launcher's real output, so a rename there fails the suite rather than every close-out.
 RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
-# The platform may refuse a non-git command inside a worktree, and this hook cannot change that.
-# EXIT_HINT carries the exit step into the close-out instruction so the agent leaves the worktree
-# before it runs the launcher.
-EXIT_HINT = ('In a worktree that command may be refused where you stand; run ExitWorktree with '
-             'action "keep" first, and close out from the directory it returns you to.')
-
 # What a block past the ceiling says depends on how far past it the session is. Up to the limit the
 # agent finishes its current unit; from the limit on it closes out where it stands.
 Band = collections.namedtuple("Band", "label reason spent")
@@ -50,11 +44,10 @@ Band = collections.namedtuple("Band", "label reason spent")
 # finishing blocks carry it, because the escalation never needs to name a closing block.
 FINISHING_MARK = "Finish the unit of work you are in the middle of"
 
-# The close-out instructions both bands share: the launcher command, the worktree caveat, and the
+# The close-out instructions both bands share: the launcher command and the
 # handoff contract. Each band's reason is its own opening, this text, and one clause on what not to do.
 CLOSE_OUT = """
     {launcher} '<handoff message>'
-{exit_hint}
 Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
 
 FINISHING = Band("finish",
@@ -190,8 +183,7 @@ def stop(hook, tokens, ceiling):
             return f"spent-{band.label}", {"systemMessage": band.spent.format(
                 tokens=tokens, ceiling=ceiling, limit=limit)}
     return band.label, {"decision": "block", "reason": band.reason.format(
-        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
-        exit_hint=EXIT_HINT)}
+        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER))}
 
 # The ceiling depends on the payload's session and project, so it is resolved here rather than at
 # import. Any failure before the gate decides is logged with the values established so far, then
