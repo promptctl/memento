@@ -32,8 +32,7 @@ EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
 TAIL_CHUNK = 256 * 1024
 # The rendered report the launcher prints when a reset is scheduled, matched in a tool result to
 # credit a close-out. Only the rendered line matches: the digits and absolute log path a run fills
-# in are required, while the prose and source text are not. The test suite checks this pattern
-# against the launcher's real output, so a rename there fails the suite rather than every close-out.
+# in are required, while the prose and source text are not.
 RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
 # What a block past the ceiling says depends on how far past it the session is. Up to the limit the
 # agent finishes its current unit; from the limit on it closes out where it stands.
