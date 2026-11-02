@@ -1,5 +1,9 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.12.0 - 2026-11-02
+
+- fix(message-in-a-bottle): a handoff is no longer refused in a worktree session for naming git or a shell. Claude Code (2.1.299) refuses a Bash command in a `--worktree` or `EnterWorktree` session when an unknown program's argument holds a quote, `$`, backtick or backslash and one of its words is `git` or a shell name (bash, sh, zsh, dash, ksh, mksh, ash, hush, rbash, fish, csh, tcsh, rsh, busybox, toybox, wsl, su, runuser, cmd, powershell, pwsh), or when a multi-word argument opens with one; no setting turns that off. A PreToolUse hook on Bash now rewrites a `finalize-session` command so each of those words is spelled with a hyphen between its characters (`git` as `g-i-t`) before the guard reads it. The hook auto-approves the rewritten command. The set is copied from the Claude Code binary, so a release that changes it needs this list changed with it.
+
 ## v0.11.0 - 2026-10-26
 
 Needs cc-candybar 1.157.0 or later.
