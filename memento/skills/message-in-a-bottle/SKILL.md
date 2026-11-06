@@ -33,7 +33,7 @@ So when a goal is in force, pass it: `--goal '<the exact condition>'` before you
 
 ## Model and effort — only when the handoff calls for them
 
-`--model <model>` and `--effort <level>` start the next session on that model or effort level, the way `--goal` re-issues a goal. Unlike the goal there is nothing to carry over: the reset session wakes on its own defaults, and you pass these only when the work or the user asked for a specific one (e.g. "hand this to opus at max effort for the review").
+`--model <model>` and `--effort <level>` start the next session on that model or effort level, the way `--goal` re-issues a goal. Unlike the goal, nothing here is carried over for you: omitted, the next session gets whatever the handoff transport leaves it, and you pass these only when the work or the user asked for a specific one (e.g. "hand this to opus at max effort for the review").
 
 - **Not requested → omit them.** Never pass the model or effort you happen to be running on; that would pin the next session to a choice nobody made.
 - The value is one word, exactly as `/model` or `/effort` takes it (`opus`, `opus[1m]`, `high`, `max`). A missing or multi-word value is refused with exit 2, having recorded nothing.

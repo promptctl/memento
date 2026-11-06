@@ -756,8 +756,8 @@ check("a carried goal it cannot write still says where the handoff is",
       and "NOT delivered" in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} msgpath={msgpath!r}")
 
-# --model and --effort are asked for, never defaulted: the next session keeps its own model
-# and effort unless the caller names one.
+# --model and --effort are asked for, never defaulted: the transport's own behavior stands
+# unless the caller names a model or effort.
 done, _ = argv_case("a handoff")
 check("without --model or --effort nothing is requested",
       "requested model: (none) effort: (none)" in done.stdout, done.stdout)

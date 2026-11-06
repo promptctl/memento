@@ -80,7 +80,8 @@ finalize-session [--goal '<condition>'] [--model <model>] [--effort <level>] [--
 With no message it hands off `/next`. The next session starts blank on every transport.
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run. `--model` and `--effort` start
-the next session on that model or effort level; omit them and it keeps its own defaults.
+the next session on that model or effort level; omit them and the transport decides: a tmux reset keeps the live
+session's model and effort, a relaunch carries the old `--model` and drops `--effort`.
 
 `--help` prints a usage block and exits 0 recording nothing, and any other two-dash
 word it does not know is refused — named on stderr, exit 2, no handoff written —

@@ -376,9 +376,9 @@ usage: finalize-session [--goal <condition>] [--model <model>] [--effort <level>
   --goal <condition>      re-issue an active /goal into the reset session, which
                           otherwise wakes with no goal and stops an unattended run
   --model <model>         start the next session on this model; omit to leave the
-                          model to the session's own default
+                          model as the transport leaves it
   --effort <level>        start the next session at this effort level; omit to
-                          leave it to the session's own default
+                          leave it as the transport leaves it
   --                      end flag parsing; every token after it is message text
   message...              what the next agent wakes up holding (default: /next)
 
@@ -407,7 +407,7 @@ case "$MODE" in
     # A leading --goal <condition> is stripped here, so the rest is the message. /clear and a fresh relaunch
     # both drop the session's /goal, so it is re-issued into the new session. An absent goal is an empty string.
     GOAL=""
-    # --model and --effort are set only when the caller asks. Empty means the next session keeps its own default.
+    # --model and --effort are set only when the caller asks. Empty means the transport's own behavior stands.
     MODEL=""
     EFFORT=""
     # A literal newline, for matching inside a case pattern below.
