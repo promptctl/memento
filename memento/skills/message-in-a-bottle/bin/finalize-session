@@ -14,7 +14,7 @@
 #
 # Modes:
 #   launcher:         see --help
-#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <settingsfile>
+#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
 
@@ -343,7 +343,9 @@ _mktemp_or_exit() {
 }
 
 # Appends the requested model and effort to FLAGS, so the relaunched claude starts on them. They come after the
-# flags kept from the old process, so a --model the old session carried is overridden by the request.
+# flags kept from the old process, so a --model the old session carried is overridden by the request: claude
+# takes the last of a repeated --model (checked against claude: a valid --model first and a bogus one last
+# fails, the reverse starts).
 _requested_flags() {
   local extra=""
   [[ -n "$MODEL" ]] && extra+="$(printf '%q %q ' --model "$MODEL")"
@@ -463,10 +465,9 @@ case "$MODE" in
       "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
     _mktemp_or_exit GOALFILE goal
-    _mktemp_or_exit SETTINGSFILE settings
     LOGFILE=""
     # The EXIT trap removes transient files only. The handoff file is kept.
-    trap 'rm -f -- "$GOALFILE" "$SETTINGSFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
+    trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
     # $RECORDED stays empty until the write succeeds, so a half-written file is never reported as the handoff.
     printf '%s' "$MESSAGE" > "$MSGFILE" \
       || _refuse "cannot write the handoff to $MSGFILE"
@@ -476,14 +477,11 @@ case "$MODE" in
       || _refuse "cannot write the carried goal to $GOALFILE"
 
     # The tmux transport types these into the reset session before the handoff prompt, so the handoff's first turn
-    # already runs on them. The relaunching transports pass them as claude flags instead. One slash command per
-    # line, empty when neither was requested.
-    {
-      [[ -n "$MODEL" ]] && printf '/model %s\n' "$MODEL"
-      [[ -n "$EFFORT" ]] && printf '/effort %s\n' "$EFFORT"
-      true
-    } > "$SETTINGSFILE" \
-      || _refuse "cannot write the requested model and effort to $SETTINGSFILE"
+    # already runs on them. The relaunching transports pass them as claude flags instead. Empty when neither was
+    # requested.
+    SETTING_COMMANDS=()
+    [[ -n "$MODEL" ]] && SETTING_COMMANDS+=("/model $MODEL")
+    [[ -n "$EFFORT" ]] && SETTING_COMMANDS+=("/effort $EFFORT")
 
     # A handoff always resets the session. The next session starts blank and holds only the message.
 
@@ -523,7 +521,7 @@ case "$MODE" in
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$SETTINGSFILE" \
+      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
@@ -602,18 +600,18 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   tmux-worker)
-    if [[ $# -ne 4 ]]; then
-      echo "internal error: worker expects exactly 4 args" >&2
+    if [[ $# -lt 3 ]]; then
+      echo "internal error: worker expects at least 3 args" >&2
       exit 2
     fi
     TARGET="$1"
     MSGFILE="$2"
     GOALFILE="$3"
-    SETTINGSFILE="$4"
+    shift 3
 
     BUFFER="finalize-$$"
     GOALBUF="finalize-goal-$$"
-    trap 'rm -f "$GOALFILE" "$SETTINGSFILE"' EXIT
+    trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
     # The banner a fresh session prints; seeing it is what confirms /clear landed.
@@ -650,14 +648,14 @@ Nothing on this machine to deliver the close-out into."
 
     # The requested /model and /effort go in before the handoff, while the reset session's box is idle, so the
     # handoff's first turn already runs on them. Each value is a single word, so typing it literally is safe.
-    while IFS= read -r SETTING; do
+    for SETTING in "$@"; do
       log "setting $SETTING"
       _clear_box "$TARGET"
       tmux send-keys -t "$TARGET" -l "$SETTING"
       sleep 0.5
       tmux send-keys -t "$TARGET" Enter
       sleep 1
-    done < "$SETTINGSFILE"
+    done
 
     _clear_box "$TARGET"
     tmux load-buffer -b "$BUFFER" "$MSGFILE"

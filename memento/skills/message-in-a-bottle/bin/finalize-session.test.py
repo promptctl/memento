@@ -1361,7 +1361,7 @@ check("and the escalation says so, rather than the pid quietly disappearing",
 # removes it, and that the message carries its own path.
 # ---------------------------------------------------------------------------
 
-def tmux_worker_case(pane_text, timeout="2", settings=""):
+def tmux_worker_case(pane_text, timeout="2", settings=()):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). `pane_text` is
@@ -1373,9 +1373,6 @@ def tmux_worker_case(pane_text, timeout="2", settings=""):
     with open(msgfile, "w") as handle:
         handle.write("the whole handoff")
     open(goalfile, "w").close()
-    settingsfile = os.path.join(workdir, "settings")
-    with open(settingsfile, "w") as handle:
-        handle.write(settings)
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
@@ -1387,7 +1384,7 @@ def tmux_worker_case(pane_text, timeout="2", settings=""):
     }
     try:
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", msgfile, goalfile, settingsfile],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile, *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -1421,7 +1418,7 @@ check("and above all does not delete the handoff it could not confirm",
 
 # The requested model and effort are typed into the reset session before the handoff is
 # pasted, so the handoff's first turn already runs on them.
-done, _, log = tmux_worker_case("Claude Code v1.2.3", settings="/model opus\n/effort high\n")
+done, _, log = tmux_worker_case("Claude Code v1.2.3", settings=("/model opus", "/effort high"))
 model_at, effort_at, paste_at = (log.find(needle) for needle in
                                  ("-l /model opus", "-l /effort high", "paste-buffer"))
 check("the worker types the requested /model and /effort, in order, before the handoff",
