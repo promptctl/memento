@@ -422,7 +422,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         message="handoff", handoff_dir=None, dry_run="1",
         log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
         self_dir_gone=False, as_claude=None, claude_pid=None,
-        forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False):
+        forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False,
+        launcher_flags=()):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -504,7 +505,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # is unchanged; only the launcher's own cwd is gone.
         launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
-        argv = [NEST_BIN, str(depth)] + entry + [message]
+        argv = [NEST_BIN, str(depth)] + entry + list(launcher_flags) + [message]
         # An outer daemon host wraps the whole chain, with its own pane, so the launcher
         # must not mistake another session's host for its own. The trailing `exit` keeps
         # bash from exec-ing the chain in place of the host process.
@@ -755,6 +756,26 @@ check("a carried goal it cannot write still says where the handoff is",
       and "NOT delivered" in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} msgpath={msgpath!r}")
 
+# --model and --effort are asked for, never defaulted: the transport's own behavior stands
+# unless the caller names a model or effort.
+done, _ = argv_case("a handoff")
+check("without --model or --effort nothing is requested",
+      "requested model: (none) effort: (none)" in done.stdout, done.stdout)
+done, _ = argv_case("--model", "opus[1m]", "--effort", "high", "a handoff")
+check("--model and --effort are carried into the reset session",
+      "requested model: opus[1m] effort: high" in done.stdout, done.stdout)
+done, bodies = argv_case("--effort", "max", "a handoff")
+check("one of the two can be asked for without the other, and neither is handoff text",
+      "requested model: (none) effort: max" in done.stdout
+      and len(bodies) == 1 and "--effort" not in bodies[0],
+      f"out={done.stdout!r} handoffs={bodies!r}")
+for bad in (["--model"], ["--model", "--goal", "x"], ["--effort", ""], ["--model", "two words"],
+            ["--effort", "-high"]):
+    done, bodies = argv_case(*bad, "a handoff")
+    check(f"a value that is not one word is refused and records nothing: {bad!r}",
+          done.returncode == REFUSED_RC and "single-word value" in done.stderr and bodies == [],
+          f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
 done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
@@ -940,6 +961,19 @@ done = run(panes=None, forge_command=(
 check("a prompt that mentions --print does not make the session headless",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The relaunching transports carry a requested model and effort as claude flags, after the
+# old session's own flags so the request wins.
+done = run(panes=None, forge_command="/x/claude --model sonnet --permission-mode plan",
+           launcher_flags=("--model", "opus[1m]", "--effort", "high"))
+check("a detached relaunch starts on the requested model and effort",
+      picked(done) == DETACHED
+      and "flags=[--model sonnet --permission-mode plan --model opus\\[1m\\] --effort high]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+done = run(panes=None, forge_command="/x/claude --permission-mode plan")
+check("and without a request the relaunch flags are only the old session's",
+      "flags=[--permission-mode plan]" in done.stdout and "--effort" not in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r}")
 
 # The relaunch line is parsed by a shell (tmux's default-shell, or the terminal's). An
 # unquoted `--model opus[1m]` is a glob there, which zsh aborts on when nothing matches,
@@ -1327,7 +1361,7 @@ check("and the escalation says so, rather than the pid quietly disappearing",
 # removes it, and that the message carries its own path.
 # ---------------------------------------------------------------------------
 
-def tmux_worker_case(pane_text, timeout="2"):
+def tmux_worker_case(pane_text, timeout="2", settings=()):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). `pane_text` is
@@ -1350,7 +1384,7 @@ def tmux_worker_case(pane_text, timeout="2"):
     }
     try:
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", msgfile, goalfile],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile, *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -1381,6 +1415,17 @@ check("and never claims the handoff was withheld",
       f"out={done.stdout!r} log={log!r}")
 check("and above all does not delete the handoff it could not confirm",
       survived, f"out={done.stdout!r}")
+
+# The requested model and effort are typed into the reset session before the handoff is
+# pasted, so the handoff's first turn already runs on them.
+done, _, log = tmux_worker_case("Claude Code v1.2.3", settings=("/model opus", "/effort high"))
+model_at, effort_at, paste_at = (log.find(needle) for needle in
+                                 ("-l /model opus", "-l /effort high", "paste-buffer"))
+check("the worker types the requested /model and /effort, in order, before the handoff",
+      0 <= model_at < effort_at < paste_at, f"out={done.stdout!r} log={log!r}")
+done, _, log = tmux_worker_case("Claude Code v1.2.3")
+check("with nothing requested the worker types no setting",
+      " -l " not in log and "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
 
 # The launcher's half: the payload lands in its durable home and names itself.
 handoff_home = tempfile.mkdtemp(prefix="finalize-home.")
