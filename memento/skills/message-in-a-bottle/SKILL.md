@@ -31,6 +31,14 @@ So when a goal is in force, pass it: `--goal '<the exact condition>'` before you
 - **No goal active → omit `--goal`.** Nothing changes; this is not a field you invent, and an empty `--goal` is not a thing to pass.
 - Do not talk yourself out of it. The rationalization will be *"the next agent will infer the goal from my message"* — it will not. A goal is a harness condition re-checked after every turn, not a sentence in a prompt; if you do not re-issue it, it does not exist in the next session. Carrying it is the difference between an autonomous run that continues and one that quietly dies at the handoff.
 
+## Model and effort — only when the handoff calls for them
+
+`--model <model>` and `--effort <level>` start the next session on that model or effort level, the way `--goal` re-issues a goal. Unlike the goal there is nothing to carry over: the reset session wakes on its own defaults, and you pass these only when the work or the user asked for a specific one (e.g. "hand this to opus at max effort for the review").
+
+- **Not requested → omit them.** Never pass the model or effort you happen to be running on; that would pin the next session to a choice nobody made.
+- The value is one word, exactly as `/model` or `/effort` takes it (`opus`, `opus[1m]`, `high`, `max`). A missing or multi-word value is refused with exit 2, having recorded nothing.
+- They are in force before the handoff's first turn, not after it.
+
 ## Turn-ending discipline — the call is the ending
 
 Running the launcher ends your turn. Say your one line to the user *before* you run it, not after. Once it has printed `handoff scheduled → …`: no closing text, no parting summary, no "scheduled!" confirmation, no further tool calls, no end-of-turn insights. That line is the last line your turn produces.
@@ -40,10 +48,11 @@ The thought to catch is *"I'll run it now and tidy up while the reset lands."* T
 ## Invocation
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<condition>'] [--] [message...]
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
 ```
 
 - `--goal '<condition>'` — optional, and only when a `/goal` is active this session. Re-establishes that goal in the reset session so the run continues. Leading argument; quote the condition. **Omit entirely when no goal is set.**
+- `--model <model>`, `--effort <level>` — optional, and only when the handoff calls for a specific model or effort for the next session (see *Model and effort* above). **Omit when not requested.**
 - `--` — ends flag parsing; every token after it is message text. This is how a handoff that genuinely opens with a two-dash word gets sent.
 - `--help` — prints the usage block, exits 0, and records nothing.
 - `[message...]` — a slash command, plain text, multi-line, or containing quotes/backticks/dollar signs. Quote it at invocation as usual (your shell does word-splitting and `$VAR` expansion before the script sees argv). **Omit it to default to `/next`, a skill that exists only in a repository where `lit init` wrote it; anywhere else, pass the next instruction as the message.**
@@ -77,4 +86,12 @@ Hand off while a goal is active — carry the goal forward so the autonomous run
 ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
   --goal 'every open PR on this branch is merged or closed, or stop after 30 turns' \
   /next
+```
+
+Hand off to a session that must run on a specific model and effort:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --model opus --effort max \
+  'Review PR #41 at branch fix/parser-null. Resume at step 10.'
 ```
