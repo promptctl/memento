@@ -84,7 +84,9 @@ _clear_box() {
 # perl is found on PATH like ps. macOS ships it but has deprecated it, and a missing or failing perl fails
 # the table read, which the launcher refuses.
 _process_table() {
-  ps -eo pid=,ppid=,etime=,uid=,ucomm= | perl -e '
+  # -C0 and an empty PERL5OPT keep the user's PERL_UNICODE and PERL5OPT out: decoded as characters, an
+  # argv byte above 0x7f would be encoded as a code point that `printf %b` cannot read back.
+  ps -eo pid=,ppid=,etime=,uid=,ucomm= | PERL5OPT= perl -C0 -e '
     use strict; use warnings;
     my $linux = -e "/proc/self/cmdline";
     my $buf = "\0" x 1048576;  # kern.argmax on macOS
@@ -183,20 +185,16 @@ _ancestry() {
     }
     # The one place argv0 is matched against the claude binary, so the versioned install path
     # (`.../claude/versions/<n>`) matches too. Only argv0 counts: a shell or a host can carry the path as an
-    # argument. argv0 is the first token, since no token holds whitespace (a space in a path is \x20).
-    function isclaude(pid,   argv0) {
-      argv0 = command[pid]
-      sub(/ .*/, "", argv0)
-      return argv0 == "claude" || argv0 ~ /\/claude$/ || argv0 ~ /\/claude\/versions\//
+    # argument. argv0 is one field whole, since no token holds whitespace (a space in a path is \x20).
+    function isclaude(pid) {
+      return argv0[pid] == "claude" || argv0[pid] ~ /\/claude$/ || argv0[pid] ~ /\/claude\/versions\//
     }
     # A tmux process by either name it goes by. The executable the kernel records is read for every owner,
     # so a tmux server whose argv is withheld is still one; argv0 catches a tmux run through a wrapper that
     # execs a differently named binary as `tmux`. Linux may name the server `tmux: server` in either. A
     # false match only confines.
-    function istmux(pid,   argv0) {
-      argv0 = command[pid]
-      sub(/ .*/, "", argv0)
-      return exe[pid] ~ /^tmux(:|$)/ || argv0 ~ /(^|\/)tmux(:|$)/
+    function istmux(pid) {
+      return exe[pid] ~ /^tmux(:|$)/ || argv0[pid] ~ /(^|\/)tmux(:|$)/
     }
     # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
     function unsound(pid, younger) {
@@ -232,9 +230,9 @@ _ancestry() {
       elapsed[$1] = $3
       owner[$1] = $4
       exe[$1] = $5
-      line = $0
-      sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
-      command[$1] = line
+      argv0[$1] = $6
+      command[$1] = $6
+      for (i = 7; i <= NF; i++) command[$1] = command[$1] " " $i
     }
     END {
       own = claude_pid
@@ -279,22 +277,21 @@ _ancestry() {
 # is never signaled, so this is a hard stop.
 _relaunch_target() { # <transport name> <own claude pid> <its argv tokens>
   local rc=0 tok dec
-  local -a enc
+  local -a enc argv=()
   CLAUDE_PID=$2
   # _process_table's tokens, one per argv element, decoded once here. The empty element is decoded by
   # name: given output that \c leaves empty, bash 3.2's `printf -v` assigns whatever its previous call
   # printed, so `--model ''` would decode as `--model --model`.
-  CLAUDE_ARGV=()
   IFS=' ' read -r -a enc <<<"$3" || true
   for tok in ${enc[@]+"${enc[@]}"}; do
     case "$tok" in
       '\c') dec="" ;;
       *) printf -v dec '%b' "$tok" ;;
     esac
-    CLAUDE_ARGV+=("$dec")
+    argv+=("$dec")
   done
-  [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] claude argv:$(printf ' %q' ${CLAUDE_ARGV[@]+"${CLAUDE_ARGV[@]}"})"
-  FLAGS=$(_claude_flags ${CLAUDE_ARGV[@]+"${CLAUDE_ARGV[@]}"}) || rc=$?
+  [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] claude argv:$(printf ' %q' ${argv[@]+"${argv[@]}"})"
+  FLAGS=$(_claude_flags ${argv[@]+"${argv[@]}"}) || rc=$?
   [ "$rc" -ne 2 ] \
     || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
   [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
