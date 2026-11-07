@@ -13,7 +13,7 @@ Read every pending review finding on the PR, **post your plan on each thread fir
 
 ```python
 # Load the provider once at the start of the loop
-import github_threads, provider_loader
+import provider_loader
 provider = provider_loader.get()  # reads provider.json, validates CAPABILITIES
 # or pin one explicitly for this session: provider_loader.get("local")
 ```
@@ -145,8 +145,8 @@ For **each** unresolved finding, before writing any code: open the file at `file
 
 **Post a comment on the thread stating your plan for this finding** — what you'll do and why. This comment goes on every finding, valid or not; it is the durable record of the decision.
 
-```python
-github_threads.reply(THREAD_ID, "Plan: ...")
+```bash
+${CLAUDE_PLUGIN_ROOT}/skills/address-pr-reviews/bin/review reply "$THREAD_ID" --body "Plan: ..."
 ```
 
 The classification carries **one discriminator: does addressing this finding require a code change this round?**
@@ -195,8 +195,8 @@ Pushing triggers re-review for providers that auto-fire on push (`trigger: False
 
 The fix now exists in a pushed commit. For **each** finding in the change-needed set: post a comment on its thread describing the fix (reference the commit), then resolve it.
 
-```python
-github_threads.reply(THREAD_ID, "Fixed in <sha>: ...")
+```bash
+${CLAUDE_PLUGIN_ROOT}/skills/address-pr-reviews/bin/review reply "$THREAD_ID" --body "Fixed in <sha>: ..."
 ```
 
 ```python

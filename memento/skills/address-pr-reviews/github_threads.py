@@ -214,8 +214,8 @@ def resolve(thread_id: str) -> dict:
     payload = (data.get("data") or {}).get("resolveReviewThread") or {}
     if (payload.get("thread") or {}).get("isResolved") is not True:
         raise RuntimeError(
-            f"resolveReviewThread did not confirm resolution for {thread_id} "
-            f"(response: {data!r}). The thread is NOT resolved — do not move on."
+            f"resolveReviewThread did not confirm resolution for {thread_id}. "
+            f"The thread is NOT resolved — do not move on. Response: {data!r}"
         )
     return {"thread_id": thread_id, "is_resolved": True}
 
@@ -228,8 +228,8 @@ def reply(thread_id: str, body: str) -> dict:
     comment_id = (payload.get("comment") or {}).get("id")
     if not comment_id:
         raise RuntimeError(
-            f"addPullRequestReviewThreadReply returned no comment id for {thread_id} "
-            f"(response: {data!r}). The reply was NOT posted."
+            f"addPullRequestReviewThreadReply returned no comment id for {thread_id}. "
+            f"The reply was NOT posted. Response: {data!r}"
         )
     return {"thread_id": thread_id, "comment_id": comment_id}
 
