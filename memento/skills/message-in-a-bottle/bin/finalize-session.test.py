@@ -1010,6 +1010,13 @@ try:
           and identity_names(done, NEST_AS_CLAUDE),
           f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
           f"out={done.stdout!r} err={done.stderr!r}")
+    # A pane is this session's only when its own claude sits at or below it. The named
+    # claude is not under the chain's pane, and no other claude is planted, so only the
+    # pane rule keeps the handoff out of that pane.
+    done = run(claude_pid=NAMED_CLAUDE.pid, claude_at=[])
+    check("a pane the walk reaches without passing the $CLAUDE_PID claude is not this session's",
+          picked(done) == DETACHED and f"claude_pid={NAMED_CLAUDE.pid} " in done.stdout,
+          f"named={NAMED_CLAUDE.pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 finally:
     os.killpg(NAMED_CLAUDE.pid, 15)
     NAMED_CLAUDE.wait()
