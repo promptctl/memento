@@ -125,7 +125,7 @@ class Provider:
         self.dismiss_review = self._github.dismiss_review
 
     def fetch(self, pr_url: str) -> dict:
-        """Returns every pending finding: inline review threads plus body findings from blocking
+        """Returns every finding, resolved or not: inline review threads plus body findings from blocking
         reviews."""
         data = self._github.fetch(pr_url)
         data["findings"].extend(body_findings(self._github.bot_reviews(pr_url)))

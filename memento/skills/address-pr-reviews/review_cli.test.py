@@ -44,12 +44,12 @@ def provider_returning(result):
 
 
 def wait_with(**fields):
-    result = {"status": "completed", "sha": "ccc", "poll_errors": [], **fields}
+    result = {"status": "completed", "sha": "c" * 40, "poll_errors": [], **fields}
     return cli.cmd_wait(provider_returning(result), None, ARGS)
 
 
 got, failure = wait_with(conclusion="success")
-check("success: no failure", failure is None and got["sha"] == "ccc", f"got {failure!r}")
+check("success: no failure", failure is None and got["sha"] == "c" * 40, f"got {failure!r}")
 
 got, failure = wait_with(conclusion="failure")
 check("non-success conclusion: fails naming the conclusion and the run",
@@ -121,9 +121,9 @@ def pr_with_one_thread(args):
     raise AssertionError(f"unexpected gh call: {args}")
 
 
-def waited(conclusion):
-    """The JSON `review wait` prints, for a review of a commit that is not the head."""
-    return json.dumps({"status": "completed", "conclusion": conclusion, "sha": "0" * 40,
+def waited(conclusion, sha="0" * 40):
+    """The JSON `review wait` prints; by default for a review of a commit that is not the head."""
+    return json.dumps({"status": "completed", "conclusion": conclusion, "sha": sha,
                        "url": "https://run", "poll_errors": []})
 
 
@@ -138,11 +138,37 @@ code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fet
 check("fetch: refused without the review wait printed, before any gh call",
       code == 2 and "--review" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
 
-for name, given, says in [("a failed review", waited("failure"), "not success"),
-                          ("a --review that is not JSON", "0" * 40, "ERROR (fetch)")]:
-    code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--review", given)
-    check(f"fetch: {name} exits 1, saying why, before any gh call",
-          code == 1 and says in err and not calls, f"code={code} err={err!r} calls={calls!r}")
+for name, given, says in [
+    ("a failed review", waited("failure"), "not success"),
+    ("a --review that is not JSON", "0" * 40, "ERROR (fetch)"),
+    ("a --review that is a bare sha string", json.dumps("0" * 40), "the object wait returned"),
+    ("a --review that is null", "null", "the object wait returned"),
+    ("a review whose sha is null", json.dumps({"conclusion": "success", "sha": None}), "not a full lowercase"),
+    ("a failed review with no url", json.dumps({"conclusion": "failure", "sha": "0" * 40}), "not success"),
+]:
+    for ref in [PR, "7"]:  # a bare number would cost a gh pr view; the review is refused before it
+        code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", ref, "--review", given)
+        check(f"fetch {ref}: {name} exits 1, saying why, before any gh call",
+              code == 1 and says in err and not calls, f"code={code} err={err!r} calls={calls!r}")
+
+HEAD = "d" * 40
+
+
+def clean_pr_at_head(args):
+    if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
+        return HEAD
+    if args[:2] == ["api", "graphql"]:
+        return json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}})
+    if args[:3] == ["api", "--paginate", "repos/o/r/pulls/7/reviews"]:
+        return ""
+    raise AssertionError(f"unexpected gh call: {args}")
+
+
+code, out, err, _ = run_cli(clean_pr_at_head, "--provider", "action", "fetch", PR,
+                            "--review", waited("success", sha=HEAD))
+check("fetch: the head wait reviewed, with nothing pending, prints done",
+      code == 0 and json.loads(out)["done"] is True, f"code={code} out={out!r} err={err!r}")
 
 code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

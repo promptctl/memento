@@ -27,12 +27,15 @@ def reviewed_sha(review: dict) -> str:
     not empty, or for a sha that is not a full SHA, which would compare unequal to the head on every
     round so the loop never ends. [LAW:parse-dont-validate]
     """
-    if review["conclusion"] != "success":
-        raise ValueError(f"the review concluded {review['conclusion']!r}, not success: "
-                         f"its findings are absent, not empty. Run: {review['url']}")
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", review["sha"]):
-        raise ValueError(f"the review's sha {review['sha']!r} is not a full commit SHA")
-    return review["sha"]
+    if not isinstance(review, dict):
+        raise ValueError(f"a review is the object wait returned, not {review!r}")
+    if review.get("conclusion") != "success":
+        raise ValueError(f"the review concluded {review.get('conclusion')!r}, not success: "
+                         f"its findings are absent, not empty. Run: {review.get('url')}")
+    sha = review.get("sha")
+    if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha)):
+        raise ValueError(f"the review's sha {sha!r} is not a full lowercase commit SHA")
+    return sha
 
 
 def fetch(provider, pr_url: str, review: dict) -> dict:

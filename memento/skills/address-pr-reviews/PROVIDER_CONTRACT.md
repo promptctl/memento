@@ -84,7 +84,7 @@ the commit it covered either way.
 
 ### `fetch(pr_url: str) -> dict`
 
-Returns every pending finding on the PR in canonical form.
+Returns every finding on the PR, resolved or not, in canonical form.
 
 ```python
 # return value

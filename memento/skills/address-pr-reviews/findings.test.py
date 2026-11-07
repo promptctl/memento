@@ -139,8 +139,8 @@ def untouched(url):
 untouched_provider = types.SimpleNamespace(fetch=untouched, head_sha=untouched)
 for name, bad, says in [
     ("a review that concluded failure", review(OLD, conclusion="failure"), "'failure', not success"),
-    ("a short sha", review(OLD[:7]), "not a full commit SHA"),
-    ("an empty sha", review(""), "not a full commit SHA"),
+    ("a short sha", review(OLD[:7]), "not a full lowercase commit SHA"),
+    ("an empty sha", review(""), "not a full lowercase commit SHA"),
 ]:
     try:
         findings.fetch(untouched_provider, PR, bad)
