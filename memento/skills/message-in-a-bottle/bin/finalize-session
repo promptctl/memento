@@ -595,8 +595,8 @@ case "$MODE" in
         _refuse "this session is hosted by a claude daemon, so no pane or iTerm2
 session shows it, and the detached transport needs a tmux binary; none is installed."
       fi
-      _refuse "no owned tmux pane, no reachable iTerm2 session, and no tmux binary to start a
-detached window with. Nothing on this machine to deliver the close-out into."
+      _refuse "no owned tmux pane, no reachable iTerm2 session, and no tmux binary to start a detached window with.
+Nothing on this machine to deliver the close-out into."
       # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
     fi
     ;;

@@ -1081,8 +1081,8 @@ check("a server with no panes falls to the detached transport", picked(done) == 
 done = run(tmux_on_path=False)
 check("tmux absent from PATH: this is the one true decline - nothing left to spawn a window with",
       picked(done) == DECLINED, picked(done))
-# The exit code is the whole no-transport report. It is pinned once here, against the
-# sole remaining decline case, rather than beside every refused-pane case below.
+# The exit code is the no-transport report a caller acts on. It is pinned once here,
+# against the sole remaining decline case, rather than beside every refused-pane case below.
 check("declining is reported by exit code, not by prose alone",
       done.returncode == NO_TRANSPORT_RC, f"rc={done.returncode}")
 # The decline is the documented recovery route: the handoff is recorded and provably
