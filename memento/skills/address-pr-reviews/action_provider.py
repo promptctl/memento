@@ -24,9 +24,9 @@ REGISTER_TIMEOUT_S = 300
 COMPLETION_TIMEOUT_S = 3600
 POLL_INTERVAL_S = 8
 # How long every runs poll may fail, measured from the last one that succeeded (or the start of the
-# wait), before wait gives up on gh rather than on the review. Two killed calls' worth, so one hung
-# poll is ridden out like any other failure.
-OUTAGE_TIMEOUT_S = 2 * github_threads.GH_TIMEOUT_S
+# wait), before wait gives up on gh rather than on the review: long enough to ride out a network
+# reconnect or a short GitHub incident, and longer than one killed gh call.
+OUTAGE_TIMEOUT_S = 300
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ class Provider:
             self._clock.sleep(POLL_INTERVAL_S)
         # A deadline raise names the polls that failed, so a flaky gh is not read as a missing workflow.
         failed_polls = (
-            f" {len(poll_errors)} polls failed along the way; the last: {poll_errors[-1]}"
+            f" Polls that failed along the way: {len(poll_errors)}; the last: {poll_errors[-1]}"
             if poll_errors else ""
         )
         if run is None:

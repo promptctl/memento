@@ -23,7 +23,7 @@ Runner = Callable[[Sequence[str]], Outcome]
 
 # How long one gh call may run. A gh stalled on a dead connection never exits, and a call that never
 # returns is a failure no caller's deadline can see. A healthy call takes seconds.
-GH_TIMEOUT_S = 30
+GH_TIMEOUT_S = 60
 
 
 def run_gh(args: Sequence[str]) -> Outcome:
