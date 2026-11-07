@@ -1090,6 +1090,12 @@ check("declining is reported by exit code, not by prose alone",
 # a refactor could drop the interpolation while the exit code stays intact.
 check("and it still says the handoff is preserved, and where",
       "NOT delivered" in done.stderr and ".md" in done.stderr, f"err={done.stderr!r}")
+# The decline names each absence the branch is reached on, so the reader knows which of
+# the three transports to provide.
+check("and it names the three absences: owned pane, iTerm2 session, tmux binary",
+      all(absence in done.stderr for absence in
+          ("no owned tmux pane", "no reachable iTerm2 session", "no tmux binary")),
+      f"err={done.stderr!r}")
 
 # A live pane owned by a process that no ancestor accounts for must be refused, not
 # claimed. Every other pane in the suite is dead, outside the ancestry, or out of the
