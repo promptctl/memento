@@ -83,7 +83,7 @@ _THREADS_QUERY = (
     "    pullRequest(number:$num){"
     "      reviewThreads(first:100,after:$cursor){"
     "        pageInfo{ hasNextPage endCursor }"
-    "        nodes{ id isResolved path originalLine"
+    "        nodes{ id isResolved path originalStartLine originalLine"
     "          comments(first:100){"
     "            pageInfo{ hasNextPage endCursor }"
     "            nodes{ author{login} body originalCommit{oid} } } } } } } }"
@@ -94,7 +94,7 @@ _COMMENTS_QUERY = (
     "  node(id:$id){ ... on PullRequestReviewThread {"
     "    comments(first:100,after:$cursor){"
     "      pageInfo{ hasNextPage endCursor }"
-    "      nodes{ author{login} body } } } } }"
+    "      nodes{ author{login} body originalCommit{oid} } } } } }"
 )
 
 
@@ -154,17 +154,19 @@ def _build_findings(threads: list[dict]) -> list[dict]:
 
     A thread's finding is its first comment, so its `commit_id` is the commit that comment was made
     on. GitHub names none for a commit it no longer has, and a thread with no comments has none. Its
-    line is `originalLine`, the line at that same commit: the thread's `line` is GitHub's mapping onto
-    the latest commit, null once the thread is outdated, so it would name a line from another commit.
+    lines are `originalStartLine`..`originalLine`, the range at that same commit: the thread's `line` is
+    GitHub's mapping onto the latest commit, null once the thread is outdated, so it would name a line
+    from another commit. GitHub gives a single-line comment no start line; its range is its one line.
     """
     findings = []
     for t in threads:
         nodes = t.get("comments", {}).get("nodes") or []
         first = nodes[0] if nodes else {}
+        end = t.get("originalLine")
         findings.append({
             "file":            t.get("path"),
-            "line_start":      t.get("originalLine"),
-            "line_end":        t.get("originalLine"),
+            "line_start":      t.get("originalStartLine") or end,
+            "line_end":        end,
             "body":            first.get("body", ""),
             "author":          (first.get("author") or {}).get("login"),
             "commit_id":       (first.get("originalCommit") or {}).get("oid"),

@@ -95,7 +95,7 @@ Returns every pending finding on the PR in canonical form.
             "line_end":        42,                  # nullable
             "body":            "...",               # required; first comment body
             "author":          "github-actions",    # required
-            "commit_id":       "abc123",            # the commit it was produced against; null if unknown
+            "commit_id":       "abc123",            # full SHA of the commit it was produced against; null if unknown
             "thread_id":       "PRRT_xyz...",       # null for a body finding, or when resolve=False
             "is_resolved":     False,               # required
             "thread_comments": [                    # required; may be one element
@@ -128,7 +128,8 @@ skill owns that judgment.
 
 ### `head_sha(pr_url: str) -> str`
 
-Returns the commit the PR's head is at now.
+Returns the full SHA of the commit the PR's head is at now. `against_head` compares it to each
+`commit_id` exactly, so both are full SHAs.
 
 The skill never reads `fetch` directly. It reads `findings.fetch(provider, pr_url)`, which calls
 `fetch` and then `head_sha` — in that order, so a push between them can only make a finding read as

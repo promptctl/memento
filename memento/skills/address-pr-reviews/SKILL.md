@@ -144,7 +144,7 @@ Schema:
 
 ### 3. Plan phase — triage every finding, resolve the no-change ones
 
-For **each** unresolved finding, before writing any code: open the file at `file:line_start`, read `body` and the full `thread_comments` chain, check its `against_head` (step 2), and classify. Classification is the same regardless of `author`:
+For **each** unresolved finding, before writing any code: open the file at `file:line_start` — at `commit_id` for an `"older"` finding (`git show <commit_id>:<file>`), since its lines are lines at that commit — read `body` and the full `thread_comments` chain, check its `against_head` (step 2), and classify. Classification is the same regardless of `author`:
 
 - **valid** — reviewer is right; a fix is coming
 - **different_fix** — reviewer identified a real issue but proposed the wrong fix; a better fix is coming

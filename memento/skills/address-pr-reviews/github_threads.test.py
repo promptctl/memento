@@ -163,7 +163,8 @@ github, fake = install(paged_graphql({
         {**thread_node("t1", [{**comment("bot", "one"), "originalCommit": {"oid": "old"}},
                               {**comment("human", "reply"), "originalCommit": {"oid": "new"}}]),
          "line": 17},
-        thread_node("t2", [{**comment("bot", "two"), "originalCommit": None}]),
+        {**thread_node("t2", [{**comment("bot", "two"), "originalCommit": None}]),
+         "originalStartLine": 3},
         thread_node("t3", []),
     ]),
 }))
@@ -172,9 +173,14 @@ check("commit: a thread is on its first comment's commit; a null or absent commi
       [f["commit_id"] for f in found] == ["old", None, None], f'got {[f["commit_id"] for f in found]}')
 check("commit: a thread's line is its line at that commit, not GitHub's mapping onto the latest",
       (found[0]["line_start"], found[0]["line_end"]) == (7, 7), f"got {found[0]!r}")
-check("commit: the thread query asks for each comment's originalCommit and the thread's originalLine",
-      "originalCommit{oid}" in gh_vars(fake.calls[0])["query"]
-      and "originalLine" in gh_vars(fake.calls[0])["query"], f"got {fake.calls[0]}")
+check("commit: a range comment spans originalStartLine to originalLine",
+      (found[1]["line_start"], found[1]["line_end"]) == (3, 7), f"got {found[1]!r}")
+check("commit: the thread query asks for each comment's originalCommit and the thread's range",
+      all(f in gh_vars(fake.calls[0])["query"]
+          for f in ("originalCommit{oid}", "originalStartLine", "originalLine")),
+      f"got {fake.calls[0]}")
+check("commit: later comment pages carry the same originalCommit as the first",
+      "originalCommit{oid}" in gt._COMMENTS_QUERY, "missing")
 
 
 # --- multi-page comment fetch inside _complete_comments -------------------
