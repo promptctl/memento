@@ -330,11 +330,13 @@ PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
 os.mkdir(PS_ROOT_COMMAND_DIR)
 install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
 
-# The real ps, except that the suite runner's parent reads as pid 1. With no tmux
-# there is no pane to end the hosted check's ancestry walk, so without this the walk
-# would climb past the runner into whatever session launched the suite, and a
-# daemon host there would make every no-tmux case hosted. A host the case plants
-# itself sits below the runner and is still seen.
+# The next ps on PATH, except that the suite runner's parent reads as pid 1. When no
+# pane ends the hosted check's ancestry walk (no tmux, or no pane of the chain's),
+# the walk would otherwise climb past the runner into whatever session launched the
+# suite, and a daemon host there would make the case hosted. A host the case plants
+# itself sits below the runner and is still seen. It delegates to the next ps rather
+# than /bin/ps, so it sits first on every case's PATH and the other ps fixtures
+# still apply behind it.
 PS_RUNNER_IS_TOP = r"""#!/bin/bash
 set -uo pipefail
 fields=""; want=""; prev=""
@@ -343,13 +345,19 @@ for arg in "$@"; do
   [ "$prev" = "-p" ] && want="$arg"
   prev="$arg"
 done
+here=$(cd "$(dirname "$0")" && pwd)
+rest=""
+IFS=: read -ra dirs <<<"$PATH"
+for dir in "${dirs[@]}"; do
+  [ "$dir" = "$here" ] || rest="${rest:+$rest:}$dir"
+done
 if [ "$want" = "$FIXTURE_RUNNER_PID" ]; then
   case "$fields" in
     ppid=) echo 1; exit 0 ;;
-    ppid=,command=) echo "1 $(/bin/ps -o command= -p "$want")"; exit 0 ;;
+    ppid=,command=) cmd=$(PATH="$rest" ps -o command= -p "$want") || exit; echo "1 $cmd"; exit 0 ;;
   esac
 fi
-exec /bin/ps "$@"
+PATH="$rest" exec ps "$@"
 """
 RUNNER_IS_TOP_DIR = os.path.join(FIXTURES, "runneristop")
 os.mkdir(RUNNER_IS_TOP_DIR)
@@ -456,9 +464,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
-    # The tmux-absent case uses NO_TMUX_BIN alone: it must not include REAL_DIRS,
-    # since that is where a packaged tmux would be found.
-    path = [FIXTURES, REAL_DIRS] if tmux_on_path else [RUNNER_IS_TOP_DIR, NO_TMUX_BIN]
+    # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
+    # not include REAL_DIRS, since that is where a packaged tmux would be found.
+    path = [FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN]
     if forge_age is not None:
         path.insert(0, FORGE_DIR)
     if mute_identity:
@@ -471,6 +479,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # claude; the fixture above says why a process that has just exited has both.
     if ps_root_command is not None:
         path.insert(0, PS_ROOT_COMMAND_DIR)
+    path.insert(0, RUNNER_IS_TOP_DIR)
     # The launcher is invoked through a symlinked directory that the fixture `date`
     # deletes on its first call. The symlink is what disappears, not the script file,
     # so the launcher keeps running as it would in the field.
@@ -1105,10 +1114,10 @@ done = run(panes="")
 check("a server with no panes falls to the detached transport", picked(done) == DETACHED, picked(done))
 
 done = run(tmux_on_path=False)
-check("tmux absent from PATH: this is the one true decline - nothing left to spawn a window with",
+check("tmux absent from PATH: an unhosted session declines - nothing left to spawn a window with",
       picked(done) == DECLINED, picked(done))
 # The exit code is the no-transport report a caller acts on. It is pinned once here,
-# against the sole remaining decline case, rather than beside every refused-pane case below.
+# against the unhosted decline, rather than beside every refused-pane case below.
 check("declining is reported by exit code, not by prose alone",
       done.returncode == NO_TRANSPORT_RC, f"rc={done.returncode}")
 # The decline is the documented recovery route: the handoff is recorded and provably
