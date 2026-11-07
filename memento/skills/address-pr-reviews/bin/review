@@ -67,16 +67,18 @@ def cmd_setup_check(provider, github, args) -> tuple[dict, str | None]:
 
 def cmd_wait(provider, github, args) -> tuple[dict, str | None]:
     result = provider.wait(pr_url(github, args.pr))
-    # A non-success conclusion means the reviewer errored, so its findings are absent. The run URL is shown.
-    failure = None if result["conclusion"] == "success" else (
-        f"review run concluded {result['conclusion']!r}, not success — "
-        f"findings are absent, not empty. Run: {result.get('url')}"
-    )
-    return result, failure
+    # [LAW:single-enforcer] the review fetch would refuse is the review wait reports as failed.
+    try:
+        findings.reviewed_sha(result)
+    except ValueError as e:
+        return result, str(e)
+    return result, None
 
 
 def cmd_fetch(provider, github, args) -> tuple[dict, str | None]:
-    return findings.fetch(provider, pr_url(github, args.pr)), None
+    review = json.loads(args.review)
+    findings.reviewed_sha(review)  # refused before pr_url's gh call for a bare PR number
+    return findings.fetch(provider, pr_url(github, args.pr), review), None
 
 
 def cmd_change_requests(provider, github, args) -> tuple[dict, str | None]:
@@ -133,8 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
                  "unless conclusion is success")
     p.add_argument("pr", help="PR URL or number")
 
-    p = add("fetch", cmd_fetch, help="canonical findings JSON, each placed against the head")
+    p = add("fetch", cmd_fetch,
+            help="canonical findings JSON, each placed against the head, and whether the loop is done")
     p.add_argument("pr", help="PR URL or number")
+    p.add_argument("--review", required=True, metavar="JSON",
+                   help="the JSON wait printed, whole: the completed review step 1 waited for")
 
     p = add("change-requests", cmd_change_requests, capability="dismiss_review",
             help="the automated reviewer's blocking CHANGES_REQUESTED reviews")
