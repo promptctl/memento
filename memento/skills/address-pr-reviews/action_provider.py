@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from typing import Optional
 
 import github_threads
-from github_threads import GitHub
+from ports import Ports
 
 # The workflow file this provider watches.
 WORKFLOW_FILE = "code-review.yml"
@@ -97,7 +96,7 @@ def body_findings(reviews: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# The provider: the contract operations over one GitHub client
+# The provider: the contract operations over its ports
 # ---------------------------------------------------------------------------
 
 class Provider:
@@ -108,8 +107,12 @@ class Provider:
         "dismiss_review": True,   # github-actions posts a dismissible CHANGES_REQUESTED review
     }
 
-    def __init__(self, github: GitHub):
+    def __init__(self, ports: Ports):
+        github = ports.github
         self._github = github
+        # [LAW:effects-at-boundaries] wait reads time only through this port, so a test drives its
+        # deadlines on a fake clock.
+        self._clock = ports.clock
         # Taken from the client unchanged. resolve applies to inline threads only, since a body
         # finding has no thread; it is cleared by dismiss_review.
         self.resolve = github.resolve
@@ -167,7 +170,7 @@ class Provider:
         """Block until the GitHub Action run for the current head SHA completes."""
         owner, repo, pr_num = github_threads.parse_pr(pr_url)
         sha = self._github.head_sha(owner, repo, pr_num)
-        start = time.time()
+        start = self._clock.now()
         run: Optional[dict] = None
         while True:
             run = self._latest_run(owner, repo, sha)
@@ -179,9 +182,9 @@ class Provider:
                     "url":        run.get("html_url"),
                 }
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
-            if time.time() - start >= deadline:
+            if self._clock.now() - start >= deadline:
                 break
-            time.sleep(POLL_INTERVAL_S)
+            self._clock.sleep(POLL_INTERVAL_S)
         if run is None:
             raise RuntimeError(
                 f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
@@ -202,7 +205,9 @@ if __name__ == "__main__":
     import argparse
     import sys
 
-    provider = Provider(GitHub(github_threads.run_gh))
+    from ports import production_ports
+
+    provider = Provider(production_ports())
     parser = argparse.ArgumentParser(description="GitHub Action PR review provider (direct)")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("wait", "fetch"):

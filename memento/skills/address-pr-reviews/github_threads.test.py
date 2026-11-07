@@ -20,7 +20,7 @@ _spec = importlib.util.spec_from_file_location(
 gt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gt)
 sys.path.insert(0, HERE)
-from gh_fake import FakeRunner, failed  # noqa: E402
+from fakes import FakeRunner, failed  # noqa: E402
 
 failures = []
 

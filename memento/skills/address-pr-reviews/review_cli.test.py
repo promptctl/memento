@@ -22,7 +22,9 @@ _spec = importlib.util.spec_from_file_location(
 cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)
 sys.path.insert(0, HERE)
-from gh_fake import FakeRunner, failed  # noqa: E402
+import github_threads  # noqa: E402
+from fakes import FakeClock, FakeRunner, failed  # noqa: E402
+from ports import Ports  # noqa: E402
 
 failures = []
 
@@ -63,7 +65,7 @@ def run_cli(handler, *argv):
     sys.argv = ["review", *argv]
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli.main(fake)
+        code = cli.main(Ports(github_threads.GitHub(fake), FakeClock()))
     return code, out.getvalue(), err.getvalue(), fake.calls
 
 

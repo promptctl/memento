@@ -14,10 +14,10 @@ Read every pending review finding on the PR, **post your plan on each thread fir
 ```python
 # Load the provider once at the start of the loop
 import provider_loader
-import github_threads
-github = github_threads.GitHub(github_threads.run_gh)  # every gh call goes through this client
-provider = provider_loader.get(provider_loader.resolve_name(None), github)  # reads provider.json, validates CAPABILITIES
-# or pin one explicitly for this session: provider_loader.get("local", github)
+from ports import production_ports
+ports = production_ports()  # the real gh client and clock every provider operation runs on
+provider = provider_loader.get(provider_loader.resolve_name(None), ports)  # reads provider.json, validates CAPABILITIES
+# or pin one explicitly for this session: provider_loader.get("local", ports)
 ```
 
 ## Setup — derive PR_URL, OWNER, REPO, PR_NUM once

@@ -3,7 +3,7 @@
 
 The provider name comes from an explicit argument, then PR_REVIEW_PROVIDER, then provider.json in
 this directory. The module is `<name>_provider.py` here; its `Provider` class is built with the
-caller's GitHub client and must declare CAPABILITIES and the operations `wait` and `fetch`.
+caller's ports and must declare CAPABILITIES and the operations `wait` and `fetch`.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ SKILL_DIR = Path(__file__).parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from github_threads import GitHub  # noqa: E402
+from ports import Ports  # noqa: E402
 
 CONFIG_FILE = SKILL_DIR / "provider.json"
 
@@ -34,13 +34,13 @@ CAPABILITY_FUNCS = {
 REQUIRED_CAPABILITIES = set(CAPABILITY_FUNCS)
 
 
-def get(name: str, github: GitHub) -> object:
-    """Returns the provider `name` names, built with `github` and validated against the contract.
+def get(name: str, ports: Ports) -> object:
+    """Returns the provider `name` names, built with `ports` and validated against the contract.
 
-    `resolve_name` says which name is configured. The caller builds `github`, so each entry point
-    is the one place that decides which gh its provider runs.
+    `resolve_name` says which name is configured. The caller builds `ports`, so each entry point
+    is the one place that decides which gh and which clock its provider runs on.
     """
-    provider = _provider_class(name)(github)
+    provider = _provider_class(name)(ports)
     _validate(provider, name)
     return provider
 
@@ -114,11 +114,11 @@ def _available() -> list[str]:
 
 
 if __name__ == "__main__":
-    import github_threads
+    from ports import production_ports
 
     try:
         name = resolve_name(None)
-        p = get(name, GitHub(github_threads.run_gh))
+        p = get(name, production_ports())
         print(f"Active provider: {name}")
         print(f"Capabilities:    {p.CAPABILITIES}")
     except RuntimeError as e:

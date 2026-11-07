@@ -8,17 +8,19 @@ provider means writing one module; no changes to the skill are required.
 
 Every provider module lives in the same directory as this file and is named
 `<name>_provider.py`. It exposes one class, `Provider`, whose constructor takes
-a `github_threads.GitHub` client, and which has:
+a `ports.Ports`, the ports a provider is built with, and which has:
 
 - A `CAPABILITIES` dict class attribute (see below).
 - The operations its capabilities declare as supported.
 - `wait` and `fetch`, which are always required.
 
-Every gh call a provider makes goes through that client, and the client runs
-gh through the one `Runner` it was built with. The caller builds the client:
-`github_threads.GitHub(github_threads.run_gh)` for real gh, or a client over
-`gh_fake.FakeRunner` in a test. The loader (`provider_loader.get(name, github)`)
-imports the module, builds `Provider(github)`, validates it against
+Every gh call a provider makes goes through `ports.github`, a
+`github_threads.GitHub` client that runs gh through the one `Runner` it was
+built with, and every read of time or wait goes through `ports.clock`. The
+caller builds the ports: `ports.production_ports()` for real gh and the real
+clock, or `Ports(GitHub(fakes.FakeRunner(...)), fakes.FakeClock())` in a test.
+The loader (`provider_loader.get(name, ports)`) imports the module, builds
+`Provider(ports)`, validates it against
 `CAPABILITIES`, and returns it. `provider_loader.resolve_name(name)` says which
 provider that is. The skill calls the operations on the returned provider — no
 base class, no dynamic dispatch beyond the import.
@@ -210,10 +212,11 @@ that is a silent failure. `[LAW:no-silent-failure]`
 
 ## Adding a new provider
 
-1. Create `<name>_provider.py` in this directory, defining `Provider(github)`.
+1. Create `<name>_provider.py` in this directory, defining `Provider(ports)`.
 2. Set `Provider.CAPABILITIES` accurately — don't declare a capability unless
    the operation is implemented.
 3. Implement `wait` and `fetch` (always required) plus any declared optional
-   operations, making every gh call through the `github` client.
+   operations, making every gh call through `ports.github` and reading time
+   only through `ports.clock`.
 4. Set `provider.json` to `{"provider": "<name>"}` to activate it.
 5. Test `wait` + `fetch` against a real PR before declaring it production-ready.
