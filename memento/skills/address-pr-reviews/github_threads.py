@@ -37,13 +37,29 @@ def gh(*args: str) -> str:
             ["gh", *args], text=True, stderr=subprocess.PIPE
         ).strip()
     except CalledProcessError as e:
-        # `gh api` prints the API's error body on stdout. It says why GitHub refused, which
-        # gh's one-line stderr does not.
         reason = f"exited {e.returncode}: {e.stderr.strip() or '(no stderr)'}"
-        body = e.output.strip()
-        raise GhError(command, f"{reason} Response: {body}" if body else reason) from e
+        errors = _response_errors(e.output)
+        raise GhError(command, f"{reason} Response: {errors}" if errors else reason) from e
     except OSError as e:
         raise GhError(command, f"could not be run: {e}") from e
+
+
+def _response_errors(stdout: str) -> dict:
+    """Returns the `message` and `errors` fields of the last API response gh printed, and none of its
+    data.
+
+    They say why GitHub refused, which gh's one-line stderr does not. gh prints that response last:
+    after the pages a `--paginate` read before failing, and alongside the partial `data` of a GraphQL
+    response with errors, which can run to kilobytes.
+    """
+    lines = stdout.strip().splitlines()
+    try:
+        response = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(response, dict):
+        return {}
+    return {k: response[k] for k in ("message", "errors") if k in response}
 
 
 def parse_pr(url: str) -> tuple[str, str, int]:

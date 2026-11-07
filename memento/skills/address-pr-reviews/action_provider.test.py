@@ -199,7 +199,7 @@ check("fetch: exactly the two findings, threads then body",
 def workflow_list(matches):
     """A gh whose workflow list, filtered to code-review.yml by the jq, emits `matches`."""
     def handler(args):
-        assert args[:3] == ["api", "--paginate", "repos/o/r/actions/workflows"], args
+        assert args[:3] == ["api", "--paginate", "repos/o/r/actions/workflows?per_page=100"], args
         assert '.path == ".github/workflows/code-review.yml"' in args[4], args
         return "\n".join(json.dumps({"state": s}) for s in matches)
     return handler
@@ -227,7 +227,7 @@ try:
     check_result = ap.setup_check("o", "r")
 except gt.GhError as e:
     check("setup_check: an unreadable repo raises, not 'not installed'",
-          "Not Found (HTTP 404)" in str(e) and '"status":"404"' in str(e), f"message {str(e)!r}")
+          "Not Found (HTTP 404)" in str(e) and "'message': 'Not Found'" in str(e), f"message {str(e)!r}")
 else:
     check("setup_check: an unreadable repo raises, not 'not installed'", False,
           f"returned {check_result!r}")

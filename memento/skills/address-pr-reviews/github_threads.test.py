@@ -518,6 +518,26 @@ check_raises("gh failure: a flag before the endpoint does not hide the endpoint"
              must_mention=("gh api --paginate repos/o/r/pulls/5/reviews exited 1",))
 
 
+def failing_second_page(args):
+    page_one = '{"review_id": 1, "body": "a long review body read before the failure"}'
+    refusal = '{"message":"Validation Failed","errors":[{"code":"invalid"}],"documentation_url":"https://x"}'
+    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Validation Failed (HTTP 422)\n",
+                                output=f"{page_one}\n{refusal}")
+
+
+install(failing_second_page)
+try:
+    gt.paginated("repos/o/r/pulls/5/reviews", ".[]")
+except gt.GhError as e:
+    check("gh failure: carries the refusal's message and errors, not the pages read before it",
+          "'message': 'Validation Failed'" in str(e) and "'code': 'invalid'" in str(e)
+          and "read before the failure" not in str(e) and "documentation_url" not in str(e),
+          f"message {str(e)!r}")
+else:
+    check("gh failure: carries the refusal's message and errors, not the pages read before it",
+          False, "did not raise")
+
+
 def silent_gh(args):
     raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="")
 

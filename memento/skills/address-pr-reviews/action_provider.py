@@ -142,11 +142,11 @@ def setup_check(owner: str, repo: str) -> dict:
     a missing workflow, a missing repo, and a repo the token cannot see alike. Here an absent
     workflow is an empty match, and every gh failure raises. [LAW:no-silent-failure]
     """
-    states = [w["state"] for w in github_threads.paginated(
-        f"repos/{owner}/{repo}/actions/workflows",
+    state = next((w["state"] for w in github_threads.paginated(
+        f"repos/{owner}/{repo}/actions/workflows?per_page=100",
         f'.workflows[] | select(.path == ".github/workflows/{WORKFLOW_FILE}") | {{state}}',
-    )]
-    if not states:
+    )), None)
+    if state is None:
         return {
             "installed": False,
             "message": (
@@ -155,12 +155,12 @@ def setup_check(owner: str, repo: str) -> dict:
                 "repo and merge it to the default branch first."
             ),
         }
-    if states == ["active"]:
+    if state == "active":
         return {"installed": True, "message": f"{WORKFLOW_FILE} is active"}
     return {
         "installed": False,
         "message": (
-            f"{WORKFLOW_FILE} exists but state is {states} — "
+            f"{WORKFLOW_FILE} exists but state is '{state}' — "
             "check Actions settings on this repo."
         ),
     }
