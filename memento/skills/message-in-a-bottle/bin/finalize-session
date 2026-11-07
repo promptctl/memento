@@ -230,8 +230,8 @@ _pane_target() {
 # model, and the skip-permissions toggles. Each dropped flag is dropped with its values. The scan stops
 # at the first positional argument, which is the prompt.
 #
-# The list cannot be complete: the daemon writes hidden flags (`--reply-on-resume`, `--proactivity`) and copies in the
-# parent session's own. A flag not on the list is skipped when the token after it is a flag or there is
+# The list cannot be complete: hidden flags appear in no `claude --help`, and the daemon copies a parent
+# session's own flags into the argv of the session it forks. A flag not on the list is skipped when the token after it is a flag or there is
 # none, since then it has no value whatever its arity. Followed by anything else it fails with exit 1 and
 # is named on stderr, since the scan cannot tell whether that token is its value or the prompt. Adding the
 # flag to the table with its arity fixes that.

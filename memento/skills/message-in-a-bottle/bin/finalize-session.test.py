@@ -988,6 +988,15 @@ check("the daemon's --bg-pty-host process is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
+# An unlisted flag followed by a flag is skipped, so the scan still reaches the
+# classifier behind it rather than calling the process an unreadable session.
+for classifier, label in (("--print", "headless"), ("--bg-pty-host /tmp/cc-daemon/pty/a.sock", "pty host")):
+    done = run(panes=None, forge_command=f"/x/claude --frobnicate {classifier}")
+    check(f"an unlisted flag before {classifier.split()[0]} still reads the process as a {label}, not a session",
+          f"claude_pid={done.root_pid} " not in done.stdout
+          and f"cannot read the flags of claude process {done.root_pid}" not in done.stderr,
+          f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
 # The headless check reads only the flag region. A session started from a prior
 # handoff carries that handoff as its positional prompt, unquoted in ps output, and
 # the prompt can contain `--print` in prose.
