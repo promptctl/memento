@@ -929,6 +929,12 @@ done = run(depth=17, rehost_at=17, claude_at=[16], tmux_pane="%99", host_keeps_t
            host_as=UNREADABLE_HOST, export_claude_pid=True)
 check("a claude parent of $CLAUDE_PID makes the session hosted beyond the walk's reach",
       picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The same, with $CLAUDE_PID on the walk's last hop: the walk passes it and ends at its
+# bound before reaching the host.
+done = run(depth=15, rehost_at=15, claude_at=[14], tmux_pane="%99", host_keeps_tmux=True,
+           host_as=UNREADABLE_HOST, export_claude_pid=True)
+check("a claude parent of a $CLAUDE_PID on the walk's last hop makes the session hosted",
+      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The relaunch target is the same own claude the hosted walk reads. Without $CLAUDE_PID,
 # a headless claude started inside an interactive session's shell is this process's own
 # claude, and the interactive one above it is another session, never relaunched in its place.
@@ -1011,11 +1017,13 @@ try:
           f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
           f"out={done.stdout!r} err={done.stderr!r}")
     # A pane is this session's only when its own claude sits at or below it. The named
-    # claude is not under the chain's pane, and no other claude is planted, so only the
-    # pane rule keeps the handoff out of that pane.
+    # claude is not under the chain's pane, and no other claude is planted, so the walk
+    # has shown $CLAUDE_PID contradicts the tree: neither the pane nor the named claude
+    # is taken, and the named claude is not relaunched.
     done = run(claude_pid=NAMED_CLAUDE.pid, claude_at=[])
-    check("a pane the walk reaches without passing the $CLAUDE_PID claude is not this session's",
-          picked(done) == DETACHED and f"claude_pid={NAMED_CLAUDE.pid} " in done.stdout,
+    check("a pane the walk reaches without passing the $CLAUDE_PID claude is refused, not taken or relaunched",
+          done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+          and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout and picked(done) != "%99",
           f"named={NAMED_CLAUDE.pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 finally:
     os.killpg(NAMED_CLAUDE.pid, 15)
@@ -1031,25 +1039,31 @@ check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
       and "cannot locate the claude process" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
+def refused_as_not_a_session(done):
+    """The own claude, the planted hop, was refused as no session to relaunch."""
+    return (done.returncode == NO_TRANSPORT_RC
+            and f"claude process {done.root_pid} is not an interactive session" in done.stderr
+            and f"claude_pid={done.root_pid} " not in done.stdout)
+
+
 # A `--print` claude is a headless SDK bridge with no input box, so a fresh tmux
 # window cannot stand in for it. Relaunching it interactively would sever the remote
-# client driving it. The command line is forged onto the planted hop.
+# client driving it. The command line is forged onto the planted hop, which is the own
+# claude, so it is refused rather than exchanged for a claude further up.
 done = run(panes=None, forge_command=(
     "/x/claude/versions/2.1.283 --print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_1"
     " --session-id cse_1 --input-format stream-json --model claude-opus-5-5"))
 check("a headless (--print) claude is not a session to relaunch",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The daemon's pty host runs the same binary, and the ancestry walk meets it after
-# declining a session. Terminating the host would take every session it hosts, so it
-# is declined by its flags too. Both walks continue into the runner's ancestry, so the
-# assertion is only that the planted pid was not picked.
+# The daemon's pty host runs the same binary. Terminating it would take every session
+# it hosts, so it is refused by its flags.
 done = run(panes=None, forge_command=(
     "/x/claude --bg-pty-host /tmp/cc-daemon/pty/a.sock 148 38 --"
     " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions"))
 check("the daemon's --bg-pty-host process is not a session to relaunch",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An unlisted long flag followed by a flag is skipped, so the scan still reaches the
@@ -1057,8 +1071,7 @@ check("the daemon's --bg-pty-host process is not a session to relaunch",
 for classifier in ("--print", "--bg-pty-host /tmp/cc-daemon/pty/a.sock"):
     done = run(panes=None, forge_command=f"/x/claude --frobnicate {classifier}")
     check(f"an unlisted flag before {classifier.split()[0]} does not make the process a session",
-          f"claude_pid={done.root_pid} " not in done.stdout
-          and f"cannot read the flags of claude process {done.root_pid}" not in done.stderr,
+          refused_as_not_a_session(done),
           f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An unlisted short flag may be a cluster hiding `-p` (`-cp` is `-c -p`), so it is
@@ -1168,18 +1181,18 @@ check("an unlisted flag followed by a non-flag is a refusal naming both, not a g
       and "--frobnicate" in done.stderr and "'maybe'" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# The daemon itself: a subcommand where a session's prompt would be. The walk passes it
-# like the pty host it spawns, so the assertion has the same shape.
+# The daemon itself: a subcommand where a session's prompt would be. It is refused
+# like the pty host it spawns.
 done = run(panes=None, forge_command="/x/claude daemon run")
 check("a claude subcommand (daemon run) is not a session to relaunch",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # A pre-warmed spare, as ps shows one live: its subcommand spelling must not be read
 # as the prompt.
 done = run(panes=None, forge_command="/x/claude bg-spare --bg-spare /tmp/cc/spare/b3.claim.sock")
 check("a daemon spare (bg-spare --bg-spare) is not a session to relaunch",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A host subcommand counts only with its own follow-up token; a prompt that merely
 # starts with the word is a session's prompt.
@@ -1239,8 +1252,8 @@ check("and it names the three absences: owned pane, iTerm2 session, tmux binary"
 # A hosted session with no tmux declines for its own reason: the host, not a missing
 # pane, is why no pane or iTerm2 session can show it.
 done = run(tmux_on_path=False, outer_host=True)
-check("a hosted session with no tmux binary declines, naming the daemon host as the reason",
-      done.returncode == NO_TRANSPORT_RC and "hosted by a claude daemon" in done.stderr
+check("a hosted session with no tmux binary declines, naming the host as the reason",
+      done.returncode == NO_TRANSPORT_RC and "hosted by another claude" in done.stderr
       and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 
 # A live pane owned by a process that no ancestor accounts for must be refused, not
