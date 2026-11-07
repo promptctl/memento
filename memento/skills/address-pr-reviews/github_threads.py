@@ -7,16 +7,59 @@ are defined here once, so providers that post review threads import them instead
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import subprocess
+# The handler names the class directly: tests replace `subprocess` with a fake that has no such attribute.
+from subprocess import CalledProcessError
+
+
+class GhError(RuntimeError):
+    """A `gh` call that failed. The message names the command and says why."""
+
+    def __init__(self, command: str, reason: str):
+        super().__init__(f"gh {command} {reason}")
+
+
+# Flags whose value follows them. A value can be a whole query or reply body, which would bury the
+# stderr that says why the call failed, so a failed command is named by the words before the first of
+# these: the subcommand, the endpoint, and any bare flags among them.
+_VALUE_FLAGS = frozenset({"-f", "--raw-field", "-F", "--field", "--input", "-q", "--jq"})
 
 
 def gh(*args: str) -> str:
-    """Runs `gh` with the given arguments and returns its stripped stdout."""
-    return subprocess.check_output(
-        ["gh", *args], text=True, stderr=subprocess.PIPE
-    ).strip()
+    """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it fails.
+    """
+    command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
+    try:
+        return subprocess.check_output(
+            ["gh", *args], text=True, stderr=subprocess.PIPE
+        ).strip()
+    except CalledProcessError as e:
+        reason = f"exited {e.returncode}: {e.stderr.strip() or '(no stderr)'}"
+        errors = _response_errors(e.output)
+        raise GhError(command, f"{reason} Response: {errors}" if errors else reason) from e
+    except OSError as e:
+        raise GhError(command, f"could not be run: {e}") from e
+
+
+def _response_errors(stdout: str) -> dict:
+    """Returns the `message` and `errors` fields of the last API response gh printed, and none of its
+    data.
+
+    They say why GitHub refused, which gh's one-line stderr does not. gh prints that response last:
+    after the pages a `--paginate` read before failing, and alongside the partial `data` of a GraphQL
+    response with errors, which can run to kilobytes.
+    """
+    lines = stdout.strip().splitlines()
+    try:
+        response = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(response, dict):
+        return {}
+    return {k: response[k] for k in ("message", "errors") if k in response}
 
 
 def parse_pr(url: str) -> tuple[str, str, int]:

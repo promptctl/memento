@@ -66,6 +66,8 @@ class ReplyGh:
 
     def check_output(self, argv, text=True, stderr=None):
         self.calls.append(argv)
+        if isinstance(self.response, BaseException):
+            raise self.response
         return self.response
 
 
@@ -91,6 +93,13 @@ check("reply: a posted comment prints its id and exits 0",
 code, out, err, _ = run_reply(UNPOSTED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
 check("reply: no comment id exits 1 saying NOT posted",
       code == 1 and "NOT posted" in err, f"code={code} err={err!r}")
+
+GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_abc'. (node)"
+GH_FAILED = cli.github_threads.CalledProcessError(1, ["gh"], output="", stderr=GH_STDERR + "\n")
+code, out, err, _ = run_reply(GH_FAILED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
+check("reply: a failed gh call exits 1 printing gh's stderr",
+      code == 1 and err == f"ERROR (reply): gh api graphql exited 1: {GH_STDERR}\n",
+      f"code={code} err={err!r}")
 
 code, out, err, calls = run_reply(POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

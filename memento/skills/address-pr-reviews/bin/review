@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -178,10 +177,6 @@ def main() -> int:
                 f"'{args.command}': CAPABILITIES[{args.capability!r}] is False."
             )
         payload, failure = args.func(provider, args)
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or "").strip() or str(e)
-        print(f"ERROR ({args.command}): {detail}", file=sys.stderr)
-        return 1
     except (RuntimeError, ValueError, NotImplementedError, KeyError) as e:
         print(f"ERROR ({args.command}): {e}", file=sys.stderr)
         return 1

@@ -194,5 +194,44 @@ check("fetch: exactly the two findings, threads then body",
       [f["thread_id"] for f in findings] == ["t1", None], f"got {findings!r}")
 
 
+# --- setup_check: reads the workflow list; absent is not installed, a gh failure raises ---
+
+def workflow_list(matches):
+    """A gh whose workflow list, filtered to code-review.yml by the jq, emits `matches`."""
+    def handler(args):
+        assert args[:3] == ["api", "--paginate", "repos/o/r/actions/workflows?per_page=100"], args
+        assert '.path == ".github/workflows/code-review.yml"' in args[4], args
+        return "\n".join(json.dumps({"state": s}) for s in matches)
+    return handler
+
+
+for label, matches, installed, mention in [
+    ("active is installed", ["active"], True, "is active"),
+    ("absent is not installed, pointing at setup", [], False, "run the agent-code-review-setup skill"),
+    ("disabled is not installed, naming the state", ["disabled_manually"], False, "disabled_manually"),
+]:
+    gt.subprocess = FakeGh(workflow_list(matches))
+    check_result = ap.setup_check("o", "r")
+    check(f"setup_check: {label}",
+          check_result["installed"] is installed and mention in check_result["message"],
+          f"got {check_result!r}")
+
+
+def repo_not_found(args):
+    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Not Found (HTTP 404)\n",
+                                output='{"message":"Not Found","status":"404"}')
+
+
+gt.subprocess = FakeGh(repo_not_found)
+try:
+    check_result = ap.setup_check("o", "r")
+except gt.GhError as e:
+    check("setup_check: an unreadable repo raises, not 'not installed'",
+          "Not Found (HTTP 404)" in str(e) and "'message': 'Not Found'" in str(e), f"message {str(e)!r}")
+else:
+    check("setup_check: an unreadable repo raises, not 'not installed'", False,
+          f"returned {check_result!r}")
+
+
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)

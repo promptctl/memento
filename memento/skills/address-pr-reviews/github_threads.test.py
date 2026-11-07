@@ -489,6 +489,75 @@ for label, response in [
                  must_mention=("T_abc", "NOT posted"))
 
 
+# --- a failed gh call: the error says why, and does not echo the reply ---
+
+GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_gone'. (node)"
+
+
+def failing_gh(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr=GH_STDERR + "\n")
+
+
+install(failing_gh)
+check_raises("gh failure: resolve raises GhError carrying gh's stderr",
+             gt.GhError, lambda: gt.resolve("T_gone"),
+             must_mention=("gh api graphql exited 1", GH_STDERR))
+
+install(failing_gh)
+try:
+    gt.reply("T_gone", "a long reply body that must not be echoed")
+except gt.GhError as e:
+    check("gh failure: reply's GhError carries gh's stderr and not the body",
+          GH_STDERR in str(e) and "must not be echoed" not in str(e), f"message {str(e)!r}")
+else:
+    check("gh failure: reply's GhError carries gh's stderr and not the body", False, "did not raise")
+
+install(failing_gh)
+check_raises("gh failure: a flag before the endpoint does not hide the endpoint",
+             gt.GhError, lambda: gt.paginated("repos/o/r/pulls/5/reviews", ".[]"),
+             must_mention=("gh api --paginate repos/o/r/pulls/5/reviews exited 1",))
+
+
+def failing_second_page(args):
+    page_one = '{"review_id": 1, "body": "a long review body read before the failure"}'
+    refusal = '{"message":"Validation Failed","errors":[{"code":"invalid"}],"documentation_url":"https://x"}'
+    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Validation Failed (HTTP 422)\n",
+                                output=f"{page_one}\n{refusal}")
+
+
+install(failing_second_page)
+try:
+    gt.paginated("repos/o/r/pulls/5/reviews", ".[]")
+except gt.GhError as e:
+    check("gh failure: carries the refusal's message and errors, not the pages read before it",
+          "'message': 'Validation Failed'" in str(e) and "'code': 'invalid'" in str(e)
+          and "read before the failure" not in str(e) and "documentation_url" not in str(e),
+          f"message {str(e)!r}")
+else:
+    check("gh failure: carries the refusal's message and errors, not the pages read before it",
+          False, "did not raise")
+
+
+def silent_gh(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="")
+
+
+install(silent_gh)
+check_raises("gh failure: an empty stderr is said, not left blank",
+             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             must_mention=("gh api repos/o/r/pulls/5 exited 1: (no stderr)",))
+
+
+def missing_gh(args):
+    raise FileNotFoundError(2, "No such file or directory", "gh")
+
+
+install(missing_gh)
+check_raises("gh missing: raises GhError, not FileNotFoundError",
+             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             must_mention=("gh api repos/o/r/pulls/5 could not be run", "No such file or directory"))
+
+
 def dismiss_handler(state):
     def handler(args):
         if args[:4] != ["api", "--method", "PUT",
