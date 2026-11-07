@@ -24,11 +24,11 @@ import provider_loader  # noqa: E402
 # Input parsing
 # ---------------------------------------------------------------------------
 
-def pr_url(ref: str) -> str:
+def pr_url(github: github_threads.GitHub, ref: str) -> str:
     """Returns a PR URL for a full URL or a bare number. Raises ValueError for a malformed URL.
     """
     if ref.isdigit():
-        url = github_threads.gh("pr", "view", ref, "--json", "url", "--jq", ".url")
+        url = github.gh("pr", "view", ref, "--json", "url", "--jq", ".url")
         if not url:
             raise RuntimeError(
                 f"gh pr view {ref} returned no URL — does PR #{ref} exist in "
@@ -39,31 +39,32 @@ def pr_url(ref: str) -> str:
     return ref
 
 
-def repo_slug(owner: str | None, repo: str | None) -> tuple[str, str]:
+def repo_slug(github: github_threads.GitHub, owner: str | None, repo: str | None) -> tuple[str, str]:
     """Returns (owner, repo): the explicit pair, or the current directory's GitHub remote."""
     if owner is not None and repo is not None:
         return owner, repo
-    data = json.loads(github_threads.gh("repo", "view", "--json", "owner,name"))
+    data = json.loads(github.gh("repo", "view", "--json", "owner,name"))
     return data["owner"]["login"], data["name"]
 
 
 # ---------------------------------------------------------------------------
-# Handlers return (payload, failure_message or None). main prints the payload and reports the failure.
+# Handlers take the provider and the GitHub client main built, and return (payload, failure_message
+# or None). main prints the payload and reports the failure.
 # ---------------------------------------------------------------------------
 
-def cmd_caps(provider, args) -> tuple[dict, str | None]:
+def cmd_caps(provider, github, args) -> tuple[dict, str | None]:
     return provider.CAPABILITIES, None
 
 
-def cmd_setup_check(provider, args) -> tuple[dict, str | None]:
-    owner, repo = repo_slug(args.owner, args.repo)
+def cmd_setup_check(provider, github, args) -> tuple[dict, str | None]:
+    owner, repo = repo_slug(github, args.owner, args.repo)
     check = provider.setup_check(owner, repo)
     failure = None if check["installed"] else f"Reviewer not installed: {check['message']}"
     return check, failure
 
 
-def cmd_wait(provider, args) -> tuple[dict, str | None]:
-    result = provider.wait(pr_url(args.pr))
+def cmd_wait(provider, github, args) -> tuple[dict, str | None]:
+    result = provider.wait(pr_url(github, args.pr))
     # A non-success conclusion means the reviewer errored, so its findings are absent. The run URL is shown.
     failure = None if result["conclusion"] == "success" else (
         f"review run concluded {result['conclusion']!r}, not success — "
@@ -72,28 +73,28 @@ def cmd_wait(provider, args) -> tuple[dict, str | None]:
     return result, failure
 
 
-def cmd_fetch(provider, args) -> tuple[dict, str | None]:
-    return provider.fetch(pr_url(args.pr)), None
+def cmd_fetch(provider, github, args) -> tuple[dict, str | None]:
+    return provider.fetch(pr_url(github, args.pr)), None
 
 
-def cmd_change_requests(provider, args) -> tuple[dict, str | None]:
-    return provider.change_requests(pr_url(args.pr)), None
+def cmd_change_requests(provider, github, args) -> tuple[dict, str | None]:
+    return provider.change_requests(pr_url(github, args.pr)), None
 
 
-def cmd_resolve(provider, args) -> tuple[dict, str | None]:
+def cmd_resolve(provider, github, args) -> tuple[dict, str | None]:
     return provider.resolve(args.thread_id), None
 
 
-def cmd_reply(provider, args) -> tuple[dict, str | None]:
-    return github_threads.reply(args.thread_id, args.body), None
+def cmd_reply(provider, github, args) -> tuple[dict, str | None]:
+    return github.reply(args.thread_id, args.body), None
 
 
-def cmd_dismiss(provider, args) -> tuple[dict, str | None]:
-    return provider.dismiss_review(pr_url(args.pr), args.review_id, args.message), None
+def cmd_dismiss(provider, github, args) -> tuple[dict, str | None]:
+    return provider.dismiss_review(pr_url(github, args.pr), args.review_id, args.message), None
 
 
-def cmd_trigger(provider, args) -> tuple[dict, str | None]:
-    return provider.trigger(pr_url(args.pr)), None
+def cmd_trigger(provider, github, args) -> tuple[dict, str | None]:
+    return provider.trigger(pr_url(github, args.pr)), None
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(run: github_threads.Runner) -> int:
     args = build_parser().parse_args()
 
     # setup-check's owner/repo pair arrives whole or not at all.
@@ -169,14 +170,16 @@ def main() -> int:
         return 2
 
     try:
-        provider = provider_loader.get(args.provider)
+        github = github_threads.GitHub(run)
+        name = provider_loader.resolve_name(args.provider)
+        provider = provider_loader.get(name, github)
         # Capability gate for every subcommand.
         if args.capability and not provider.CAPABILITIES.get(args.capability):
             raise RuntimeError(
-                f"provider '{provider.__name__}' does not support "
+                f"provider '{name}' does not support "
                 f"'{args.command}': CAPABILITIES[{args.capability!r}] is False."
             )
-        payload, failure = args.func(provider, args)
+        payload, failure = args.func(provider, github, args)
     except (RuntimeError, ValueError, NotImplementedError, KeyError) as e:
         print(f"ERROR ({args.command}): {e}", file=sys.stderr)
         return 1
@@ -189,4 +192,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(github_threads.run_gh))

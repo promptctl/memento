@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Tests for github_threads' pagination and response-shape handling.
 
-Each test fakes a `gh` that pages and asserts that the whole set is returned. The fake sits at the
-subprocess seam (`github_threads.subprocess`), so argv construction, cursor threading, and JSON and
-JSONL parsing all run for real. No test uses the network, and the fake refuses any argv it was not
-taught. Run with: python3 github_threads.test.py
+Each test builds a `GitHub` client around a fake Runner that pages, and asserts that the whole set
+is returned. Argv construction, cursor threading, and JSON and JSONL parsing all run for real. No test
+uses the network, and the fake refuses any argv it was not taught. Run with: python3
+github_threads.test.py
 """
 
 import importlib.util
 import json
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
@@ -18,6 +19,8 @@ _spec = importlib.util.spec_from_file_location(
 )
 gt = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gt)
+sys.path.insert(0, HERE)
+from gh_fake import FakeRunner, failed  # noqa: E402
 
 failures = []
 
@@ -53,34 +56,10 @@ def check_returns(name, fn, expected):
 # --- the fake gh ----------------------------------------------------------
 
 
-class FakeGh:
-    """A fake `gh` that stands in for the subprocess module.
-
-    It refuses an argv the test did not teach it, and more calls than any correct loop could make. The
-    second is what turns a runaway pagination loop into a failed test instead
-    of a hung suite.
-    """
-
-    CALL_CAP = 25
-    PIPE = -1
-
-    def __init__(self, handler):
-        self.handler = handler
-        self.calls = []
-
-    def check_output(self, argv, text=True, stderr=None):
-        assert argv[0] == "gh", argv
-        args = list(argv[1:])
-        self.calls.append(args)
-        if len(self.calls) > self.CALL_CAP:
-            raise RuntimeError(f"runaway pagination: {len(self.calls)} gh calls")
-        return self.handler(args)
-
-
 def install(handler):
-    fake = FakeGh(handler)
-    gt.subprocess = fake
-    return fake
+    """Returns a client over a fresh fake, and the fake, so a check can read its calls."""
+    fake = FakeRunner(handler)
+    return gt.GitHub(fake), fake
 
 
 def gh_vars(args):
@@ -155,7 +134,7 @@ PR = "https://github.com/o/r/pull/7"
 
 # --- multi-page thread fetch ---------------------------------------------
 
-fake = install(paged_graphql({
+github, fake = install(paged_graphql({
     None: threads_page([thread_node("t1", [comment("bot", "one")]),
                         thread_node("t2", [comment("bot", "two")])],
                        has_next=True, end="cursor-A"),
@@ -163,7 +142,7 @@ fake = install(paged_graphql({
                              has_next=True, end="cursor-B"),
     "cursor-B": threads_page([thread_node("t4", [comment("bot", "four")])]),
 }))
-findings = gt.fetch(PR)["findings"]
+findings = github.fetch(PR)["findings"]
 check("threads: every page accumulates",
       [f["thread_id"] for f in findings] == ["t1", "t2", "t3", "t4"],
       f'got {[f["thread_id"] for f in findings]}')
@@ -178,7 +157,7 @@ check("threads: later requests thread the endCursor through",
 
 # --- multi-page comment fetch inside _complete_comments -------------------
 
-fake = install(paged_graphql(
+github, fake = install(paged_graphql(
     thread_pages={
         None: threads_page([thread_node(
             "t1", [comment("bot", "c1")], has_next=True, end="cc-A")]),
@@ -188,7 +167,7 @@ fake = install(paged_graphql(
         "cc-B": comments_page([comment("bot", "c3")]),
     },
 ))
-bodies = [c["body"] for c in gt.fetch(PR)["findings"][0]["thread_comments"]]
+bodies = [c["body"] for c in github.fetch(PR)["findings"][0]["thread_comments"]]
 check("comments: every page accumulates onto the thread",
       bodies == ["c1", "c2", "c3"], f"got {bodies}")
 
@@ -196,7 +175,7 @@ check("comments: every page accumulates onto the thread",
 # --- cursor omission is end-of-pages, not a page to fetch -----------------
 # A final page with hasNextPage false and no endCursor ends the walk without an error.
 
-fake = install(paged_graphql({
+github, fake = install(paged_graphql({
     None: threads_page([thread_node("t1", [comment("bot", "one")])], has_next=True,
                        end="cursor-A"),
     "cursor-A": {"data": {"repository": {"pullRequest": {"reviewThreads": {
@@ -204,7 +183,7 @@ fake = install(paged_graphql({
         "nodes": [thread_node("t2", [comment("bot", "two")])],
     }}}}},
 }))
-findings = gt.fetch(PR)["findings"]
+findings = github.fetch(PR)["findings"]
 check("cursor omission: loop terminates on the endCursor-less last page",
       [f["thread_id"] for f in findings] == ["t1", "t2"],
       f'got {[f["thread_id"] for f in findings]}')
@@ -217,12 +196,12 @@ check("cursor omission: no extra page was requested",
 # walk ends on hasNextPage, not on the cursor's presence. Both loops are checked with a final page
 # that has hasNextPage false and a live cursor.
 
-fake = install(paged_graphql({
+github, fake = install(paged_graphql({
     None: threads_page([thread_node("t1", [comment("bot", "one")],
                                     has_next=False, end="comment-cursor-Z")],
                        has_next=False, end="thread-cursor-Z"),
 }))
-findings = gt.fetch(PR)["findings"]
+findings = github.fetch(PR)["findings"]
 check("terminal page: hasNextPage false ends the walk even with a live cursor",
       [f["thread_id"] for f in findings] == ["t1"],
       f'got {[f["thread_id"] for f in findings]}')
@@ -239,14 +218,14 @@ for label, bad_page_info in [
     ("endCursor absent", {"hasNextPage": True}),
     ("endCursor empty string", {"hasNextPage": True, "endCursor": ""}),
 ]:
-    fake = install(lambda args, pi=bad_page_info: json.dumps(
+    github, fake = install(lambda args, pi=bad_page_info: json.dumps(
         {"data": {"repository": {"pullRequest": {"reviewThreads": {
             "pageInfo": pi,
             "nodes": [thread_node("t1", [comment("bot", "one")])],
         }}}}}
     ))
     check_raises(f"threads: {label} with hasNextPage true raises",
-                 RuntimeError, lambda: gt.fetch(PR),
+                 RuntimeError, lambda: github.fetch(PR),
                  must_mention=("hasNextPage", "endCursor", "o/r#7"))
     check(f"threads: {label} stops before re-requesting page one",
           len(fake.calls) == 1, f"made {len(fake.calls)} gh calls: {fake.calls}")
@@ -261,9 +240,9 @@ def unnamed_comment_page(args):
     raise AssertionError(f"comment page requested with cursor {variables.get('cursor')!r}")
 
 
-fake = install(unnamed_comment_page)
+github, fake = install(unnamed_comment_page)
 check_raises("comments: a promised page with no endCursor raises",
-             RuntimeError, lambda: gt.fetch(PR),
+             RuntimeError, lambda: github.fetch(PR),
              must_mention=("hasNextPage", "endCursor", "t1"))
 check("comments: no comment page was requested with a null cursor",
       len(fake.calls) == 1, f"made {len(fake.calls)} gh calls: {fake.calls}")
@@ -287,15 +266,15 @@ def reviews_handler(args):
     return (page_one + "\n" + page_two).strip()
 
 
-fake = install(reviews_handler)
-reviews = gt.bot_reviews(PR)
+github, fake = install(reviews_handler)
+reviews = github.bot_reviews(PR)
 check("bot_reviews: JSONL from every page is parsed, every state kept",
       [(r["review_id"], r["state"]) for r in reviews]
       == [(11, "CHANGES_REQUESTED"), (12, "COMMENTED"), (13, "CHANGES_REQUESTED")],
       f"got {reviews}")
 check("bot_reviews: asks gh to walk every page",
       "--paginate" in fake.calls[0], f"got {fake.calls[0]}")
-reviews = gt.change_requests(PR)["reviews"]
+reviews = github.change_requests(PR)["reviews"]
 check("change_requests: only the blocking reviews, in the contract's projection",
       reviews == [{"review_id": 11, "author": "bot", "commit_id": "aaa"},
                   {"review_id": 13, "author": "bot", "commit_id": "bbb"}],
@@ -317,7 +296,7 @@ check("is_blocking_review: CHANGES_REQUESTED blocks, no other state does",
 # page to catch a regression in the filter. jq is required: a skipped check would pass silently.
 
 import shutil  # noqa: E402
-import subprocess as real_subprocess  # noqa: E402
+import subprocess  # noqa: E402
 
 check("jq filter: jq is installed (brew install jq)", shutil.which("jq") is not None)
 raw_page = [
@@ -331,7 +310,7 @@ raw_page = [
 
 
 def through_jq():
-    out = real_subprocess.run(
+    out = subprocess.run(
         ["jq", "-c", gt._BOT_REVIEWS_JQ], input=json.dumps(raw_page), text=True,
         capture_output=True, check=True,
     ).stdout
@@ -365,13 +344,13 @@ for field, handler in [
     ("data.repository.pullRequest", null_at(pull_request=None)),
     ("data.repository.pullRequest.reviewThreads", null_at(review_threads=None)),
 ]:
-    install(handler)
+    github, fake = install(handler)
     check_raises(f"shape: null {field} raises a diagnosable error",
-                 RuntimeError, lambda: gt.fetch(PR), must_mention=(field, "o/r#7"))
+                 RuntimeError, lambda: github.fetch(PR), must_mention=(field, "o/r#7"))
 
-install(lambda args: json.dumps({"notdata": {}}))
+github, fake = install(lambda args: json.dumps({"notdata": {}}))
 check_raises("shape: null data raises a diagnosable error",
-             RuntimeError, lambda: gt.fetch(PR), must_mention=("data",))
+             RuntimeError, lambda: github.fetch(PR), must_mention=("data",))
 
 
 def null_node_handler(args):
@@ -382,9 +361,9 @@ def null_node_handler(args):
     return json.dumps({"data": {"node": None}})
 
 
-install(null_node_handler)
+github, fake = install(null_node_handler)
 check_raises("shape: null data.node in the comment page names that field",
-             RuntimeError, lambda: gt.fetch(PR),
+             RuntimeError, lambda: github.fetch(PR),
              must_mention=("data.node", "t1"))
 
 
@@ -416,14 +395,14 @@ def resolve_handler(response, thread_id="T_abc"):
 
 CONFIRMED = resolve_response({"thread": {"isResolved": True}})
 
-install(resolve_handler(CONFIRMED))
+github, fake = install(resolve_handler(CONFIRMED))
 check_returns("resolve: a confirmed resolution returns the resolved thread",
-              lambda: gt.resolve("T_abc"),
+              lambda: github.resolve("T_abc"),
               {"thread_id": "T_abc", "is_resolved": True})
 
-install(resolve_handler(CONFIRMED, thread_id="12345"))
+github, fake = install(resolve_handler(CONFIRMED, thread_id="12345"))
 check_returns("resolve: an all-digit thread id is sent as a string",
-              lambda: gt.resolve("12345"),
+              lambda: github.resolve("12345"),
               {"thread_id": "12345", "is_resolved": True})
 
 for label, response in [
@@ -432,16 +411,16 @@ for label, response in [
     ("absent thread", resolve_response({"thread": None})),
     ("absent payload", resolve_response(None)),
 ]:
-    install(resolve_handler(response))
+    github, fake = install(resolve_handler(response))
     check_raises(f"resolve: confirmation {label} raises and names the thread",
-                 RuntimeError, lambda: gt.resolve("T_abc"),
+                 RuntimeError, lambda: github.resolve("T_abc"),
                  must_mention=("T_abc", "NOT resolved"))
 
 
 for label, out in [("empty", ""), ("not JSON", "<html>"), ("null", "null"), ("a list", "[]")]:
-    install(resolve_handler(out))
+    github, fake = install(resolve_handler(out))
     check_raises(f"graphql: a response that is {label} raises RuntimeError quoting it",
-                 RuntimeError, lambda: gt.resolve("T_abc"), must_mention=(repr(out),))
+                 RuntimeError, lambda: github.resolve("T_abc"), must_mention=(repr(out),))
 
 
 def reply_response(payload):
@@ -468,14 +447,14 @@ def reply_handler(response, thread_id="T_abc", body="Plan: fix"):
 
 POSTED = reply_response({"comment": {"id": "PRRC_1"}})
 
-install(reply_handler(POSTED))
+github, fake = install(reply_handler(POSTED))
 check_returns("reply: a created comment returns its id",
-              lambda: gt.reply("T_abc", "Plan: fix"),
+              lambda: github.reply("T_abc", "Plan: fix"),
               {"thread_id": "T_abc", "comment_id": "PRRC_1"})
 
-install(reply_handler(POSTED, thread_id="12345", body="@notes.txt"))
+github, fake = install(reply_handler(POSTED, thread_id="12345", body="@notes.txt"))
 check_returns("reply: an all-digit id and an @-prefixed body are sent as strings",
-              lambda: gt.reply("12345", "@notes.txt"),
+              lambda: github.reply("12345", "@notes.txt"),
               {"thread_id": "12345", "comment_id": "PRRC_1"})
 
 for label, response in [
@@ -483,9 +462,9 @@ for label, response in [
     ("absent comment", reply_response({"comment": None})),
     ("absent payload", reply_response(None)),
 ]:
-    install(reply_handler(response))
+    github, fake = install(reply_handler(response))
     check_raises(f"reply: {label} raises and names the thread",
-                 RuntimeError, lambda: gt.reply("T_abc", "Plan: fix"),
+                 RuntimeError, lambda: github.reply("T_abc", "Plan: fix"),
                  must_mention=("T_abc", "NOT posted"))
 
 
@@ -495,39 +474,38 @@ GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_gone'
 
 
 def failing_gh(args):
-    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr=GH_STDERR + "\n")
+    return failed(GH_STDERR + "\n")
 
 
-install(failing_gh)
+github, fake = install(failing_gh)
 check_raises("gh failure: resolve raises GhError carrying gh's stderr",
-             gt.GhError, lambda: gt.resolve("T_gone"),
+             gt.GhError, lambda: github.resolve("T_gone"),
              must_mention=("gh api graphql exited 1", GH_STDERR))
 
-install(failing_gh)
+github, fake = install(failing_gh)
 try:
-    gt.reply("T_gone", "a long reply body that must not be echoed")
+    github.reply("T_gone", "a long reply body that must not be echoed")
 except gt.GhError as e:
     check("gh failure: reply's GhError carries gh's stderr and not the body",
           GH_STDERR in str(e) and "must not be echoed" not in str(e), f"message {str(e)!r}")
 else:
     check("gh failure: reply's GhError carries gh's stderr and not the body", False, "did not raise")
 
-install(failing_gh)
+github, fake = install(failing_gh)
 check_raises("gh failure: a flag before the endpoint does not hide the endpoint",
-             gt.GhError, lambda: gt.paginated("repos/o/r/pulls/5/reviews", ".[]"),
+             gt.GhError, lambda: github.paginated("repos/o/r/pulls/5/reviews", ".[]"),
              must_mention=("gh api --paginate repos/o/r/pulls/5/reviews exited 1",))
 
 
 def failing_second_page(args):
     page_one = '{"review_id": 1, "body": "a long review body read before the failure"}'
     refusal = '{"message":"Validation Failed","errors":[{"code":"invalid"}],"documentation_url":"https://x"}'
-    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Validation Failed (HTTP 422)\n",
-                                output=f"{page_one}\n{refusal}")
+    return failed("gh: Validation Failed (HTTP 422)\n", stdout=f"{page_one}\n{refusal}")
 
 
-install(failing_second_page)
+github, fake = install(failing_second_page)
 try:
-    gt.paginated("repos/o/r/pulls/5/reviews", ".[]")
+    github.paginated("repos/o/r/pulls/5/reviews", ".[]")
 except gt.GhError as e:
     check("gh failure: carries the refusal's message and errors, not the pages read before it",
           "'message': 'Validation Failed'" in str(e) and "'code': 'invalid'" in str(e)
@@ -539,23 +517,39 @@ else:
 
 
 def silent_gh(args):
-    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="")
+    return failed("")
 
 
-install(silent_gh)
+github, fake = install(silent_gh)
 check_raises("gh failure: an empty stderr is said, not left blank",
-             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             gt.GhError, lambda: github.head_sha("o", "r", 5),
              must_mention=("gh api repos/o/r/pulls/5 exited 1: (no stderr)",))
 
 
 def missing_gh(args):
-    raise FileNotFoundError(2, "No such file or directory", "gh")
+    return FileNotFoundError(2, "No such file or directory", "gh")
 
 
-install(missing_gh)
+github, fake = install(missing_gh)
 check_raises("gh missing: raises GhError, not FileNotFoundError",
-             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             gt.GhError, lambda: github.head_sha("o", "r", 5),
              must_mention=("gh api repos/o/r/pulls/5 could not be run", "No such file or directory"))
+try:
+    github.head_sha("o", "r", 5)
+except gt.GhError as e:
+    check("gh missing: GhError chains the OSError",
+          isinstance(e.__cause__, FileNotFoundError), repr(e.__cause__))
+
+# The real Runner, with no gh on PATH: it returns the OSError rather than raising it.
+_saved_path = os.environ["PATH"]
+with tempfile.TemporaryDirectory() as empty_dir:
+    os.environ["PATH"] = empty_dir  # an empty PATH would search the cwd
+    try:
+        outcome = gt.run_gh(["--version"])
+    finally:
+        os.environ["PATH"] = _saved_path
+check("run_gh: a gh that cannot start comes back as the OSError",
+      isinstance(outcome, FileNotFoundError), repr(outcome))
 
 
 def dismiss_handler(state):
@@ -570,15 +564,15 @@ def dismiss_handler(state):
     return handler
 
 
-install(dismiss_handler("DISMISSED"))
+github, fake = install(dismiss_handler("DISMISSED"))
 check_returns("dismiss_review: a confirmed dismissal returns the review",
-              lambda: gt.dismiss_review(PR, 11, "addressed"),
+              lambda: github.dismiss_review(PR, 11, "addressed"),
               {"review_id": 11, "is_dismissed": True})
 
 for label, state in [("still pending", "CHANGES_REQUESTED"), ("empty", "")]:
-    install(dismiss_handler(state))
+    github, fake = install(dismiss_handler(state))
     check_raises(f"dismiss_review: state {label} raises and names the review",
-                 RuntimeError, lambda: gt.dismiss_review(PR, 11, "addressed"),
+                 RuntimeError, lambda: github.dismiss_review(PR, 11, "addressed"),
                  must_mention=("11", "still blocks"))
 
 

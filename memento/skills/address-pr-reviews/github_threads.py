@@ -2,7 +2,9 @@
 """GitHub review-thread primitives shared by providers whose findings are PR review threads.
 
 The GraphQL thread read, the canonical finding shape, and the verified resolve and reply mutations
-are defined here once, so providers that post review threads import them instead of keeping copies.
+are defined here once, so providers that post review threads use them instead of keeping copies.
+Every gh call goes through a `GitHub` client built around one `Runner`. An entry point builds the
+client with `run_gh`; a test builds it with a fake.
 """
 
 from __future__ import annotations
@@ -11,8 +13,21 @@ import itertools
 import json
 import re
 import subprocess
-# The handler names the class directly: tests replace `subprocess` with a fake that has no such attribute.
-from subprocess import CalledProcessError
+from subprocess import CompletedProcess
+from typing import Callable, Sequence, Union
+
+# The port to the gh binary: a finished gh is its CompletedProcess, and a gh that could not be
+# started is the OSError, so every outcome is one value the client decides from.
+Outcome = Union[CompletedProcess[str], OSError]
+Runner = Callable[[Sequence[str]], Outcome]
+
+
+def run_gh(args: Sequence[str]) -> Outcome:
+    """The real Runner: runs `gh` with `args`, capturing stdout and stderr."""
+    try:
+        return subprocess.run(["gh", *args], capture_output=True, text=True)
+    except OSError as e:
+        return e
 
 
 class GhError(RuntimeError):
@@ -26,22 +41,6 @@ class GhError(RuntimeError):
 # stderr that says why the call failed, so a failed command is named by the words before the first of
 # these: the subcommand, the endpoint, and any bare flags among them.
 _VALUE_FLAGS = frozenset({"-f", "--raw-field", "-F", "--field", "--input", "-q", "--jq"})
-
-
-def gh(*args: str) -> str:
-    """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it fails.
-    """
-    command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
-    try:
-        return subprocess.check_output(
-            ["gh", *args], text=True, stderr=subprocess.PIPE
-        ).strip()
-    except CalledProcessError as e:
-        reason = f"exited {e.returncode}: {e.stderr.strip() or '(no stderr)'}"
-        errors = _response_errors(e.output)
-        raise GhError(command, f"{reason} Response: {errors}" if errors else reason) from e
-    except OSError as e:
-        raise GhError(command, f"could not be run: {e}") from e
 
 
 def _response_errors(stdout: str) -> dict:
@@ -67,21 +66,6 @@ def parse_pr(url: str) -> tuple[str, str, int]:
     if not m:
         raise ValueError(f"Not a PR URL: {url}")
     return m.group(1), m.group(2), int(m.group(3))
-
-
-def head_sha(owner: str, repo: str, pr_num: int) -> str:
-    return gh("api", f"repos/{owner}/{repo}/pulls/{pr_num}", "--jq", ".head.sha")
-
-
-def paginated(endpoint: str, jq: str) -> list[dict]:
-    """Returns the objects `jq` emits across every page of a REST list endpoint.
-
-    `gh --paginate` applies `--jq` per page and concatenates the output, so the filter must emit one
-    object per line. A filter that wraps each page in an array does not parse as one document, and
-    `--slurp` cannot be combined with `--jq`.
-    """
-    out = gh("api", "--paginate", endpoint, "--jq", jq)
-    return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
 _THREADS_QUERY = (
@@ -114,28 +98,6 @@ _REPLY_MUTATION = (
     "  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){"
     "    comment{ id } } }"
 )
-
-
-def _graphql(query: str, **variables) -> dict:
-    """Runs one GraphQL query or mutation; every GraphQL call in this module goes through here.
-
-    Strings go through `-f`, which sends them raw, and ints through `-F`. `-F` would type-infer an
-    all-digit cursor or id into a number. A `None` variable is omitted, so GraphQL reads it as null
-    rather than as the empty string, which is not a valid cursor.
-    """
-    args = ["api", "graphql", "-f", f"query={query}"]
-    for key, value in variables.items():
-        if value is None:
-            continue
-        args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
-    out = gh(*args)
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        data = None
-    if not isinstance(data, dict):
-        raise RuntimeError(f"gh api graphql printed {out!r}, not a JSON object")
-    return data
 
 
 def _response_path(data: dict, *path: str, subject: str) -> dict:
@@ -178,48 +140,6 @@ def _next_cursor(block: dict, *, subject: str) -> str | None:
     return cursor
 
 
-def _page_of_threads(owner: str, repo: str, pr_num: int, cursor: str | None) -> dict:
-    data = _graphql(_THREADS_QUERY, owner=owner, repo=repo, num=pr_num, cursor=cursor)
-    return _response_path(
-        data, "data", "repository", "pullRequest", "reviewThreads",
-        subject=f"{owner}/{repo}#{pr_num} review threads",
-    )
-
-
-def _complete_comments(thread: dict) -> None:
-    """Appends one thread's remaining comment pages to its first page.
-
-    This loop is written by hand because `gh --paginate` walks only one top-level connection, and
-    each thread's comments are a nested connection.
-    """
-    subject = f"comments of review thread {thread['id']}"
-    block = thread["comments"]
-    cursor = _next_cursor(block, subject=subject)
-    while cursor is not None:
-        data = _graphql(_COMMENTS_QUERY, id=thread["id"], cursor=cursor)
-        block = _response_path(data, "data", "node", "comments", subject=subject)
-        thread["comments"]["nodes"].extend(block["nodes"])
-        cursor = _next_cursor(block, subject=subject)
-
-
-def _fetch_threads(owner: str, repo: str, pr_num: int) -> list[dict]:
-    """Returns every review thread on the PR, with all of its comments.
-
-    Both loops run until `hasNextPage` is false, so the result is the whole set or the call raises.
-    """
-    threads: list[dict] = []
-    cursor: str | None = None
-    while True:
-        block = _page_of_threads(owner, repo, pr_num, cursor)
-        threads.extend(block["nodes"])
-        cursor = _next_cursor(block, subject=f"{owner}/{repo}#{pr_num} review threads")
-        if cursor is None:
-            break
-    for thread in threads:
-        _complete_comments(thread)
-    return threads
-
-
 def _build_findings(threads: list[dict]) -> list[dict]:
     """Builds canonical findings from threads. Reviewer and human threads share one shape."""
     findings = []
@@ -242,41 +162,6 @@ def _build_findings(threads: list[dict]) -> list[dict]:
     return findings
 
 
-def fetch(pr_url: str) -> dict:
-    """Return all review threads as canonical findings."""
-    owner, repo, pr_num = parse_pr(pr_url)
-    threads = _fetch_threads(owner, repo, pr_num)
-    return {"findings": _build_findings(threads)}
-
-
-def resolve(thread_id: str) -> dict:
-    """Resolves one review thread and returns only after GitHub confirms it. Raises RuntimeError if it
-    does not."""
-    data = _graphql(_RESOLVE_MUTATION, id=thread_id)
-    # A false, a null, and a missing payload are all one outcome: no confirmation.
-    payload = (data.get("data") or {}).get("resolveReviewThread") or {}
-    if (payload.get("thread") or {}).get("isResolved") is not True:
-        raise RuntimeError(
-            f"resolveReviewThread did not confirm resolution for {thread_id}. "
-            f"The thread is NOT resolved — do not move on. Response: {data!r}"
-        )
-    return {"thread_id": thread_id, "is_resolved": True}
-
-
-def reply(thread_id: str, body: str) -> dict:
-    """Posts a reply on one review thread and returns only after GitHub names the created comment.
-    Raises RuntimeError if it does not."""
-    data = _graphql(_REPLY_MUTATION, id=thread_id, body=body)
-    payload = (data.get("data") or {}).get("addPullRequestReviewThreadReply") or {}
-    comment_id = (payload.get("comment") or {}).get("id")
-    if not comment_id:
-        raise RuntimeError(
-            f"addPullRequestReviewThreadReply returned no comment id for {thread_id}. "
-            f"The reply was NOT posted. Response: {data!r}"
-        )
-    return {"thread_id": thread_id, "comment_id": comment_id}
-
-
 # Selects the automated reviewer's reviews. Its reviews have `.user.type` "Bot" and people's are "User".
 _BOT_REVIEWS_JQ = (
     '.[] | select(.user.type=="Bot")'
@@ -284,55 +169,177 @@ _BOT_REVIEWS_JQ = (
 )
 
 
-def bot_reviews(pr_url: str) -> list[dict]:
-    """Returns every automated-reviewer review on the PR, oldest first, as
-    `{review_id, author, commit_id, state, body}` entries.
-
-    Reads every page, since a PR with many rounds can exceed one page and a single-page read would
-    drop the newest review.
-    """
-    owner, repo, pr_num = parse_pr(pr_url)
-    return paginated(f"repos/{owner}/{repo}/pulls/{pr_num}/reviews", _BOT_REVIEWS_JQ)
-
-
 def is_blocking_review(review: dict) -> bool:
     """Returns True if an automated-reviewer review blocks the PR, given a `bot_reviews` entry.
 
-    `change_requests` and `action_provider.body_findings` both use this predicate. Each calls
+    `change_requests` and the action provider's body findings both use this predicate. Each calls
     `bot_reviews` for its own read; the reviewer changes reviews only on a re-review after a push,
     so two reads with no push between them see the same reviews.
     """
     return review["state"] == "CHANGES_REQUESTED"
 
 
-def change_requests(pr_url: str) -> dict:
-    """Returns the automated reviewer's CHANGES_REQUESTED reviews that this round must dismiss.
+class GitHub:
+    """Every gh operation, run through the one Runner the client was built with."""
 
-    Human reviews are never included, so a human's request is cleared only by that human. The result
-    is read when findings are fetched and dismissed by id afterwards; reviews created by a later push
-    are not in it.
-    """
-    return {"reviews": [
-        {"review_id": r["review_id"], "author": r["author"], "commit_id": r["commit_id"]}
-        for r in bot_reviews(pr_url) if is_blocking_review(r)
-    ]}
+    def __init__(self, run: Runner):
+        self._run = run
 
+    def gh(self, *args: str) -> str:
+        """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it
+        fails."""
+        command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
+        result = self._run(args)
+        if isinstance(result, OSError):
+            raise GhError(command, f"could not be run: {result}") from result
+        if result.returncode == 0:
+            return result.stdout.strip()
+        reason = f"exited {result.returncode}: {result.stderr.strip() or '(no stderr)'}"
+        errors = _response_errors(result.stdout)
+        raise GhError(command, f"{reason} Response: {errors}" if errors else reason)
 
-def dismiss_review(pr_url: str, review_id: int, message: str) -> dict:
-    """Dismisses one review with a message and returns only after GitHub confirms the dismissal.
+    def head_sha(self, owner: str, repo: str, pr_num: int) -> str:
+        return self.gh("api", f"repos/{owner}/{repo}/pulls/{pr_num}", "--jq", ".head.sha")
 
-    Raises RuntimeError if the review is not DISMISSED afterwards."""
-    owner, repo, pr_num = parse_pr(pr_url)
-    state = gh(
-        "api", "--method", "PUT",
-        f"repos/{owner}/{repo}/pulls/{pr_num}/reviews/{review_id}/dismissals",
-        "-f", f"message={message}",
-        "-f", "event=DISMISS",
-        "--jq", ".state",
-    )
-    if state != "DISMISSED":
-        raise RuntimeError(
-            f"Dismissing review {review_id} was not confirmed (state={state!r}). "
-            "The review still blocks the PR — do not treat the round as closed."
+    def paginated(self, endpoint: str, jq: str) -> list[dict]:
+        """Returns the objects `jq` emits across every page of a REST list endpoint.
+
+        `gh --paginate` applies `--jq` per page and concatenates the output, so the filter must emit
+        one object per line. A filter that wraps each page in an array does not parse as one
+        document, and `--slurp` cannot be combined with `--jq`.
+        """
+        out = self.gh("api", "--paginate", endpoint, "--jq", jq)
+        return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+    def _graphql(self, query: str, **variables) -> dict:
+        """Runs one GraphQL query or mutation; every GraphQL call in this module goes through here.
+
+        Strings go through `-f`, which sends them raw, and ints through `-F`. `-F` would type-infer
+        an all-digit cursor or id into a number. A `None` variable is omitted, so GraphQL reads it as
+        null rather than as the empty string, which is not a valid cursor.
+        """
+        args = ["api", "graphql", "-f", f"query={query}"]
+        for key, value in variables.items():
+            if value is None:
+                continue
+            args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
+        out = self.gh(*args)
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            raise RuntimeError(f"gh api graphql printed {out!r}, not a JSON object")
+        return data
+
+    def _page_of_threads(self, owner: str, repo: str, pr_num: int, cursor: str | None) -> dict:
+        data = self._graphql(_THREADS_QUERY, owner=owner, repo=repo, num=pr_num, cursor=cursor)
+        return _response_path(
+            data, "data", "repository", "pullRequest", "reviewThreads",
+            subject=f"{owner}/{repo}#{pr_num} review threads",
         )
-    return {"review_id": review_id, "is_dismissed": True}
+
+    def _complete_comments(self, thread: dict) -> None:
+        """Appends one thread's remaining comment pages to its first page.
+
+        This loop is written by hand because `gh --paginate` walks only one top-level connection,
+        and each thread's comments are a nested connection.
+        """
+        subject = f"comments of review thread {thread['id']}"
+        block = thread["comments"]
+        cursor = _next_cursor(block, subject=subject)
+        while cursor is not None:
+            data = self._graphql(_COMMENTS_QUERY, id=thread["id"], cursor=cursor)
+            block = _response_path(data, "data", "node", "comments", subject=subject)
+            thread["comments"]["nodes"].extend(block["nodes"])
+            cursor = _next_cursor(block, subject=subject)
+
+    def _fetch_threads(self, owner: str, repo: str, pr_num: int) -> list[dict]:
+        """Returns every review thread on the PR, with all of its comments.
+
+        Both loops run until `hasNextPage` is false, so the result is the whole set or the call
+        raises.
+        """
+        threads: list[dict] = []
+        cursor: str | None = None
+        while True:
+            block = self._page_of_threads(owner, repo, pr_num, cursor)
+            threads.extend(block["nodes"])
+            cursor = _next_cursor(block, subject=f"{owner}/{repo}#{pr_num} review threads")
+            if cursor is None:
+                break
+        for thread in threads:
+            self._complete_comments(thread)
+        return threads
+
+    def fetch(self, pr_url: str) -> dict:
+        """Return all review threads as canonical findings."""
+        owner, repo, pr_num = parse_pr(pr_url)
+        return {"findings": _build_findings(self._fetch_threads(owner, repo, pr_num))}
+
+    def resolve(self, thread_id: str) -> dict:
+        """Resolves one review thread and returns only after GitHub confirms it. Raises RuntimeError
+        if it does not."""
+        data = self._graphql(_RESOLVE_MUTATION, id=thread_id)
+        # A false, a null, and a missing payload are all one outcome: no confirmation.
+        payload = (data.get("data") or {}).get("resolveReviewThread") or {}
+        if (payload.get("thread") or {}).get("isResolved") is not True:
+            raise RuntimeError(
+                f"resolveReviewThread did not confirm resolution for {thread_id}. "
+                f"The thread is NOT resolved — do not move on. Response: {data!r}"
+            )
+        return {"thread_id": thread_id, "is_resolved": True}
+
+    def reply(self, thread_id: str, body: str) -> dict:
+        """Posts a reply on one review thread and returns only after GitHub names the created
+        comment. Raises RuntimeError if it does not."""
+        data = self._graphql(_REPLY_MUTATION, id=thread_id, body=body)
+        payload = (data.get("data") or {}).get("addPullRequestReviewThreadReply") or {}
+        comment_id = (payload.get("comment") or {}).get("id")
+        if not comment_id:
+            raise RuntimeError(
+                f"addPullRequestReviewThreadReply returned no comment id for {thread_id}. "
+                f"The reply was NOT posted. Response: {data!r}"
+            )
+        return {"thread_id": thread_id, "comment_id": comment_id}
+
+    def bot_reviews(self, pr_url: str) -> list[dict]:
+        """Returns every automated-reviewer review on the PR, oldest first, as
+        `{review_id, author, commit_id, state, body}` entries.
+
+        Reads every page, since a PR with many rounds can exceed one page and a single-page read
+        would drop the newest review.
+        """
+        owner, repo, pr_num = parse_pr(pr_url)
+        return self.paginated(f"repos/{owner}/{repo}/pulls/{pr_num}/reviews", _BOT_REVIEWS_JQ)
+
+    def change_requests(self, pr_url: str) -> dict:
+        """Returns the automated reviewer's CHANGES_REQUESTED reviews that this round must dismiss.
+
+        Human reviews are never included, so a human's request is cleared only by that human. The
+        result is read when findings are fetched and dismissed by id afterwards; reviews created by
+        a later push are not in it.
+        """
+        return {"reviews": [
+            {"review_id": r["review_id"], "author": r["author"], "commit_id": r["commit_id"]}
+            for r in self.bot_reviews(pr_url) if is_blocking_review(r)
+        ]}
+
+    def dismiss_review(self, pr_url: str, review_id: int, message: str) -> dict:
+        """Dismisses one review with a message and returns only after GitHub confirms the dismissal.
+
+        Raises RuntimeError if the review is not DISMISSED afterwards."""
+        owner, repo, pr_num = parse_pr(pr_url)
+        state = self.gh(
+            "api", "--method", "PUT",
+            f"repos/{owner}/{repo}/pulls/{pr_num}/reviews/{review_id}/dismissals",
+            "-f", f"message={message}",
+            "-f", "event=DISMISS",
+            "--jq", ".state",
+        )
+        if state != "DISMISSED":
+            raise RuntimeError(
+                f"Dismissing review {review_id} was not confirmed (state={state!r}). "
+                "The review still blocks the PR — do not treat the round as closed."
+            )
+        return {"review_id": review_id, "is_dismissed": True}
