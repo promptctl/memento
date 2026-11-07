@@ -176,37 +176,54 @@ class Provider:
         return runs[0] if runs else None
 
     def wait(self, pr_url: str) -> dict:
-        """Block until the GitHub Action run for the current head SHA completes.
+        """Block until the GitHub Action run for the head the PR is at completes.
 
-        A failed runs poll is no news: the wait goes on to the same deadlines, and gives up on gh only
-        once every poll for OUTAGE_TIMEOUT_S has failed. Each failure it rode out is returned in
+        The reviewer workflow cancels a run when a push supersedes it, so wait follows the head: a run
+        for a commit the PR has moved past is never returned, whatever its conclusion, and each SHA wait
+        stopped following is returned in `superseded`. [LAW:nothing-unseen]
+
+        A failed poll is no news: the wait goes on to the same deadlines, and gives up on gh only once
+        every poll for OUTAGE_TIMEOUT_S has failed. Each failure it rode out is returned in
         `poll_errors`. [LAW:no-silent-failure]
         """
         owner, repo, pr_num = github_threads.parse_pr(pr_url)
         sha = self._github.head_sha(owner, repo, pr_num)
-        start = last_ok = self._clock.now()
-        # The last run any poll listed. A run that registered is held to the completion deadline
-        # even if a later poll misses it, so a gap in the run list is not reported as "never
+        # `since` is when wait began following `sha`: the register and completion deadlines bound one
+        # head's run, so they restart when the head moves. The outage window bounds gh and does not.
+        since = last_ok = self._clock.now()
+        # The last run any poll listed for `sha`. A run that registered is held to the completion
+        # deadline even if a later poll misses it, so a gap in the run list is not reported as "never
         # registered".
         run: Optional[dict] = None
         poll_errors: list[str] = []
+        superseded: list[str] = []
         while True:
             # This pass's poll failure, if it failed.
             error: Optional[GhError] = None
+            # The head this pass read; None when the pass failed before reading it, so it confirms nothing.
+            head: Optional[str] = None
             try:
+                # [LAW:no-ambient-temporal-coupling] the run is read before the head. A push lands before
+                # the cancel it causes, so a head read made after a run read that saw the cancel sees the
+                # push; the other order could see the cancel and an unmoved head in one pass.
                 run = self._latest_run(owner, repo, sha) or run
+                head = self._github.head_sha(owner, repo, pr_num)
                 last_ok = self._clock.now()
             except GhError as e:
                 error = e
                 poll_errors.append(str(e))
-            if run and run.get("status") == "completed":
+            if head == sha and run and run.get("status") == "completed":
                 return {
                     "status":      "completed",
                     "conclusion":  run.get("conclusion"),
                     "sha":         sha,
                     "url":         run.get("html_url"),
                     "poll_errors": poll_errors,
+                    "superseded":  superseded,
                 }
+            if head not in (None, sha):
+                superseded.append(sha)
+                sha, since, run = head, self._clock.now(), None
             now = self._clock.now()
             # [LAW:no-ambient-temporal-coupling] every bound is seconds on the one clock, so a gh that
             # fails slowly uses up the outage window sooner instead of stretching it.
@@ -216,7 +233,7 @@ class Provider:
                     f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}"
                 ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
-            if now - start >= deadline:
+            if now - since >= deadline:
                 break
             self._clock.sleep(POLL_INTERVAL_S)
         # A deadline raise names the polls that failed, so a flaky gh is not read as a missing workflow.
