@@ -192,13 +192,14 @@ done
 [ "${1:-}" = "-eo" ] || exec /bin/ps "$@"
 [ -z "${FIXTURE_PS_FAILS:-}" ] || { echo "ps: fixture refuses the process table" >&2; exit 1; }
 /bin/ps "$@" | /usr/bin/awk -v root="$(cat "$FIXTURE_ROOT_PID")" -v runner="${FIXTURE_RUNNER_PID:-}" \
-    -v age="${FIXTURE_FORGE_AGE:-}" -v forge="${FIXTURE_FORGE_COMMAND+set}" -v cmd="${FIXTURE_FORGE_COMMAND:-}" '
+    -v age="${FIXTURE_FORGE_AGE:-}" -v forge="${FIXTURE_FORGE_COMMAND+set}" '
   {
     line = $0
     sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
     ppid = $1 == runner ? 1 : $2
     etime = ($1 == root && age != "") ? age : $3
-    if ($1 == root && forge == "set") line = cmd
+    # Read from the environment: awk would expand backslash escapes in a -v value.
+    if ($1 == root && forge == "set") line = ENVIRON["FIXTURE_FORGE_COMMAND"]
     print $1, ppid, etime, line
   }'
 """
@@ -607,11 +608,11 @@ shutil.rmtree(nocmd_dir, ignore_errors=True)
 
 # A row whose command reads back empty is not a claude launched with no flags: a
 # pid with no argv is no claude at all, walked past like any other. The walk then
-# reaches init with no claude, so the assertion is that the planted pid was not the
-# pick.
+# leaves the chain with no claude, so nothing is handed off.
 done = run(panes=None, forge_command="")
 check("a claude whose command line reads back empty is not read as flagless",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
+      and f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The failure that reported success. Resolving the launcher's own path used to
@@ -789,11 +790,12 @@ for export in (False, True):
 done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=f"{NEST_AS_CLAUDE} --print")
 check("the claude $CLAUDE_PID names is never another claude, even reading as --print",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# A $CLAUDE_PID beyond the 16-hop bound is the one the walk has not shown to be outside
-# this process's tree, so it is confined and relaunched in a detached window.
+# A $CLAUDE_PID beyond the 16-hop bound is unproven, so relaunching it could signal a
+# session that never asked: it is refused, not relaunched.
 done = run(depth=17, claude_at=[16], panes=None, export_claude_pid=True)
-check("a $CLAUDE_PID beyond the walk's reach is confined, not refused",
-      picked(done) == DETACHED and f"claude_pid={done.session_claude_pid} " in done.stdout,
+check("a $CLAUDE_PID beyond the walk's reach is refused, not relaunched",
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
+      and "16-hop bound" in done.stderr and f"claude_pid={done.session_claude_pid} " not in done.stdout,
       f"ancestry={ancestry(done)!r} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The own claude is identified by the walk passing it, not by argv0: a claude run under
 # node keeps its pane. A relaunch rebuilds it from its command line, so with no pane
@@ -810,14 +812,16 @@ check("a $CLAUDE_PID claude run under node is not relaunched",
 # so nothing is typed into it.
 done = run(depth=2, claude_at=[])
 check("a pane reached with no claude below it is refused, not cleared",
-      done.returncode == NO_TRANSPORT_RC and "no claude process sits between" in done.stderr
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
       and picked(done) != "%99",
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The hop bound itself: a walk that ends there has not shown that nothing above this
 # session shows another one, so it is confined, and no inherited terminal is trusted.
-done = run(depth=15, panes=None)
+# The own claude sits low in the chain, so the walk has passed it before the bound.
+done = run(depth=15, panes=None, claude_at=[1])
 check("a walk that ends at its hop bound confines the session",
-      ancestry(done).startswith("confined, the walk ended at its 16-hop bound"),
+      ancestry(done).startswith("confined, the walk ended at its 16-hop bound")
+      and picked(done) == DETACHED,
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 # The relaunch target is the same own claude the hosted walk reads. Without $CLAUDE_PID,
 # a headless claude started inside an interactive session's shell is this process's own
@@ -899,7 +903,7 @@ try:
     for claude_at, where in ((None, "another claude"), ([], "the end of the ancestry")):
         done = run(panes=None, claude_pid=NAMED_CLAUDE.pid, claude_at=claude_at)
         check(f"a $CLAUDE_PID the walk reaches {where} without passing is refused, not relaunched",
-              done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+              done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
               and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout,
               f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
               f"out={done.stdout!r} err={done.stderr!r}")
@@ -909,7 +913,7 @@ try:
     # is taken, and the named claude is not relaunched.
     done = run(claude_pid=NAMED_CLAUDE.pid, claude_at=[])
     check("a pane the walk reaches without passing the $CLAUDE_PID claude is refused, not taken or relaunched",
-          done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+          done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
           and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout and picked(done) != "%99",
           f"named={NAMED_CLAUDE.pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 finally:
@@ -922,7 +926,7 @@ finally:
 done = run(panes=None, claude_pid=STRANGER.pid)
 check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
       done.returncode == NO_TRANSPORT_RC
-      and "is not an ancestor of this process" in done.stderr
+      and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
       and f"claude_pid={done.root_pid} " not in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
@@ -1092,7 +1096,7 @@ check("a prompt starting with a host word is still a session",
 # launcher's own voice, not the shell's `integer expression expected` diagnostic.
 done = run(panes=None, claude_pid="abc")
 check("a non-numeric $CLAUDE_PID is refused cleanly",
-      done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
       and "integer expression" not in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
@@ -1209,11 +1213,14 @@ check("an elapsed time the walk cannot read refuses the pane - falls to detached
 # The same guard holds for the other two questions the walk answers. A claude at a
 # reissued pid is no claude of this session's: it is not the own claude to relaunch,
 # since signalling it would hit whatever now holds the pid,
-done = run(depth=2, sleep=2, forge_age="00:00", panes=None)
-check("a claude at a reissued pid is never relaunched as this session's own",
-      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr
-      and f"claude_pid={done.root_pid} " not in done.stdout,
-      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# with or without $CLAUDE_PID naming it, and the refusal says why.
+for export in (False, True):
+    done = run(depth=2, sleep=2, forge_age="00:00", panes=None, export_claude_pid=export)
+    check(f"a claude at a reissued pid is never relaunched as this session's own "
+          f"({'with' if export else 'without'} $CLAUDE_PID)",
+          done.returncode == NO_TRANSPORT_RC and "pid was reissued" in done.stderr
+          and f"claude_pid={done.root_pid} " not in done.stdout,
+          f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # and it is not a host either. The walk's reason names the reissued pid, not a host.
 done = run(depth=2, sleep=2, forge_age="00:00", panes=None, claude_at=[1, 2])
 check("a claude at a reissued pid above the own claude is read as a reissued pid, not a host",

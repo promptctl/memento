@@ -67,8 +67,8 @@ _clear_box() {
 #   confined  something above this session may show another one: another claude (a daemon host, or an
 #             outer session this claude was started inside), or ancestry the walk could not establish.
 #             Only a fresh detached window is safe.
-#   refused   the walk passed no claude of this session's on its way to a pane, another claude, or init,
-#             or the claude a relaunch needs does not run as a claude binary; the reason says which.
+#   refused   the walk ended, however, without passing this session's claude, or the claude a relaunch
+#             needs does not run as a claude binary; the reason says which, and how the walk ended.
 #
 # [LAW:single-enforcer] This is the one walk. The own claude, the hosted decision, and the pane are all
 # read in it, hop by hop, under the same rules:
@@ -79,14 +79,14 @@ _clear_box() {
 #   - The own claude is $CLAUDE_PID, which Claude Code sets for every tool call. It is authoritative and
 #     identified by the walk passing it, not by its argv0, so a claude run under node keeps its pane. Only
 #     when it is unset is the first claude the walk meets the own claude.
-#   - Nothing is handed off unless the walk passed the own claude: a pane, another claude, or init reached
-#     first is refused, since $CLAUDE_PID then names a process outside this one's tree, or no claude sits
-#     below that pane.
+#   - Nothing is handed off unless the walk passed the own claude. Any ending reached first is refused:
+#     a pane, another claude, or init shows $CLAUDE_PID is outside this process's tree, or that no claude
+#     sits below that pane, and an unsound row or the hop bound leaves $CLAUDE_PID unproven, so
+#     relaunching it could signal a session that never asked.
 #   - Any other claude above the own one ends the walk as confined, whatever its flags, since the tree's
 #     shape is what shows hosting. A claude is checked before its pane, since a pane's process is usually
 #     the claude it shows.
-#   - The walk examines this process and 15 ancestors. At that bound it ends as confined, the one ending
-#     that has not shown $CLAUDE_PID is outside the tree.
+#   - The walk examines this process and 15 ancestors. At that bound it ends as confined.
 # A wrong confinement costs a relaunch, and a wrong pane costs a /clear in someone else's session, so every
 # doubt resolves to confined.
 _ancestry() {
@@ -121,16 +121,16 @@ _ancestry() {
         return "process " pid " is younger than its child, so its pid was reissued"
       return ""
     }
-    # Why nothing the walk reaches belongs to this session, when it got to `where` without passing the own
-    # claude: a named claude is outside the tree of this process, and an unnamed one was never met.
-    function unpassed(where) {
-      return own == "" ? "no claude process sits between this process and " where ", so nothing there is this session'\''s to hand off." \
-                       : "$CLAUDE_PID " own " is not an ancestor of this process: the walk reached " where " without passing it, so neither that nor claude " own " is this session'\''s to hand off."
-    }
-    # A pane handoff only clears the pane, but a relaunch rebuilds the own claude from its command line, so
-    # every answer that relaunches it requires that line to be a claude binary'\''s.
+    # Every ending passes through here, so the two rules a handoff needs are each kept once. Nothing is
+    # handed off unless the walk passed the own claude, whatever ended it. And a pane handoff only clears
+    # the pane, but a relaunch rebuilds the own claude from its command line, which must then be a claude
+    # binary'\''s.
     function answer(kind, pane, reason) {
-      if ((kind == "paneless" || kind == "confined") && own != "" && !isclaude(own)) {
+      if (kind != "refused" && !passed) {
+        reason = (own == "" ? "the ancestry walk passed no claude" : "the ancestry walk never passed $CLAUDE_PID " own) \
+                 ", so nothing it reached is this session'\''s to hand off: " reason
+        kind = "refused"; pane = ""
+      } else if (kind != "refused" && kind != "pane" && !isclaude(own)) {
         reason = "claude process " own " does not run as a claude binary, so no relaunch can be built from its command line; " reason
         kind = "refused"
       }
@@ -159,20 +159,15 @@ _ancestry() {
         if (why != "") answer("confined", "", why)
         if (pid == own) passed = 1
         else if (isclaude(pid)) {
-          if (!adopt && !passed) answer("refused", "", unpassed("claude process " pid))
           if (!adopt) answer("confined", "", "hosted by another claude (process " pid ")")
           own = pid; adopt = 0; passed = 1
         }
-        if (pid in pane) {
-          if (!passed) answer("refused", "", unpassed("pane process " pid " of pane " pane[pid]))
-          answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
-        }
+        if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
         younger = ageof(elapsed[pid])
         pid = parent[pid]
         if (pid + 0 <= 1) break
       }
       if (hop == maxhops) answer("confined", "", "the walk ended at its " maxhops "-hop bound without a pane")
-      if (!passed) answer("refused", "", unpassed("init"))
       answer("paneless", "", "the walk reached init without a pane")
     }'
 }
