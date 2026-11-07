@@ -330,6 +330,31 @@ PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
 os.mkdir(PS_ROOT_COMMAND_DIR)
 install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
 
+# The real ps, except that the suite runner's parent reads as pid 1. With no tmux
+# there is no pane to end the hosted check's ancestry walk, so without this the walk
+# would climb past the runner into whatever session launched the suite, and a
+# daemon host there would make every no-tmux case hosted. A host the case plants
+# itself sits below the runner and is still seen.
+PS_RUNNER_IS_TOP = r"""#!/bin/bash
+set -uo pipefail
+fields=""; want=""; prev=""
+for arg in "$@"; do
+  [ "$prev" = "-o" ] && fields="$arg"
+  [ "$prev" = "-p" ] && want="$arg"
+  prev="$arg"
+done
+if [ "$want" = "$FIXTURE_RUNNER_PID" ]; then
+  case "$fields" in
+    ppid=) echo 1; exit 0 ;;
+    ppid=,command=) echo "1 $(/bin/ps -o command= -p "$want")"; exit 0 ;;
+  esac
+fi
+exec /bin/ps "$@"
+"""
+RUNNER_IS_TOP_DIR = os.path.join(FIXTURES, "runneristop")
+os.mkdir(RUNNER_IS_TOP_DIR)
+install(RUNNER_IS_TOP_DIR, "ps", PS_RUNNER_IS_TOP)
+
 # A `date` that removes a directory on its first call, then behaves normally.
 # This makes the launcher's own directory disappear mid-run at a fixed point: the
 # launcher stamps the handoff filename with `date` before it resolves its own path,
@@ -433,7 +458,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     pidfile = os.path.join(workdir, "root.pid")
     # The tmux-absent case uses NO_TMUX_BIN alone: it must not include REAL_DIRS,
     # since that is where a packaged tmux would be found.
-    path = [FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN]
+    path = [FIXTURES, REAL_DIRS] if tmux_on_path else [RUNNER_IS_TOP_DIR, NO_TMUX_BIN]
     if forge_age is not None:
         path.insert(0, FORGE_DIR)
     if mute_identity:
@@ -462,6 +487,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         "FINALIZE_DRY_RUN": dry_run,
         "NEST_PUBLISH_PID": pidfile,
         "FIXTURE_ROOT_PID": pidfile,
+        "FIXTURE_RUNNER_PID": str(os.getpid()),
         # The claude process the detached transport relaunches as is planted at the
         # top of this chain, so the ancestry walk finds a process this fixture owns
         # rather than whatever real claude happens to be running the suite. Every
@@ -1096,6 +1122,13 @@ check("and it names the three absences: owned pane, iTerm2 session, tmux binary"
       all(absence in done.stderr for absence in
           ("no owned tmux pane", "no reachable iTerm2 session", "no tmux binary")),
       f"err={done.stderr!r}")
+
+# A hosted session with no tmux declines for its own reason: the host, not a missing
+# pane, is why no pane or iTerm2 session can show it.
+done = run(tmux_on_path=False, outer_host=True)
+check("a hosted session with no tmux binary declines, naming the daemon host as the reason",
+      done.returncode == NO_TRANSPORT_RC and "hosted by a claude daemon" in done.stderr
+      and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 
 # A live pane owned by a process that no ancestor accounts for must be refused, not
 # claimed. Every other pane in the suite is dead, outside the ancestry, or out of the
