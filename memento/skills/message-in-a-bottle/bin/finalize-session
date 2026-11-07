@@ -88,44 +88,55 @@ _find_claude_session() {
 # host's socket, so any pane or iTerm2 session reachable from it belongs to another session. A hosted
 # session therefore takes the detached transport.
 #
-# The walk goes up from this process. Reaching a host before a live pane means the pane is not this
-# session's own. $CLAUDE_PID is checked directly, since its parent may be a host even when this walk does
-# not reach it. A read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a
-# wrong pane costs a /clear in someone else's session.
+# [LAW:types-are-the-program] Hosted is read from the shape of the process tree, never from flags. This
+# session's own claude is $CLAUDE_PID, or the first claude binary the walk meets when that is unset. Any
+# other claude binary met before a live pane means the pane shows that claude's session: a daemon host,
+# readable or not, or an outer session this claude was started inside. A claude is checked before its
+# pane, since a pane's process is usually the claude it shows. $CLAUDE_PID's parent is checked directly,
+# since this walk may not reach it. A read that fails mid-walk counts as hosted, because a wrong detach
+# costs a relaunch and a wrong pane costs a /clear in someone else's session.
 _hosted_by_daemon() {
-  local panes pid=$$ line cmd i rc
+  local panes pid=$$ own="" line ppid cmd i
   panes=" $(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
             | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
   case "${CLAUDE_PID:-}" in
     ''|*[!0-9]*) ;;
     *)
-      line=$(ps -o ppid= -p "$CLAUDE_PID" 2>/dev/null | tr -d '[:space:]')
+      own=$CLAUDE_PID
+      line=$(ps -o ppid= -p "$own" 2>/dev/null | tr -d '[:space:]')
       if [ -n "$line" ] && [ "$line" -gt 1 ]; then
-        rc=0; _claude_host_code "$(ps -o command= -p "$line" 2>/dev/null)" || rc=$?
-        [ "$rc" -eq 3 ] && return 0
+        _is_claude_binary "$(ps -o command= -p "$line" 2>/dev/null)" && return 0
       fi ;;
   esac
   for ((i = 0; i < 16; i++)); do
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     [ "$pid" -gt 1 ] || return 1
-    [[ "$panes" == *" $pid "* ]] && return 1
     line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
     [ -n "$line" ] || return 0
-    read -r pid cmd <<<"$line"
-    rc=0; _claude_host_code "$cmd" || rc=$?
-    [ "$rc" -eq 3 ] && return 0
+    read -r ppid cmd <<<"$line"
+    if _is_claude_binary "$cmd"; then
+      own=${own:-$pid}
+      [ "$pid" = "$own" ] || return 0
+    fi
+    [[ "$panes" == *" $pid "* ]] && return 1
+    pid=$ppid
   done
   return 1
 }
 
-# Returns _claude_flags' code for a command line, or 2 for anything that is not a claude binary. This is
-# the one place argv0 is matched against the claude binary.
-_claude_host_code() {
+# Succeeds for a command line whose argv0 is a claude binary. This is the one place argv0 is matched
+# against the claude binary, so the versioned install path (`.../claude/versions/<n>`) matches too.
+_is_claude_binary() {
   case "${1%% *}" in
-    claude|*/claude|*/claude/versions/*)
-      _claude_flags "$1" >/dev/null 2>&1; return $? ;;
+    claude|*/claude|*/claude/versions/*) return 0 ;;
   esac
-  return 2
+  return 1
+}
+
+# Returns _claude_flags' code for a command line, or 2 for anything that is not a claude binary.
+_claude_host_code() {
+  _is_claude_binary "$1" || return 2
+  _claude_flags "$1" >/dev/null 2>&1
 }
 
 # Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
@@ -239,7 +250,7 @@ _pane_target() {
 #
 # `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
 # function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
-# return 3, so _hosted_by_daemon can tell them apart. Only the flag region is read, so a prompt that
+# return 3, so _find_claude_session can end its walk there. Only the flag region is read, so a prompt that
 # contains those words is never misread.
 _claude_flags() {
   local cmd="$1" out="" tok next i n

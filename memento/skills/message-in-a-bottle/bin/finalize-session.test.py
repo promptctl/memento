@@ -169,6 +169,8 @@ case " ${NEST_CLAUDE_AT:-} " in
     NEST_CLAUDE_AT=" $NEST_CLAUDE_AT "; NEST_CLAUDE_AT="${NEST_CLAUDE_AT// $depth / }"
     export NEST_CLAUDE_AT
     [ -n "${NEST_RECORD_CLAUDE:-}" ] && printf '%s' "$$" > "$NEST_RECORD_CLAUDE"
+    # What Claude Code hands every tool call: the pid of the session's own claude.
+    [ -n "${NEST_EXPORT_CLAUDE_PID:-}" ] && export CLAUDE_PID=$$
     exec -a "$NEST_AS_CLAUDE" /bin/bash "$self" "$depth" "$@" ;;
 esac
 if [ "$depth" -gt 0 ]; then
@@ -176,7 +178,7 @@ if [ "$depth" -gt 0 ]; then
     unset NEST_REHOST_AT
     # argv0 is the host's own spelling, so the launcher reads this hop as a real
     # `claude --bg-pty-host` would read; a shebang script alone is argv0 /bin/bash.
-    (exec -a "claude --bg-pty-host" /bin/bash "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
+    (exec -a "${NEST_HOST_AS:-claude --bg-pty-host}" /bin/bash "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
@@ -456,7 +458,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
         self_dir_gone=False, as_claude=None, claude_pid=None,
         forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False,
-        launcher_flags=()):
+        launcher_flags=(), host_as=None, export_claude_pid=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -512,6 +514,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # so the walk has to find the planted hop by ancestry alone.
     if claude_pid is not None:
         env["CLAUDE_PID"] = str(claude_pid)
+    # Set from inside the chain: the planted claude's pid exists only once it runs.
+    if export_claude_pid:
+        env["NEST_EXPORT_CLAUDE_PID"] = "1"
+    # The rehost hop's argv0, which is the host's whole command line as ps shows it.
+    if host_as is not None:
+        env["NEST_HOST_AS"] = host_as
     if host_keeps_tmux:
         env["FIXTURE_HOST_KEEPS_TMUX"] = "1"
     if ps_root_command is not None:
@@ -880,6 +888,47 @@ check("a host above this session's pane does not make it hosted",
 done = run(depth=5, panes=PANES_ABOVE_HOST, message="next: verify the --bg-pty-host boundary")
 check("a handoff message containing --bg-pty-host does not trip the boundary",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# The boundary is read from the shape of the tree: a claude other than this session's
+# own, met before a live pane, means the pane shows that claude's session. Each shape
+# runs both with $CLAUDE_PID, as Claude Code sets it for every tool call, and without
+# it, where the first claude met stands in.
+UNREADABLE_HOST = "claude --frobnicate value --bg-pty-host /tmp/cc-daemon/pty/a.sock"
+for export in (False, True):
+    how = "with $CLAUDE_PID" if export else "without $CLAUDE_PID"
+    # A host whose flags _claude_flags cannot read (an unlisted flag before a value)
+    # is still a claude between this session and the spawner's pane.
+    done = run(depth=5, rehost_at=3, claude_at=[5, 2], panes=PANES_ABOVE_HOST,
+               host_as=UNREADABLE_HOST, export_claude_pid=export)
+    check(f"a host whose flags cannot be read still keeps the pane above it out of reach ({how})",
+          picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+    # A claude started inside another claude's shell, below the outer one's pane.
+    done = run(depth=5, claude_at=[4, 2], panes=PANES_ABOVE_HOST, export_claude_pid=export)
+    check(f"a claude inside another claude never takes the outer one's pane ({how})",
+          picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+    # The same, where the pane's own process is the outer claude.
+    done = run(depth=5, claude_at=[5, 2], panes=PANES_ABOVE_HOST, export_claude_pid=export)
+    check(f"a pane whose process is another claude is never this session's ({how})",
+          picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+    # This session's own claude, one hop below its pane, never counts against it,
+    # whatever its flags: an unlisted flag before a value, and a prompt naming the
+    # host shapes after it, still leave the pane its own.
+    for argv in ("--frobnicate value", "--frobnicate value the daemon run hung on --bg-pty-host"):
+        done = run(depth=2, claude_at=[1], export_claude_pid=export,
+                   as_claude=f"{NEST_AS_CLAUDE} {argv}")
+        check(f"this session's own claude reading `{argv}` keeps its pane ({how})",
+              picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# $CLAUDE_PID names this session's claude even when its flags read as not a session,
+# so the walk never counts it as another claude.
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=f"{NEST_AS_CLAUDE} --print")
+check("the claude $CLAUDE_PID names is never another claude, even reading as --print",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# $CLAUDE_PID's parent is checked directly. Here the walk from the launcher ends at its
+# 16-hop bound before reaching either, and only $TMUX_PANE offers a pane.
+done = run(depth=17, rehost_at=17, claude_at=[16], tmux_pane="%99", host_keeps_tmux=True,
+           host_as=UNREADABLE_HOST, export_claude_pid=True)
+check("a claude parent of $CLAUDE_PID makes the session hosted beyond the walk's reach",
+      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # --- no pane to be had, but tmux still gives a transport --------------------
 # Refusing a pane is still correct, but it does not mean refusing to deliver: the
