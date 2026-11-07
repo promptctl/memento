@@ -155,6 +155,23 @@ check("threads: later requests thread the endCursor through",
       f"got {[gh_vars(c).get('cursor') for c in fake.calls[:3]]}")
 
 
+# --- a thread's finding names the commit its first comment was made on ----
+
+github, fake = install(paged_graphql({
+    None: threads_page([
+        thread_node("t1", [{**comment("bot", "one"), "originalCommit": {"oid": "old"}},
+                           {**comment("human", "reply"), "originalCommit": {"oid": "new"}}]),
+        thread_node("t2", [{**comment("bot", "two"), "originalCommit": None}]),
+        thread_node("t3", []),
+    ]),
+}))
+check("commit: a thread is on its first comment's commit; a null or absent commit is None",
+      [f["commit_id"] for f in github.fetch(PR)["findings"]] == ["old", None, None],
+      f'got {[f["commit_id"] for f in github.fetch(PR)["findings"]]}')
+check("commit: the thread query asks for each comment's originalCommit",
+      "originalCommit{oid}" in gh_vars(fake.calls[0])["query"], f"got {fake.calls[0]}")
+
+
 # --- multi-page comment fetch inside _complete_comments -------------------
 
 github, fake = install(paged_graphql(

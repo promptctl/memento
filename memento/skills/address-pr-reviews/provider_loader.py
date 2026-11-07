@@ -3,7 +3,7 @@
 
 The provider name comes from an explicit argument, then PR_REVIEW_PROVIDER, then provider.json in
 this directory. The module is `<name>_provider.py` here; its `Provider` class is built with the
-caller's ports and must declare CAPABILITIES and the operations `wait` and `fetch`.
+caller's ports and must declare CAPABILITIES and the operations `wait`, `fetch`, and `head_sha`.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def _validate(provider: object, name: str) -> None:
         raise RuntimeError(
             f"Provider '{name}' CAPABILITIES is missing keys: {missing_keys}"
         )
-    for fn in ("wait", "fetch"):
+    for fn in ("wait", "fetch", "head_sha"):
         if not hasattr(provider, fn):
             raise RuntimeError(
                 f"Provider '{name}' is missing required operation '{fn}'."

@@ -55,13 +55,13 @@ PR7_BODY = (
 
 
 def find_body(name, body, expected, author="github-actions[bot]"):
-    got = ap.parse_body_findings(body, author)
+    got = ap.parse_body_findings(body, author, "aaa")
     check(name, got == expected, f"got {got!r}, want {expected!r}")
 
 
-def one(file, line, text, author="github-actions[bot]"):
+def one(file, line, text, author="github-actions[bot]", commit_id="aaa"):
     return {"file": file, "line_start": line, "line_end": line, "body": text,
-            "author": author, "thread_id": None, "is_resolved": False,
+            "author": author, "commit_id": commit_id, "thread_id": None, "is_resolved": False,
             "thread_comments": [{"author": author, "body": text}]}
 
 
@@ -144,11 +144,11 @@ check("body_findings: reads the CHANGES_REQUESTED reviews and skips the rest",
           body_review(1, "CHANGES_REQUESTED", FINDING_BODY),
           body_review(2, "COMMENTED", FINDING_BODY),
           body_review(3, "DISMISSED", FINDING_BODY),
-          body_review(4, "CHANGES_REQUESTED",
-                      FINDING_BODY.replace("a.py:1", "b.py:2")),
+          {**body_review(4, "CHANGES_REQUESTED",
+                         FINDING_BODY.replace("a.py:1", "b.py:2")), "commit_id": "bbb"},
       ]) == [one("a.py", 1, "**[S1]** blocking finding"),
-             one("b.py", 2, "**[S1]** blocking finding")],
-      "only the two blocking reviews' body findings, in review order")
+             one("b.py", 2, "**[S1]** blocking finding", commit_id="bbb")],
+      "only the two blocking reviews' body findings, in review order, each on its review's commit")
 
 
 # --- fetch: inline threads and body findings rejoin into one stream -------------

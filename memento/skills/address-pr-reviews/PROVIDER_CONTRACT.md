@@ -12,7 +12,7 @@ a `ports.Ports`, the ports a provider is built with, and which has:
 
 - A `CAPABILITIES` dict class attribute (see below).
 - The operations its capabilities declare as supported.
-- `wait` and `fetch`, which are always required.
+- `wait`, `fetch`, and `head_sha`, which are always required.
 
 Every gh call a provider makes goes through `ports.github`, a
 `github_threads.GitHub` client that runs gh through the one `Runner` it was
@@ -95,6 +95,7 @@ Returns every pending finding on the PR in canonical form.
             "line_end":        42,                  # nullable
             "body":            "...",               # required; first comment body
             "author":          "github-actions",    # required
+            "commit_id":       "abc123",            # the commit it was produced against; null if unknown
             "thread_id":       "PRRT_xyz...",       # null for a body finding, or when resolve=False
             "is_resolved":     False,               # required
             "thread_comments": [                    # required; may be one element
@@ -115,9 +116,24 @@ unresolvable — its disposition is the dismissal of the blocking review it live
 non-null for an inline-thread finding under `resolve: True`, and null for a body
 finding and for every finding when `resolve` is `False`. `[LAW:one-source-of-truth]`
 
+`commit_id` is the commit a finding is a statement about: for a thread, the commit its first
+comment was made on; for a body finding, the commit of the review it came from. It is null when the
+backend names no commit for it. A provider reports the commit and nothing more — where that commit
+stands against the head is not the provider's to say (see `head_sha`).
+
 The skill treats `is_resolved: false` findings as unresolved. The loop exits
 when this list is empty. Providers must not filter findings server-side — the
 skill owns that judgment.
+
+### `head_sha(pr_url: str) -> str`
+
+Returns the commit the PR's head is at now.
+
+The skill never reads `fetch` directly. It reads `findings.fetch(provider, pr_url)`, which calls
+`fetch` and then `head_sha` — in that order, so a push between them can only make a finding read as
+older — and returns `{"head_sha": ..., "findings": [...]}` with each finding's `against_head` set to
+`"head"` (its `commit_id` is the head), `"older"` (a different commit), or `"unknown"` (`commit_id`
+null). That rule lives in `findings.py` once, for every provider. `[LAW:single-enforcer]`
 
 ## Optional functions
 
@@ -216,8 +232,8 @@ that is a silent failure. `[LAW:no-silent-failure]`
 1. Create `<name>_provider.py` in this directory, defining `Provider(ports)`.
 2. Set `Provider.CAPABILITIES` accurately — don't declare a capability unless
    the operation is implemented.
-3. Implement `wait` and `fetch` (always required) plus any declared optional
+3. Implement `wait`, `fetch`, and `head_sha` (always required) plus any declared optional
    operations, making every gh call through `ports.github` and reading time
    only through `ports.clock`.
 4. Set `provider.json` to `{"provider": "<name>"}` to activate it.
-5. Test `wait` + `fetch` against a real PR before declaring it production-ready.
+5. Test `wait` + `findings.fetch` against a real PR before declaring it production-ready.

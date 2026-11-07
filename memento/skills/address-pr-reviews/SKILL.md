@@ -7,12 +7,13 @@ description: Address open PR review findings with judgment — read every findin
 
 Read every pending review finding on the PR, **post your plan on each thread first**, then implement, push (which re-runs the reviewer), confirm-and-resolve the threads you fixed, and dismiss the reviewer's now-stale change request. Repeat until clean. Same model people use at a real company: handle reviewer findings AND human-reviewer threads in one pass, push back with reasoning when you disagree, resolve, dismiss, re-review.
 
-[LAW:one-source-of-truth] `provider.fetch` is the single source of pending findings for this loop — every open finding on the PR, keyed by `thread_id` when it has one. There is no second stream: a finding the reviewer could not anchor to a diff line (a **body finding**, `thread_id` null) rides the same `fetch`, and is disposed by dismissing the blocking review it lives in, not by `resolve`.
+[LAW:one-source-of-truth] `findings.fetch(provider, PR_URL)` is the single source of pending findings for this loop — every open finding on the PR, keyed by `thread_id` when it has one. There is no second stream: a finding the reviewer could not anchor to a diff line (a **body finding**, `thread_id` null) rides the same `fetch`, and is disposed by dismissing the blocking review it lives in, not by `resolve`.
 
 **Provider** — the active review backend is loaded from `provider.json` in the skill directory (or `PR_REVIEW_PROVIDER` env var). The provider contract is in `PROVIDER_CONTRACT.md`. To switch providers, change `provider.json`; the loop below does not change.
 
 ```python
 # Load the provider once at the start of the loop
+import findings
 import provider_loader
 from ports import production_ports
 ports = production_ports()  # the real gh client and clock every provider operation runs on
@@ -86,7 +87,7 @@ A match means the Claude account whose token this repo's generated workflow hand
 
 Repeat 2 until a rerun reviews the head. The pool is finite and the setup skill lists it; once every listed account is on your list and has failed a rerun, stop and surface. Name each tried account's reset time from its run's log — the earliest is when the loop can resume, and the last log's figure alone is not the answer.
 
-You will be reading "You've hit your limit · resets <date>", the date will be two days out, and the thought will be *"nothing can move until then — report the wait and stop."* Its cousin: *"I'll review it locally in the meantime."* Neither. Waiting parks every open PR for days with the fix ten minutes away, and a local review is not the reviewer — `provider.fetch` is the only stream of findings this loop trusts (`[LAW:one-source-of-truth]`). The limit belongs to one account; the pool has more.
+You will be reading "You've hit your limit · resets <date>", the date will be two days out, and the thought will be *"nothing can move until then — report the wait and stop."* Its cousin: *"I'll review it locally in the meantime."* Neither. Waiting parks every open PR for days with the fix ten minutes away, and a local review is not the reviewer — `findings.fetch` is the only stream of findings this loop trusts (`[LAW:one-source-of-truth]`). The limit belongs to one account; the pool has more.
 
 - BAD (a real handoff, after eight runs failed the same way): "the CI reviewer is rate-limited on every run; the limit resets 2026-09-13 19:00 UTC. There is NO workable ticket right now. Report the wait and stop."
 - GOOD: "run 3456… hit the usage limit on the reviewer account. Rotated per the setup skill, propagated here, `gh run rerun 3456…` — review completed with 3 findings, continuing the loop."
@@ -94,7 +95,7 @@ You will be reading "You've hit your limit · resets <date>", the date will be t
 ### 2. Fetch findings, and capture the change requests to dismiss
 
 ```python
-data = provider.fetch(PR_URL)
+data = findings.fetch(provider, PR_URL)
 
 # Capture the blocking reviews to dismiss at round end (step 8).
 pending_reviews = []
@@ -102,7 +103,7 @@ if provider.CAPABILITIES["dismiss_review"]:
     pending_reviews = provider.change_requests(PR_URL)["reviews"]
 ```
 
-`fetch` returns canonical JSON: every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the empty-`fetch` done-signal now accounts for them too.
+`findings.fetch` returns canonical JSON: the PR's `head_sha` and every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the empty-`fetch` done-signal now accounts for them too.
 
 `change_requests` returns the automated reviewer's `CHANGES_REQUESTED` reviews — `[{"review_id", "author", "commit_id"}]` — captured **now, before any push**, so step 8 dismisses exactly the reviews this round addressed and never the fresh re-review your push triggers. [LAW:one-source-of-truth] the dismiss set is what you read here, not what is blocking after you mutate the PR. It is scoped to Bot authors: a human's `CHANGES_REQUESTED` is theirs to clear, never auto-dismissed. [LAW:no-silent-failure]
 
@@ -110,6 +111,7 @@ Schema:
 
 ```json
 {
+  "head_sha": "abc123",
   "findings": [
     {
       "file": "path/to/file.py",
@@ -117,6 +119,8 @@ Schema:
       "line_end": 42,
       "body": "This silently swallows the error — surface it instead.",
       "author": "github-actions",
+      "commit_id": "abc123",
+      "against_head": "head",
       "thread_id": "PRRT_xyz...",
       "is_resolved": false,
       "thread_comments": [
@@ -134,11 +138,13 @@ Schema:
 
 > **Read `thread_comments` before deciding.** A finding may already contain replies (yours from a prior iteration, a human's pushback on the reviewer, or a back-and-forth). The full chain is in `thread_comments`; `body` is just the first comment for quick scanning.
 
+> **A finding is a statement about its `commit_id`, which may not be the head.** `against_head` says which: `"head"` — the finding describes the code you are looking at. `"older"` — it describes the code at `commit_id`, and pushes since may have changed it: diff `commit_id` against `head_sha` for its file and read the code at the head before classifying; if the code it names has changed, it is likely `already_fixed` — check, rather than re-do work already pushed. `"unknown"` — GitHub names no commit for it: read the code at the head and judge the finding against that alone. Never classify an `"older"` or `"unknown"` finding from its quoted code.
+
 > **`line_start` may be `null`** for a file-level (non-line-anchored) comment. Open the file and read the `body`/`thread_comments` for context; the finding still resolves by `thread_id` like any other.
 
 ### 3. Plan phase — triage every finding, resolve the no-change ones
 
-For **each** unresolved finding, before writing any code: open the file at `file:line_start`, read `body` and the full `thread_comments` chain, and classify. Classification is the same regardless of `author`:
+For **each** unresolved finding, before writing any code: open the file at `file:line_start`, read `body` and the full `thread_comments` chain, check its `against_head` (step 2), and classify. Classification is the same regardless of `author`:
 
 - **valid** — reviewer is right; a fix is coming
 - **different_fix** — reviewer identified a real issue but proposed the wrong fix; a better fix is coming
