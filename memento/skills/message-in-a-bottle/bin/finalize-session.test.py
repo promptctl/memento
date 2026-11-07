@@ -1054,15 +1054,21 @@ check("variadic and boolean flags are dropped by arity and the scan halts at the
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A session /background forked, in the order claude 2.1.299 writes its argv: the hidden
-# `--reply-on-resume` before the permission mode and the hidden `--proactivity <level>`
-# after it. The table lists `--proactivity` and not `--reply-on-resume`.
+# A session /background forked carries the hidden `--reply-on-resume` (boolean) and
+# `--proactivity <level>`, which `claude --help` does not list.
 done = run(panes=None, forge_command=(
     "/x/claude/versions/2.1.299 --resume /x/p.jsonl --fork-session --reply-on-resume"
     " --allowed-tools mcp__a --model opus --effort high --permission-mode bypassPermissions"
     " --proactivity high --name worker"))
 check("a session forked by /background (--reply-on-resume, --proactivity) relaunches with its model and permission mode",
       picked(done) == DETACHED and "flags=[--model opus --permission-mode bypassPermissions]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Boolean by the table, not by the token after it: followed by the prompt it is still
+# no value, and the scan stops at the prompt.
+done = run(panes=None, forge_command=(
+    "/x/claude/versions/2.1.299 --permission-mode plan --reply-on-resume resume the review"))
+check("--reply-on-resume before the prompt is read as boolean, not refused",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # A flag the table does not list has no value when the token after it is a flag or
