@@ -493,14 +493,17 @@ def argv_case(*args, path_prefix=""):
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
     handoffs = os.path.join(workdir, "handoffs")
-    # The pane's process is this runner, the launcher's parent, so the launcher
-    # descends from it as it would from a real pane's shell.
+    # The pane's process is this runner, and the launcher runs under a claude below
+    # it, as it would in a real pane's session. The trailing `exit` keeps bash from
+    # exec-ing the launcher in place of the claude process.
     rootfile = os.path.join(workdir, "root.pid")
     with open(rootfile, "w") as handle:
         handle.write(str(os.getpid()))
+    under_claude = ["/bin/bash", "-c", 'exec -a "$0" /bin/bash -c \'"$@"; exit $?\' wrap "$@"',
+                    NEST_AS_CLAUDE]
     try:
         done = subprocess.run(
-            [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
+            [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
                  "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
@@ -786,15 +789,30 @@ for export in (False, True):
 done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=f"{NEST_AS_CLAUDE} --print")
 check("the claude $CLAUDE_PID names is never another claude, even reading as --print",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# $CLAUDE_PID's parent is classified directly. Here the walk from the launcher ends at
-# its 16-hop bound before reaching either. The bound alone already confines the session,
-# so the walk's reason is what shows the parent was read.
-for depth, at, where in ((17, 16, "beyond the walk's reach"), (15, 14, "on the walk's last hop")):
-    done = run(depth=depth, rehost_at=depth, claude_at=[at], host_as=UNREADABLE_HOST,
-               export_claude_pid=True)
-    check(f"a claude parent of a $CLAUDE_PID {where} makes the session hosted",
-          picked(done) == DETACHED and "the parent of this session's claude" in ancestry(done),
-          f"ancestry={ancestry(done)!r} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A $CLAUDE_PID beyond the 16-hop bound is the one the walk has not shown to be outside
+# this process's tree, so it is confined and relaunched in a detached window.
+done = run(depth=17, claude_at=[16], panes=None, export_claude_pid=True)
+check("a $CLAUDE_PID beyond the walk's reach is confined, not refused",
+      picked(done) == DETACHED and f"claude_pid={done.session_claude_pid} " in done.stdout,
+      f"ancestry={ancestry(done)!r} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The own claude is identified by the walk passing it, not by argv0: a claude run under
+# node keeps its pane. A relaunch rebuilds it from its command line, so with no pane
+# that command line must be a claude binary's.
+NODE_CLAUDE = "/usr/local/bin/node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=NODE_CLAUDE)
+check("a $CLAUDE_PID claude run under node keeps its pane",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=NODE_CLAUDE, panes=None)
+check("a $CLAUDE_PID claude run under node is not relaunched",
+      done.returncode == NO_TRANSPORT_RC and "does not run as a claude binary" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Without $CLAUDE_PID, a pane reached before any claude shows no session of this one's,
+# so nothing is typed into it.
+done = run(depth=2, claude_at=[])
+check("a pane reached with no claude below it is refused, not cleared",
+      done.returncode == NO_TRANSPORT_RC and "no claude process sits between" in done.stderr
+      and picked(done) != "%99",
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The hop bound itself: a walk that ends there has not shown that nothing above this
 # session shows another one, so it is confined, and no inherited terminal is trusted.
 done = run(depth=15, panes=None)
@@ -859,11 +877,10 @@ check("a versioned claude path in the arguments, not argv0, is not a claude",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# $CLAUDE_PID names the session's own pid for every tool call, and the named pid wins
-# over ancestry. The chain still plants a claude at its top hop, and the launcher must
-# relaunch the named one instead. The named process is not in this launcher's ancestry,
-# so only the environment can explain how it was found. It runs in its own session so
-# the whole group can be terminated, since nest runs its command as a child.
+# $CLAUDE_PID names the session's own pid for every tool call, and it is this session's
+# only if the walk passes it. This named claude is a live claude outside the launcher's
+# ancestry. It runs in its own session so the whole group can be terminated, since
+# nest runs its command as a child.
 NAMED_CLAUDE = subprocess.Popen(
     [NEST_BIN, "0", "sleep", "600"],
     env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
@@ -876,12 +893,16 @@ for _ in range(100):
         break
     time.sleep(0.05)
 try:
-    done = run(panes=None, claude_pid=NAMED_CLAUDE.pid)
-    check("$CLAUDE_PID names the claude to relaunch ahead of the ancestry walk",
-          picked(done) == DETACHED and f"claude_pid={NAMED_CLAUDE.pid} " in done.stdout
-          and identity_names(done, NEST_AS_CLAUDE),
-          f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
-          f"out={done.stdout!r} err={done.stderr!r}")
+    # With no pane, the walk ends at the chain's planted claude, or with none planted at
+    # whatever the runner's ancestry ends in: another claude or init. Either way it has
+    # shown the named claude is outside this tree, so it is never relaunched.
+    for claude_at, where in ((None, "another claude"), ([], "the end of the ancestry")):
+        done = run(panes=None, claude_pid=NAMED_CLAUDE.pid, claude_at=claude_at)
+        check(f"a $CLAUDE_PID the walk reaches {where} without passing is refused, not relaunched",
+              done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+              and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout,
+              f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
+              f"out={done.stdout!r} err={done.stderr!r}")
     # A pane is this session's only when its own claude sits at or below it. The named
     # claude is not under the chain's pane, and no other claude is planted, so the walk
     # has shown $CLAUDE_PID contradicts the tree: neither the pane nor the named claude
@@ -895,14 +916,14 @@ finally:
     os.killpg(NAMED_CLAUDE.pid, 15)
     NAMED_CLAUDE.wait()
 
-# A named pid that is not a claude is refused, not used as a starting point for the
-# walk. STRANGER's ancestry is this runner's ancestry, which may end in a real claude
-# session that the walk would find and terminate. The planted claude is unreachable
-# here too: the named pid is the whole answer.
+# A named pid that is not a claude is refused, never replaced by the claude the walk
+# meets: that planted claude, or a real session in the runner's ancestry, would
+# otherwise be terminated in its place.
 done = run(panes=None, claude_pid=STRANGER.pid)
 check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
       done.returncode == NO_TRANSPORT_RC
-      and "cannot locate the claude process" in done.stderr,
+      and "is not an ancestor of this process" in done.stderr
+      and f"claude_pid={done.root_pid} " not in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 def refused_as_not_a_session(done):
@@ -1071,7 +1092,7 @@ check("a prompt starting with a host word is still a session",
 # launcher's own voice, not the shell's `integer expression expected` diagnostic.
 done = run(panes=None, claude_pid="abc")
 check("a non-numeric $CLAUDE_PID is refused cleanly",
-      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr
+      done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
       and "integer expression" not in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
