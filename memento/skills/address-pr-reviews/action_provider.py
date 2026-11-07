@@ -79,6 +79,7 @@ def parse_body_findings(body: str, author: str, commit_id: Optional[str]) -> lis
             "file":            file,
             "line_start":      line_no,
             "line_end":        line_no,
+            "diff_hunk":       None,
             "body":            text,
             "author":          author,
             "commit_id":       commit_id,

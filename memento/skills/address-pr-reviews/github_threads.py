@@ -83,10 +83,10 @@ _THREADS_QUERY = (
     "    pullRequest(number:$num){"
     "      reviewThreads(first:100,after:$cursor){"
     "        pageInfo{ hasNextPage endCursor }"
-    "        nodes{ id isResolved path originalStartLine originalLine"
+    "        nodes{ id isResolved path originalStartLine originalLine startDiffSide diffSide subjectType"
     "          comments(first:100){"
     "            pageInfo{ hasNextPage endCursor }"
-    "            nodes{ author{login} body originalCommit{oid} } } } } } } }"
+    "            nodes{ author{login} body originalCommit{oid} diffHunk } } } } } } }"
 )
 
 _COMMENTS_QUERY = (
@@ -149,24 +149,50 @@ def _next_cursor(block: dict, *, subject: str) -> str | None:
     return cursor
 
 
+def _line_at_commit(side: str, line: int | None) -> int | None:
+    """Returns a thread end's line as a line at its comment's commit: the line on the RIGHT side,
+    None on the LEFT. Raises ValueError for a side GitHub does not define."""
+    if side not in ("LEFT", "RIGHT"):
+        raise ValueError(f"review thread diff side {side!r} is neither LEFT nor RIGHT")
+    return line if side == "RIGHT" else None
+
+
+def _hunk_of(subject: str, hunk: str | None) -> str | None:
+    """Returns a thread's diff hunk for a LINE comment and None for a FILE comment, whose recorded
+    hunk ends at no commented row. Raises ValueError for a subject GitHub does not define."""
+    if subject not in ("LINE", "FILE"):
+        raise ValueError(f"review thread subject {subject!r} is neither LINE nor FILE")
+    return hunk if subject == "LINE" else None
+
+
 def _build_findings(threads: list[dict]) -> list[dict]:
     """Builds canonical findings from threads. Reviewer and human threads share one shape.
 
     A thread's finding is its first comment, so its `commit_id` is the commit that comment was made
     on. GitHub names none for a commit it no longer has, and a thread with no comments has none. Its
-    lines are `originalStartLine`..`originalLine`, the range at that same commit: the thread's `line` is
+    lines come from `originalStartLine`..`originalLine`, rows in that comment's diff: the thread's `line` is
     GitHub's mapping onto the latest commit, null once the thread is outdated, so it would name a line
-    from another commit. GitHub gives a single-line comment no start line; its range is its one line.
+    from another commit. GitHub gives a single-line comment no start line or start side; its range is
+    its one line.
+
+    Each end is a row on one side of the diff the comment was made on. A RIGHT row is a line in the
+    file at `commit_id`. A LEFT row is a deleted line, in a file GitHub names no commit for — the old
+    side is the merge base, a parent, or a range start depending on the view the comment was left
+    in — so that end is null, and `diff_hunk`, the text GitHub recorded, shows the deleted code.
     """
     findings = []
     for t in threads:
         nodes = t.get("comments", {}).get("nodes") or []
         first = nodes[0] if nodes else {}
-        end = t.get("originalLine")
+        end_side = t.get("diffSide")
+        end = _line_at_commit(end_side, t.get("originalLine"))
+        start = _line_at_commit(t.get("startDiffSide") or end_side,
+                                t.get("originalStartLine") or t.get("originalLine"))
         findings.append({
             "file":            t.get("path"),
-            "line_start":      t.get("originalStartLine") or end,
+            "line_start":      start,
             "line_end":        end,
+            "diff_hunk":       _hunk_of(t.get("subjectType"), first.get("diffHunk")),
             "body":            first.get("body", ""),
             "author":          (first.get("author") or {}).get("login"),
             "commit_id":       (first.get("originalCommit") or {}).get("oid"),

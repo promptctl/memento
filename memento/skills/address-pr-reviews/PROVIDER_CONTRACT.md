@@ -94,6 +94,7 @@ Returns every finding on the PR, resolved or not, in canonical form.
             "file":            "path/to/file.py",  # nullable (file-level comment)
             "line_start":      42,                  # nullable
             "line_end":        42,                  # nullable
+            "diff_hunk":       "@@ -40,3 +40,3 @@...", # nullable; the diff text the comment was made on
             "body":            "...",               # required; first comment body
             "author":          "github-actions",    # required
             "commit_id":       "abc123",            # full SHA of the commit it was produced against; null if unknown
@@ -120,7 +121,12 @@ finding and for every finding when `resolve` is `False`. `[LAW:one-source-of-tru
 `commit_id` is the commit a finding is a statement about: for a thread, the commit its first
 comment was made on; for a body finding, the commit of the review it came from. It is null when the
 backend names no commit for it. `line_start` and `line_end` are lines at that commit, not at the
-head. A provider reports the commit and nothing more — where that commit
+head. Either is null when that end is no line at that commit: a file-level comment, or an end on a
+deleted line, which lives in the diff's old side, a file the backend names no commit for.
+`diff_hunk` is the diff text the backend recorded for a line comment, ending at its last row, so it
+holds every row of its range, deleted ones included; it is null for a finding on no row: a body
+finding or a file-level comment.
+A provider reports the commit and nothing more — where that commit
 stands against the head is not the provider's to say (see `head_sha`).
 
 The skill treats `is_resolved: false` findings as unresolved. Providers must not
