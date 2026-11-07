@@ -2,20 +2,22 @@
 """Tests for the action provider's body findings and their merge with review threads.
 
 Findings the reviewer could not post inline appear in the CHANGES_REQUESTED review body, and `fetch`
-must return them with the threads. The provider is built around a fake Runner, so argv construction
-and JSONL parsing run for real, and no test uses the network. Run with: python3 action_provider.test.py
+must return them with the threads. The provider is built over fake ports, so argv construction and
+JSONL parsing run for real, no test uses the network, and `wait` runs on a clock that never sleeps. Run with: python3 action_provider.test.py
 """
 
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import action_provider as ap  # noqa: E402
 import github_threads as gt  # noqa: E402
-from gh_fake import FakeRunner, failed  # noqa: E402
+from fakes import FakeClock, FakeRunner, failed  # noqa: E402
+from ports import Ports, SystemClock  # noqa: E402
 
 failures = []
 
@@ -26,8 +28,8 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
-def provider(handler):
-    return ap.Provider(gt.GitHub(FakeRunner(handler)))
+def provider(handler, clock=None):
+    return ap.Provider(Ports(gt.GitHub(FakeRunner(handler)), clock or FakeClock()))
 
 
 # --- body findings: what the reviewer could not post inline -----------------
@@ -218,6 +220,94 @@ else:
     check("setup_check: an unreadable repo raises, not 'not installed'", False,
           f"returned {check_result!r}")
 
+
+# --- wait: polls the head SHA's run until it completes, or until the deadline for its state ------
+
+RUN_URL = "https://github.com/o/r/actions/runs/5"
+RUNS_ARGV = ["api", "repos/o/r/actions/workflows/code-review.yml/runs?head_sha=ccc&per_page=1",
+             "--jq", ".workflow_runs"]
+
+
+def run(status, conclusion=None):
+    return {"status": status, "conclusion": conclusion, "html_url": RUN_URL}
+
+
+def wait_over(polls):
+    """Runs `wait` on a PR whose head SHA is `ccc` and whose run list answers `polls` in order.
+
+    Each poll is (runs, t): the runs listed, and the clock time the call returns at, as a gh call
+    that takes time would. A poll past the last one raises AssertionError. Returns (the result or the
+    exception, the clock, the poll times)."""
+    clock = FakeClock()
+    remaining = list(polls)
+    poll_times = []
+
+    def handler(args):
+        if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
+            return "ccc"
+        if args != RUNS_ARGV:
+            raise AssertionError(f"unexpected gh call {args!r}")
+        poll_times.append(clock.now())
+        if not remaining:
+            raise AssertionError(f"poll {len(poll_times)} at t={clock.now()} is past the {len(polls)} scripted")
+        runs, t = remaining.pop(0)
+        clock.advance(t - clock.now())
+        return json.dumps(runs)
+
+    try:
+        return provider(handler, clock).wait("https://github.com/o/r/pull/7"), clock, poll_times
+    except (RuntimeError, AssertionError) as e:
+        return e, clock, poll_times
+
+
+got, clock, _ = wait_over([([run("completed", "success")], 0)])
+check("wait: a run already completed returns it without sleeping",
+      got == {"status": "completed", "conclusion": "success", "sha": "ccc", "url": RUN_URL}
+      and clock.sleeps == [], f"got {got!r}, sleeps {clock.sleeps!r}")
+
+got, clock, _ = wait_over([([run("queued")], 1), ([run("in_progress")], 10),
+                           ([run("completed", "failure")], 20)])
+check("wait: polls every POLL_INTERVAL_S until the run completes, and returns its conclusion",
+      isinstance(got, dict) and got["conclusion"] == "failure"
+      and clock.sleeps == [ap.POLL_INTERVAL_S] * 2, f"got {got!r}, sleeps {clock.sleeps!r}")
+
+# A poll before the register deadline keeps polling; one that returns at exactly the deadline stops.
+# A wait that held a missing run to the completion deadline, or that stopped only past the register
+# deadline, would poll a third time.
+got, clock, poll_times = wait_over([([], 200), ([], ap.REGISTER_TIMEOUT_S)])
+check("wait: no run registered by REGISTER_TIMEOUT_S raises, naming the SHA and the deadline",
+      isinstance(got, RuntimeError) and "ccc" in str(got)
+      and f"{ap.REGISTER_TIMEOUT_S}s" in str(got) and len(poll_times) == 2
+      and clock.sleeps == [ap.POLL_INTERVAL_S], f"got {got!r}, polls at {poll_times!r}")
+
+# The run first appears past the register deadline, so only the completion deadline, measured from
+# the start of the wait, may stop the loop. The last poll returns at exactly COMPLETION_TIMEOUT_S: a
+# wait that kept the register deadline would stop after two polls, and one that measured from the
+# run's first sighting would poll a fourth time.
+got, clock, poll_times = wait_over([([], 200), ([run("in_progress")], ap.REGISTER_TIMEOUT_S + 100),
+                                    ([run("in_progress")], ap.COMPLETION_TIMEOUT_S)])
+check("wait: a run not completed by COMPLETION_TIMEOUT_S raises, naming the deadline and the run",
+      isinstance(got, RuntimeError) and RUN_URL in str(got)
+      and f"{ap.COMPLETION_TIMEOUT_S}s" in str(got) and len(poll_times) == 3
+      and clock.sleeps == [ap.POLL_INTERVAL_S] * 2, f"got {got!r}, polls at {poll_times!r}")
+
+
+# A run that registered and then drops out of a poll is still the run being waited on: the register
+# deadline passes without a raise, and the timeout names the run rather than "never registered".
+got, clock, poll_times = wait_over([([run("in_progress")], 10), ([], ap.REGISTER_TIMEOUT_S),
+                                    ([], ap.COMPLETION_TIMEOUT_S)])
+check("wait: a run missing from a later poll is held to COMPLETION_TIMEOUT_S, not reported unregistered",
+      isinstance(got, RuntimeError) and RUN_URL in str(got)
+      and f"{ap.COMPLETION_TIMEOUT_S}s" in str(got) and len(poll_times) == 3,
+      f"got {got!r}, polls at {poll_times!r}")
+
+
+# --- the production clock ----------------------------------------------------------------------
+
+# Epoch time and monotonic time differ by decades on any machine, so a SystemClock that read wall
+# time would fail this.
+check("SystemClock.now is monotonic time", abs(SystemClock().now() - time.monotonic()) < 60,
+      f"now {SystemClock().now()!r}, monotonic {time.monotonic()!r}")
 
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)

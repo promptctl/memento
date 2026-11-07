@@ -7,7 +7,7 @@ specified in PROVIDER_CONTRACT.md.
 
 from __future__ import annotations
 
-from github_threads import GitHub
+from ports import Ports
 
 
 class Provider:
@@ -18,8 +18,8 @@ class Provider:
         "dismiss_review": False,  # no formal GitHub review to dismiss
     }
 
-    def __init__(self, github: GitHub):
-        self._github = github
+    def __init__(self, ports: Ports):
+        pass
 
     def setup_check(self, owner: str, repo: str) -> dict:
         raise NotImplementedError(

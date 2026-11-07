@@ -3,8 +3,8 @@
 
 The GraphQL thread read, the canonical finding shape, and the verified resolve and reply mutations
 are defined here once, so providers that post review threads use them instead of keeping copies.
-Every gh call goes through a `GitHub` client built around one `Runner`. An entry point builds the
-client with `run_gh`; a test builds it with a fake.
+Every gh call goes through a `GitHub` client built around one `Runner`. An entry point gets the
+real client from `ports.production_ports()`; a test builds it over a fake Runner.
 """
 
 from __future__ import annotations

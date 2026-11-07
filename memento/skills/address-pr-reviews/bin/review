@@ -18,6 +18,7 @@ sys.path.insert(0, str(SKILL_DIR))
 
 import github_threads  # noqa: E402
 import provider_loader  # noqa: E402
+from ports import Ports, production_ports  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(run: github_threads.Runner) -> int:
+def main(ports: Ports) -> int:
     args = build_parser().parse_args()
 
     # setup-check's owner/repo pair arrives whole or not at all.
@@ -170,16 +171,15 @@ def main(run: github_threads.Runner) -> int:
         return 2
 
     try:
-        github = github_threads.GitHub(run)
         name = provider_loader.resolve_name(args.provider)
-        provider = provider_loader.get(name, github)
+        provider = provider_loader.get(name, ports)
         # Capability gate for every subcommand.
         if args.capability and not provider.CAPABILITIES.get(args.capability):
             raise RuntimeError(
                 f"provider '{name}' does not support "
                 f"'{args.command}': CAPABILITIES[{args.capability!r}] is False."
             )
-        payload, failure = args.func(provider, github, args)
+        payload, failure = args.func(provider, ports.github, args)
     except (RuntimeError, ValueError, NotImplementedError, KeyError) as e:
         print(f"ERROR ({args.command}): {e}", file=sys.stderr)
         return 1
@@ -192,4 +192,4 @@ def main(run: github_threads.Runner) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(github_threads.run_gh))
+    sys.exit(main(production_ports()))

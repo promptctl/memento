@@ -1,8 +1,10 @@
-"""The in-memory fake of github_threads' Runner, shared by every test that drives a `GitHub` client.
+"""The in-memory fakes a test builds `ports.Ports` over, shared by every test that builds a provider:
+`FakeRunner` under the GitHub client, and `FakeClock` as the Clock.
 
-A test teaches it gh's outcomes through a handler from argv (without the leading `gh`) to one of:
-the stdout of a gh that succeeded, `failed(...)` for one that exited nonzero, or an OSError for one
-that could not be started. A handler raises AssertionError for an argv it was not taught.
+`FakeRunner` stands in for github_threads' Runner. A test teaches it gh's outcomes through a handler
+from argv (without the leading `gh`) to one of: the stdout of a gh that succeeded, `failed(...)` for
+one that exited nonzero, or an OSError for one that could not be started. A handler raises
+AssertionError for an argv it was not taught.
 """
 
 from __future__ import annotations
@@ -43,3 +45,25 @@ class FakeRunner:
         if isinstance(outcome, str):
             return CompletedProcess(args, 0, stdout=outcome, stderr="")
         return outcome
+
+
+class FakeClock:
+    """Time that moves only when told, and only forward. `sleep` advances `now` and records the
+    interval in `sleeps`; `advance` moves time without a sleep, as a gh call that takes time would."""
+
+    def __init__(self):
+        self._now = 0.0
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.advance(seconds)
+
+    def advance(self, seconds: float) -> None:
+        # A monotonic clock never runs backwards, so a test that scripts it to is wrong.
+        if seconds < 0:
+            raise AssertionError(f"clock moved backwards by {-seconds}s at t={self._now}")
+        self._now += seconds
