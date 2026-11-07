@@ -2,8 +2,8 @@
 """Tests for the action provider's body findings and their merge with review threads.
 
 Findings the reviewer could not post inline appear in the CHANGES_REQUESTED review body, and `fetch`
-must return them with the threads. `gh` is faked at the subprocess seam, so argv construction and
-JSONL parsing run for real, and no test uses the network. Run with: python3 action_provider.test.py
+must return them with the threads. The provider is built around a fake Runner, so argv construction
+and JSONL parsing run for real, and no test uses the network. Run with: python3 action_provider.test.py
 """
 
 import json
@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 
 import action_provider as ap  # noqa: E402
 import github_threads as gt  # noqa: E402
+from gh_fake import FakeRunner, failed  # noqa: E402
 
 failures = []
 
@@ -25,20 +26,8 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
-# --- a fake gh at the subprocess seam ----------------------------------------
-
-class FakeGh:
-    PIPE = -1
-
-    def __init__(self, handler):
-        self.handler = handler
-        self.calls = []
-
-    def check_output(self, argv, text=True, stderr=None):
-        assert argv[0] == "gh", argv
-        args = list(argv[1:])
-        self.calls.append(args)
-        return self.handler(args)
+def provider(handler):
+    return ap.Provider(gt.GitHub(FakeRunner(handler)))
 
 
 # --- body findings: what the reviewer could not post inline -----------------
@@ -182,10 +171,10 @@ def combined_pr(thread_nodes, reviews):
     return handler
 
 
-gt.subprocess = FakeGh(combined_pr(
+pr_with_both = provider(combined_pr(
     [thread_node("t1", "an inline finding on a diff line")],
     [body_review(9, "CHANGES_REQUESTED", FINDING_BODY)]))
-findings = ap.fetch("https://github.com/o/r/pull/7")["findings"]
+findings = pr_with_both.fetch("https://github.com/o/r/pull/7")["findings"]
 check("fetch: the inline thread finding is present, keyed by its thread id",
       any(f["thread_id"] == "t1" for f in findings), f"got {findings!r}")
 check("fetch: the body finding is present, thread-less, alongside the thread",
@@ -210,21 +199,18 @@ for label, matches, installed, mention in [
     ("absent is not installed, pointing at setup", [], False, "run the agent-code-review-setup skill"),
     ("disabled is not installed, naming the state", ["disabled_manually"], False, "disabled_manually"),
 ]:
-    gt.subprocess = FakeGh(workflow_list(matches))
-    check_result = ap.setup_check("o", "r")
+    check_result = provider(workflow_list(matches)).setup_check("o", "r")
     check(f"setup_check: {label}",
           check_result["installed"] is installed and mention in check_result["message"],
           f"got {check_result!r}")
 
 
 def repo_not_found(args):
-    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Not Found (HTTP 404)\n",
-                                output='{"message":"Not Found","status":"404"}')
+    return failed("gh: Not Found (HTTP 404)\n", stdout='{"message":"Not Found","status":"404"}')
 
 
-gt.subprocess = FakeGh(repo_not_found)
 try:
-    check_result = ap.setup_check("o", "r")
+    check_result = provider(repo_not_found).setup_check("o", "r")
 except gt.GhError as e:
     check("setup_check: an unreadable repo raises, not 'not installed'",
           "Not Found (HTTP 404)" in str(e) and "'message': 'Not Found'" in str(e), f"message {str(e)!r}")

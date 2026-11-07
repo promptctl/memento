@@ -14,21 +14,8 @@ import re
 import time
 from typing import Optional
 
-# resolve, change_requests and dismiss_review come from github_threads unchanged. `fetch` is defined
-# below, since it adds the body findings.
 import github_threads
-from github_threads import (  # noqa: F401  (contract surface)
-    resolve,
-    change_requests,
-    dismiss_review,
-)
-
-CAPABILITIES = {
-    "resolve":        True,   # GitHub review threads are resolvable
-    "trigger":        False,  # fires automatically on push via GitHub Action
-    "setup_check":    True,   # checks that code-review.yml workflow is installed
-    "dismiss_review": True,   # github-actions posts a dismissible CHANGES_REQUESTED review
-}
+from github_threads import GitHub
 
 # The workflow file this provider watches.
 WORKFLOW_FILE = "code-review.yml"
@@ -36,21 +23,6 @@ WORKFLOW_FILE = "code-review.yml"
 REGISTER_TIMEOUT_S = 300
 COMPLETION_TIMEOUT_S = 3600
 POLL_INTERVAL_S = 8
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _latest_run(owner: str, repo: str, sha: str) -> Optional[dict]:
-    out = github_threads.gh(
-        "api",
-        f"repos/{owner}/{repo}/actions/workflows/{WORKFLOW_FILE}/runs"
-        f"?head_sha={sha}&per_page=1",
-        "--jq", ".workflow_runs",
-    )
-    runs = json.loads(out) if out else []
-    return runs[0] if runs else None
 
 
 # ---------------------------------------------------------------------------
@@ -124,87 +96,102 @@ def body_findings(reviews: list[dict]) -> list[dict]:
     ]
 
 
-def fetch(pr_url: str) -> dict:
-    """Returns every pending finding: inline review threads plus body findings from blocking reviews."""
-    data = github_threads.fetch(pr_url)
-    data["findings"].extend(body_findings(github_threads.bot_reviews(pr_url)))
-    return data
-
-
 # ---------------------------------------------------------------------------
-# Contract: setup_check
+# The provider: the contract operations over one GitHub client
 # ---------------------------------------------------------------------------
 
-def setup_check(owner: str, repo: str) -> dict:
-    """Verify code-review.yml workflow is installed on the repo.
+class Provider:
+    CAPABILITIES = {
+        "resolve":        True,   # GitHub review threads are resolvable
+        "trigger":        False,  # fires automatically on push via GitHub Action
+        "setup_check":    True,   # checks that code-review.yml workflow is installed
+        "dismiss_review": True,   # github-actions posts a dismissible CHANGES_REQUESTED review
+    }
 
-    The repo's workflow list is read rather than the workflow itself, because GitHub answers 404 for
-    a missing workflow, a missing repo, and a repo the token cannot see alike. Here an absent
-    workflow is an empty match, and every gh failure raises. [LAW:no-silent-failure]
-    """
-    state = next((w["state"] for w in github_threads.paginated(
-        f"repos/{owner}/{repo}/actions/workflows?per_page=100",
-        f'.workflows[] | select(.path == ".github/workflows/{WORKFLOW_FILE}") | {{state}}',
-    )), None)
-    if state is None:
+    def __init__(self, github: GitHub):
+        self._github = github
+        # Taken from the client unchanged. resolve applies to inline threads only, since a body
+        # finding has no thread; it is cleared by dismiss_review.
+        self.resolve = github.resolve
+        self.change_requests = github.change_requests
+        self.dismiss_review = github.dismiss_review
+
+    def fetch(self, pr_url: str) -> dict:
+        """Returns every pending finding: inline review threads plus body findings from blocking
+        reviews."""
+        data = self._github.fetch(pr_url)
+        data["findings"].extend(body_findings(self._github.bot_reviews(pr_url)))
+        return data
+
+    def setup_check(self, owner: str, repo: str) -> dict:
+        """Verify code-review.yml workflow is installed on the repo.
+
+        The repo's workflow list is read rather than the workflow itself, because GitHub answers 404
+        for a missing workflow, a missing repo, and a repo the token cannot see alike. Here an absent
+        workflow is an empty match, and every gh failure raises. [LAW:no-silent-failure]
+        """
+        state = next((w["state"] for w in self._github.paginated(
+            f"repos/{owner}/{repo}/actions/workflows?per_page=100",
+            f'.workflows[] | select(.path == ".github/workflows/{WORKFLOW_FILE}") | {{state}}',
+        )), None)
+        if state is None:
+            return {
+                "installed": False,
+                "message": (
+                    f"review workflow ({WORKFLOW_FILE}) not found on "
+                    f"{owner}/{repo} — run the agent-code-review-setup skill in this "
+                    "repo and merge it to the default branch first."
+                ),
+            }
+        if state == "active":
+            return {"installed": True, "message": f"{WORKFLOW_FILE} is active"}
         return {
             "installed": False,
             "message": (
-                f"review workflow ({WORKFLOW_FILE}) not found on "
-                f"{owner}/{repo} — run the agent-code-review-setup skill in this "
-                "repo and merge it to the default branch first."
+                f"{WORKFLOW_FILE} exists but state is '{state}' — "
+                "check Actions settings on this repo."
             ),
         }
-    if state == "active":
-        return {"installed": True, "message": f"{WORKFLOW_FILE} is active"}
-    return {
-        "installed": False,
-        "message": (
-            f"{WORKFLOW_FILE} exists but state is '{state}' — "
-            "check Actions settings on this repo."
-        ),
-    }
 
-
-# ---------------------------------------------------------------------------
-# Contract: wait
-# ---------------------------------------------------------------------------
-
-def wait(pr_url: str) -> dict:
-    """Block until the GitHub Action run for the current head SHA completes."""
-    owner, repo, pr_num = github_threads.parse_pr(pr_url)
-    sha = github_threads.head_sha(owner, repo, pr_num)
-    start = time.time()
-    run: Optional[dict] = None
-    while True:
-        run = _latest_run(owner, repo, sha)
-        if run and run.get("status") == "completed":
-            return {
-                "status":     "completed",
-                "conclusion": run.get("conclusion"),
-                "sha":        sha,
-                "url":        run.get("html_url"),
-            }
-        deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
-        if time.time() - start >= deadline:
-            break
-        time.sleep(POLL_INTERVAL_S)
-    if run is None:
-        raise RuntimeError(
-            f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
-            f"{REGISTER_TIMEOUT_S}s. Is the workflow installed on this repo "
-            "(run the agent-code-review-setup skill) and are Actions enabled?"
+    def _latest_run(self, owner: str, repo: str, sha: str) -> Optional[dict]:
+        out = self._github.gh(
+            "api",
+            f"repos/{owner}/{repo}/actions/workflows/{WORKFLOW_FILE}/runs"
+            f"?head_sha={sha}&per_page=1",
+            "--jq", ".workflow_runs",
         )
-    raise RuntimeError(
-        f"review run for {sha} did not complete within {COMPLETION_TIMEOUT_S}s "
-        f"(status: {run.get('status')}). The runner may be wedged: {run.get('html_url')}"
-    )
+        runs = json.loads(out) if out else []
+        return runs[0] if runs else None
 
-
-# ---------------------------------------------------------------------------
-# Contract: fetch is defined above. resolve is re-exported from github_threads, since a body finding
-# has no thread to resolve.
-# ---------------------------------------------------------------------------
+    def wait(self, pr_url: str) -> dict:
+        """Block until the GitHub Action run for the current head SHA completes."""
+        owner, repo, pr_num = github_threads.parse_pr(pr_url)
+        sha = self._github.head_sha(owner, repo, pr_num)
+        start = time.time()
+        run: Optional[dict] = None
+        while True:
+            run = self._latest_run(owner, repo, sha)
+            if run and run.get("status") == "completed":
+                return {
+                    "status":     "completed",
+                    "conclusion": run.get("conclusion"),
+                    "sha":        sha,
+                    "url":        run.get("html_url"),
+                }
+            deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
+            if time.time() - start >= deadline:
+                break
+            time.sleep(POLL_INTERVAL_S)
+        if run is None:
+            raise RuntimeError(
+                f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
+                f"{REGISTER_TIMEOUT_S}s. Is the workflow installed on this repo "
+                "(run the agent-code-review-setup skill) and are Actions enabled?"
+            )
+        raise RuntimeError(
+            f"review run for {sha} did not complete within {COMPLETION_TIMEOUT_S}s "
+            f"(status: {run.get('status')}). The runner may be wedged: {run.get('html_url')}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -215,15 +202,16 @@ if __name__ == "__main__":
     import argparse
     import sys
 
+    provider = Provider(GitHub(github_threads.run_gh))
     parser = argparse.ArgumentParser(description="GitHub Action PR review provider (direct)")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("wait", "fetch"):
         p = sub.add_parser(name)
         p.add_argument("pr_url")
-        p.set_defaults(func=globals()[name])
+        p.set_defaults(func=getattr(provider, name))
     p_resolve = sub.add_parser("resolve")
     p_resolve.add_argument("thread_id")
-    p_resolve.set_defaults(func=resolve)
+    p_resolve.set_defaults(func=provider.resolve)
 
     args = parser.parse_args()
     try:

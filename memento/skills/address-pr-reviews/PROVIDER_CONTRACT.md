@@ -7,15 +7,21 @@ provider means writing one module; no changes to the skill are required.
 ## Module layout
 
 Every provider module lives in the same directory as this file and is named
-`<name>_provider.py`. It exposes:
+`<name>_provider.py`. It exposes one class, `Provider`, whose constructor takes
+a `github_threads.GitHub` client, and which has:
 
-- A top-level `CAPABILITIES` dict (see below).
-- The functions its capabilities declare as supported.
+- A `CAPABILITIES` dict class attribute (see below).
+- The operations its capabilities declare as supported.
 - `wait` and `fetch`, which are always required.
 
-The loader (`provider_loader.py`) imports the module, reads `CAPABILITIES`,
-and returns the module. The skill calls the functions directly — no class
-hierarchy, no base class, no dynamic dispatch beyond the import.
+Every gh call a provider makes goes through that client, and the client runs
+gh through the one `Runner` it was built with. The caller builds the client:
+`github_threads.GitHub(github_threads.run_gh)` for real gh, or a client over
+`gh_fake.FakeRunner` in a test. The loader (`provider_loader.get(name, github)`)
+imports the module, builds `Provider(github)`, validates it against
+`CAPABILITIES`, and returns it. `provider_loader.resolve_name(name)` says which
+provider that is. The skill calls the operations on the returned provider — no
+base class, no dynamic dispatch beyond the import.
 
 ## Provider selection
 
@@ -204,10 +210,10 @@ that is a silent failure. `[LAW:no-silent-failure]`
 
 ## Adding a new provider
 
-1. Create `<name>_provider.py` in this directory.
-2. Set `CAPABILITIES` accurately — don't declare a capability unless the
-   function is implemented.
+1. Create `<name>_provider.py` in this directory, defining `Provider(github)`.
+2. Set `Provider.CAPABILITIES` accurately — don't declare a capability unless
+   the operation is implemented.
 3. Implement `wait` and `fetch` (always required) plus any declared optional
-   functions.
+   operations, making every gh call through the `github` client.
 4. Set `provider.json` to `{"provider": "<name>"}` to activate it.
 5. Test `wait` + `fetch` against a real PR before declaring it production-ready.

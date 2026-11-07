@@ -21,6 +21,8 @@ _spec = importlib.util.spec_from_file_location(
 )
 cli = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cli)
+sys.path.insert(0, HERE)
+from gh_fake import FakeRunner, failed  # noqa: E402
 
 failures = []
 
@@ -41,7 +43,7 @@ def provider_returning(result):
 
 def wait_with(**fields):
     result = {"status": "completed", "sha": "ccc", **fields}
-    return cli.cmd_wait(provider_returning(result), ARGS)
+    return cli.cmd_wait(provider_returning(result), None, ARGS)
 
 
 got, failure = wait_with(conclusion="success")
@@ -55,29 +57,13 @@ check("non-success conclusion: fails naming the conclusion and the run",
 # --- reply: SKILL.md posts every plan and fix comment through `bin/review reply` ----------------
 
 
-class ReplyGh:
-    """Stands in for github_threads' subprocess module, answering the reply mutation with `response`."""
-
-    PIPE = -1
-
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
-
-    def check_output(self, argv, text=True, stderr=None):
-        self.calls.append(argv)
-        if isinstance(self.response, BaseException):
-            raise self.response
-        return self.response
-
-
 def run_reply(response, *argv):
-    fake = ReplyGh(response)
-    cli.github_threads.subprocess = fake
+    """Runs `review <argv>` with a gh that answers every call with `response`."""
+    fake = FakeRunner(lambda args: response)
     sys.argv = ["review", *argv]
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli.main()
+        code = cli.main(fake)
     return code, out.getvalue(), err.getvalue(), fake.calls
 
 
@@ -95,11 +81,18 @@ check("reply: no comment id exits 1 saying NOT posted",
       code == 1 and "NOT posted" in err, f"code={code} err={err!r}")
 
 GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_abc'. (node)"
-GH_FAILED = cli.github_threads.CalledProcessError(1, ["gh"], output="", stderr=GH_STDERR + "\n")
+GH_FAILED = failed(GH_STDERR + "\n")
 code, out, err, _ = run_reply(GH_FAILED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a failed gh call exits 1 printing gh's stderr",
       code == 1 and err == f"ERROR (reply): gh api graphql exited 1: {GH_STDERR}\n",
       f"code={code} err={err!r}")
+
+# The client main builds is the one the provider runs through, so a provider command reaches the fake too.
+code, out, err, calls = run_reply('{"state": "active"}', "--provider", "action", "setup-check", "o", "r")
+check("setup-check: the provider's gh call goes through the runner main was given",
+      code == 0 and json.loads(out)["installed"] is True
+      and calls and calls[0][:3] == ["api", "--paginate", "repos/o/r/actions/workflows?per_page=100"],
+      f"code={code} out={out!r} err={err!r} calls={calls!r}")
 
 code, out, err, calls = run_reply(POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

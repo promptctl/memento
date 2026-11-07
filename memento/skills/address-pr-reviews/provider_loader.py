@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Loads the active PR review provider module and validates it against the provider contract.
+"""Builds the active PR review provider and validates it against the provider contract.
 
 The provider name comes from an explicit argument, then PR_REVIEW_PROVIDER, then provider.json in
-this directory. The module is `<name>_provider.py` here and must declare CAPABILITIES and the
-functions `wait` and `fetch`.
+this directory. The module is `<name>_provider.py` here; its `Provider` class is built with the
+caller's GitHub client and must declare CAPABILITIES and the operations `wait` and `fetch`.
 """
 
 from __future__ import annotations
@@ -15,6 +15,12 @@ import sys
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).parent
+# Sibling modules such as github_threads become importable for every provider and caller from here.
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
+
+from github_threads import GitHub  # noqa: E402
+
 CONFIG_FILE = SKILL_DIR / "provider.json"
 
 # Maps each capability to the functions it requires. The required-key set and the validator both
@@ -28,19 +34,21 @@ CAPABILITY_FUNCS = {
 REQUIRED_CAPABILITIES = set(CAPABILITY_FUNCS)
 
 
-def get(name: str | None = None) -> object:
-    """Returns the active provider module, validated against the contract.
+def get(name: str | None, github: GitHub) -> object:
+    """Returns the provider `name` names, built with `github` and validated against the contract.
 
-    Precedence: the `name` argument, then PR_REVIEW_PROVIDER, then provider.json. An explicit
-    argument selects a provider for that call only and does not change the default.
+    A `name` of None is resolved by `resolve_name`. The caller builds `github`, so each entry point
+    is the one place that decides which gh its provider runs.
     """
-    name = _resolve_name(name)
-    module = _load_module(name)
-    _validate(module, name)
-    return module
+    name = resolve_name(name)
+    provider = _provider_class(name)(github)
+    _validate(provider, name)
+    return provider
 
 
-def _resolve_name(explicit: str | None = None) -> str:
+def resolve_name(explicit: str | None) -> str:
+    """Returns the provider name: `explicit`, then PR_REVIEW_PROVIDER, then provider.json. An
+    explicit name selects a provider for that call only and does not change the default."""
     if explicit:
         return explicit
     if env := os.environ.get("PR_REVIEW_PROVIDER"):
@@ -56,27 +64,26 @@ def _resolve_name(explicit: str | None = None) -> str:
     )
 
 
-def _load_module(name: str) -> object:
+def _provider_class(name: str) -> type:
     path = SKILL_DIR / f"{name}_provider.py"
     if not path.exists():
         raise RuntimeError(
             f"Provider module not found: {path}\n"
             f"Available providers: {_available()}"
         )
-    # Sibling modules such as github_threads become importable for every provider from here.
-    if str(SKILL_DIR) not in sys.path:
-        sys.path.insert(0, str(SKILL_DIR))
     spec = importlib.util.spec_from_file_location(f"{name}_provider", path)
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
     except Exception as e:
         raise RuntimeError(f"Failed to load provider '{name}': {e}") from e
-    return module
+    if not isinstance(getattr(module, "Provider", None), type):
+        raise RuntimeError(f"Provider module '{name}' defines no Provider class.")
+    return module.Provider
 
 
-def _validate(module: object, name: str) -> None:
-    caps = getattr(module, "CAPABILITIES", None)
+def _validate(provider: object, name: str) -> None:
+    caps = getattr(provider, "CAPABILITIES", None)
     if caps is None:
         raise RuntimeError(f"Provider '{name}' is missing CAPABILITIES dict.")
     missing_keys = REQUIRED_CAPABILITIES - caps.keys()
@@ -85,18 +92,18 @@ def _validate(module: object, name: str) -> None:
             f"Provider '{name}' CAPABILITIES is missing keys: {missing_keys}"
         )
     for fn in ("wait", "fetch"):
-        if not hasattr(module, fn):
+        if not hasattr(provider, fn):
             raise RuntimeError(
-                f"Provider '{name}' is missing required function '{fn}'."
+                f"Provider '{name}' is missing required operation '{fn}'."
             )
     for cap, funcs in CAPABILITY_FUNCS.items():
         if not caps.get(cap):
             continue
         for fn in funcs:
-            if not hasattr(module, fn):
+            if not hasattr(provider, fn):
                 raise RuntimeError(
                     f"Provider '{name}' declares capability '{cap}' but does not "
-                    f"implement the function '{fn}'."
+                    f"implement the operation '{fn}'."
                 )
 
 
@@ -108,11 +115,13 @@ def _available() -> list[str]:
 
 
 if __name__ == "__main__":
+    import github_threads
+
     try:
-        p = get()
-        caps = p.CAPABILITIES
-        print(f"Active provider: {p.__name__}")
-        print(f"Capabilities:    {caps}")
+        name = resolve_name(None)
+        p = get(name, GitHub(github_threads.run_gh))
+        print(f"Active provider: {name}")
+        print(f"Capabilities:    {p.CAPABILITIES}")
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
