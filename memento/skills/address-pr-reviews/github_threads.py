@@ -176,15 +176,17 @@ def _build_findings(threads: list[dict]) -> list[dict]:
     for t in threads:
         nodes = t.get("comments", {}).get("nodes") or []
         first = nodes[0] if nodes else {}
-        end_side = t["diffSide"]
-        end = _line_at_commit(end_side, t.get("originalLine"))
+        row = t.get("originalLine")
+        end_side = t.get("diffSide")
+        end = _line_at_commit(end_side, row)
         start = _line_at_commit(t.get("startDiffSide") or end_side,
-                                t.get("originalStartLine") or t.get("originalLine"))
+                                t.get("originalStartLine") or row)
         findings.append({
             "file":            t.get("path"),
             "line_start":      start,
             "line_end":        end,
-            "diff_hunk":       first.get("diffHunk"),
+            # GitHub records a hunk for a file-level comment too, but it ends at no commented row
+            "diff_hunk":       first.get("diffHunk") if row is not None else None,
             "body":            first.get("body", ""),
             "author":          (first.get("author") or {}).get("login"),
             "commit_id":       (first.get("originalCommit") or {}).get("oid"),

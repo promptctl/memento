@@ -188,9 +188,9 @@ check("commit: the thread query asks for each comment's originalCommit and the t
 HUNK = "@@ -5,3 +5,2 @@\n keep\n-gone\n+new"
 
 
-def sided(tid, end_side, start_side=None, start=None):
+def sided(tid, end_side, start_side=None, start=None, replies=()):
     node = {**thread_node(tid, [{**comment("bot", tid), "originalCommit": {"oid": "c"},
-                                 "diffHunk": HUNK}]),
+                                 "diffHunk": HUNK}, *replies]),
             "diffSide": end_side, "startDiffSide": start_side}
     return {**node, "originalStartLine": start} if start else node
 
@@ -201,15 +201,19 @@ github, fake = install(paged_graphql({
         sided("left", "LEFT"),
         sided("left-to-right", "RIGHT", start_side="LEFT", start=3),
         sided("right-to-left", "LEFT", start_side="RIGHT", start=3),
+        sided("replied", "RIGHT", replies=[{**comment("human", "no"), "diffHunk": "@@ reply @@"}]),
+        {**sided("file-level", "RIGHT"), "originalLine": None},
     ]),
 }))
 found = {f["thread_id"]: f for f in github.fetch(PR)["findings"]}
 check_returns("side: each end is its line on the RIGHT and None on the LEFT",
               lambda: {t: (f["line_start"], f["line_end"]) for t, f in found.items()},
               {"right": (7, 7), "left": (None, None),
-               "left-to-right": (None, 7), "right-to-left": (3, None)})
-check("side: every thread finding carries the first comment's diff hunk",
-      all(f["diff_hunk"] == HUNK for f in found.values()), f"got {found!r}")
+               "left-to-right": (None, 7), "right-to-left": (3, None),
+               "replied": (7, 7), "file-level": (None, None)})
+check_returns("side: a line comment carries its first comment's diff hunk; a file-level one none",
+              lambda: {t: f["diff_hunk"] for t, f in found.items()},
+              {**{t: HUNK for t in found}, "file-level": None})
 check("side: the thread query asks for both sides and the hunk",
       all(f in gh_vars(fake.calls[0])["query"] for f in ("startDiffSide", "diffSide", "diffHunk")),
       f"got {fake.calls[0]}")
@@ -217,6 +221,10 @@ check("side: the thread query asks for both sides and the hunk",
 github, fake = install(paged_graphql({None: threads_page([sided("odd", "MIDDLE")])}))
 check_raises("side: a side GitHub does not define raises, naming it",
              ValueError, lambda: github.fetch(PR), must_mention=("MIDDLE",))
+
+github, fake = install(paged_graphql({None: threads_page([sided("sideless", None)])}))
+check_raises("side: a thread with no side raises the same error",
+             ValueError, lambda: github.fetch(PR), must_mention=("neither LEFT nor RIGHT",))
 
 
 # --- multi-page comment fetch inside _complete_comments -------------------

@@ -123,8 +123,9 @@ comment was made on; for a body finding, the commit of the review it came from. 
 backend names no commit for it. `line_start` and `line_end` are lines at that commit, not at the
 head. Either is null when that end is no line at that commit: a file-level comment, or an end on a
 deleted line, which lives in the diff's old side, a file the backend names no commit for.
-`diff_hunk` is the diff text the backend recorded for the finding, ending at the commented row, so
-it shows a deleted line's code; it is null when no diff anchors the finding, as for a body finding.
+`diff_hunk` is the diff text the backend recorded for a line comment, ending at its last row, so it
+holds every row of its range, deleted ones included; it is null for a finding on no row: a body
+finding or a file-level comment.
 A provider reports the commit and nothing more — where that commit
 stands against the head is not the provider's to say (see `head_sha`).
 
