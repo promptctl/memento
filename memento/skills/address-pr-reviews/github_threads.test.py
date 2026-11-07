@@ -489,6 +489,30 @@ for label, response in [
                  must_mention=("T_abc", "NOT posted"))
 
 
+# --- a failed gh call: the error says why, and does not echo the reply ---
+
+GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_gone'. (node)"
+
+
+def failing_gh(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr=GH_STDERR + "\n")
+
+
+install(failing_gh)
+check_raises("gh failure: resolve raises GhError carrying gh's stderr",
+             gt.GhError, lambda: gt.resolve("T_gone"),
+             must_mention=("gh api graphql exited 1", GH_STDERR))
+
+install(failing_gh)
+try:
+    gt.reply("T_gone", "a long reply body that must not be echoed")
+except gt.GhError as e:
+    check("gh failure: reply's GhError carries gh's stderr and not the body",
+          GH_STDERR in str(e) and "must not be echoed" not in str(e), f"message {str(e)!r}")
+else:
+    check("gh failure: reply's GhError carries gh's stderr and not the body", False, "did not raise")
+
+
 def dismiss_handler(state):
     def handler(args):
         if args[:4] != ["api", "--method", "PUT",

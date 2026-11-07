@@ -7,16 +7,35 @@ are defined here once, so providers that post review threads import them instead
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import subprocess
+from subprocess import CalledProcessError
+
+
+class GhError(RuntimeError):
+    """A `gh` call that exited nonzero. The message carries gh's stderr, which is the reason."""
+
+    def __init__(self, command: str, returncode: int, stderr: str):
+        self.command = command
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(f"gh {command} exited {returncode}: {stderr}")
 
 
 def gh(*args: str) -> str:
-    """Runs `gh` with the given arguments and returns its stripped stdout."""
-    return subprocess.check_output(
-        ["gh", *args], text=True, stderr=subprocess.PIPE
-    ).strip()
+    """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it fails.
+    """
+    try:
+        return subprocess.check_output(
+            ["gh", *args], text=True, stderr=subprocess.PIPE
+        ).strip()
+    except CalledProcessError as e:
+        # The command is named by its leading words only. The `-f` values that follow can be a whole
+        # query or reply body, which would bury the stderr that says why the call failed.
+        command = " ".join(itertools.takewhile(lambda a: not a.startswith("-"), args))
+        raise GhError(command, e.returncode, e.stderr.strip()) from e
 
 
 def parse_pr(url: str) -> tuple[str, str, int]:

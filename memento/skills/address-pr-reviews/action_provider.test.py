@@ -194,5 +194,20 @@ check("fetch: exactly the two findings, threads then body",
       [f["thread_id"] for f in findings] == ["t1", None], f"got {findings!r}")
 
 
+# --- setup_check: a failed workflow lookup says not installed, and why --------
+
+def workflow_missing(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="gh: Not Found (HTTP 404)\n")
+
+
+gt.subprocess = FakeGh(workflow_missing)
+check_result = ap.setup_check("o", "r")
+check("setup_check: a failed lookup is not installed, and carries gh's stderr",
+      check_result["installed"] is False
+      and "not found on o/r" in check_result["message"]
+      and "Not Found (HTTP 404)" in check_result["message"],
+      f"got {check_result!r}")
+
+
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)

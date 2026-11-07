@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from typing import Optional
 
@@ -152,13 +151,13 @@ def setup_check(owner: str, repo: str) -> dict:
                 "check Actions settings on this repo."
             ),
         }
-    except subprocess.CalledProcessError:
+    except github_threads.GhError as e:
         return {
             "installed": False,
             "message": (
                 f"review workflow ({WORKFLOW_FILE}) not found on "
                 f"{owner}/{repo} — run the agent-code-review-setup skill in this "
-                "repo and merge it to the default branch first."
+                f"repo and merge it to the default branch first. ({e})"
             ),
         }
 
@@ -228,10 +227,6 @@ if __name__ == "__main__":
             print(json.dumps(args.func(args.pr_url), indent=2))
         else:
             print(json.dumps(args.func(args.thread_id), indent=2))
-    except subprocess.CalledProcessError as e:
-        msg = (e.stderr or "").strip() or str(e)
-        print(f"ERROR ({args.command}): {msg}", file=sys.stderr)
-        sys.exit(1)
     except (RuntimeError, ValueError) as e:
         print(f"ERROR ({args.command}): {e}", file=sys.stderr)
         sys.exit(1)
