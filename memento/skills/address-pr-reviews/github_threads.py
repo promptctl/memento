@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """GitHub review-thread primitives shared by providers whose findings are PR review threads.
 
-The GraphQL thread read, the canonical finding shape, and the verified resolve mutation are defined
-here once, so providers that post review threads import them instead of keeping copies.
+The GraphQL thread read, the canonical finding shape, and the verified resolve and reply mutations
+are defined here once, so providers that post review threads import them instead of keeping copies.
 """
 
 from __future__ import annotations
@@ -62,8 +62,19 @@ _COMMENTS_QUERY = (
 )
 
 
+_RESOLVE_MUTATION = (
+    "mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }"
+)
+
+_REPLY_MUTATION = (
+    "mutation($id:ID!,$body:String!){"
+    "  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){"
+    "    comment{ id } } }"
+)
+
+
 def _graphql(query: str, **variables) -> dict:
-    """Runs one GraphQL query.
+    """Runs one GraphQL query or mutation; every GraphQL call in this module goes through here.
 
     Strings go through `-f`, which sends them raw, and ints through `-F`. `-F` would type-infer an
     all-digit cursor or id into a number. A `None` variable is omitted, so GraphQL reads it as null
@@ -74,7 +85,14 @@ def _graphql(query: str, **variables) -> dict:
         if value is None:
             continue
         args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
-    return json.loads(gh(*args))
+    out = gh(*args)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"gh api graphql printed {out!r}, not a JSON object")
+    return data
 
 
 def _response_path(data: dict, *path: str, subject: str) -> dict:
@@ -191,19 +209,29 @@ def fetch(pr_url: str) -> dict:
 def resolve(thread_id: str) -> dict:
     """Resolves one review thread and returns only after GitHub confirms it. Raises RuntimeError if it
     does not."""
-    confirmed = gh(
-        "api", "graphql",
-        "-f", "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id})"
-              "{thread{isResolved}}}",
-        "-F", f"id={thread_id}",
-        "--jq", ".data.resolveReviewThread.thread.isResolved",
-    )
-    if confirmed != "true":
+    data = _graphql(_RESOLVE_MUTATION, id=thread_id)
+    # A false, a null, and a missing payload are all one outcome: no confirmation.
+    payload = (data.get("data") or {}).get("resolveReviewThread") or {}
+    if (payload.get("thread") or {}).get("isResolved") is not True:
         raise RuntimeError(
-            f"resolveReviewThread did not confirm resolution for {thread_id} "
-            f"(got {confirmed!r}). The thread is NOT resolved — do not move on."
+            f"resolveReviewThread did not confirm resolution for {thread_id}. "
+            f"The thread is NOT resolved — do not move on. Response: {data!r}"
         )
     return {"thread_id": thread_id, "is_resolved": True}
+
+
+def reply(thread_id: str, body: str) -> dict:
+    """Posts a reply on one review thread and returns only after GitHub names the created comment.
+    Raises RuntimeError if it does not."""
+    data = _graphql(_REPLY_MUTATION, id=thread_id, body=body)
+    payload = (data.get("data") or {}).get("addPullRequestReviewThreadReply") or {}
+    comment_id = (payload.get("comment") or {}).get("id")
+    if not comment_id:
+        raise RuntimeError(
+            f"addPullRequestReviewThreadReply returned no comment id for {thread_id}. "
+            f"The reply was NOT posted. Response: {data!r}"
+        )
+    return {"thread_id": thread_id, "comment_id": comment_id}
 
 
 # Selects the automated reviewer's reviews. Its reviews have `.user.type` "Bot" and people's are "User".

@@ -146,10 +146,7 @@ For **each** unresolved finding, before writing any code: open the file at `file
 **Post a comment on the thread stating your plan for this finding** — what you'll do and why. This comment goes on every finding, valid or not; it is the durable record of the decision.
 
 ```bash
-gh api graphql -f query='
-mutation($id:ID!,$body:String!){
-  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){ comment{id} } }
-' -F id="$THREAD_ID" -F body="Plan: ..."
+${CLAUDE_PLUGIN_ROOT}/skills/address-pr-reviews/bin/review reply "$THREAD_ID" --body "Plan: ..."
 ```
 
 The classification carries **one discriminator: does addressing this finding require a code change this round?**
@@ -199,10 +196,7 @@ Pushing triggers re-review for providers that auto-fire on push (`trigger: False
 The fix now exists in a pushed commit. For **each** finding in the change-needed set: post a comment on its thread describing the fix (reference the commit), then resolve it.
 
 ```bash
-gh api graphql -f query='
-mutation($id:ID!,$body:String!){
-  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){ comment{id} } }
-' -F id="$THREAD_ID" -F body="Fixed in <sha>: ..."
+${CLAUDE_PLUGIN_ROOT}/skills/address-pr-reviews/bin/review reply "$THREAD_ID" --body "Fixed in <sha>: ..."
 ```
 
 ```python
