@@ -85,7 +85,7 @@ def comment(login, body):
 
 def thread_node(tid, comments, has_next=False, end=None):
     return {
-        "id": tid, "isResolved": False, "path": "a.py", "line": 7,
+        "id": tid, "isResolved": False, "path": "a.py", "originalLine": 7,
         "comments": {
             "pageInfo": {"hasNextPage": has_next, "endCursor": end},
             "nodes": comments,
@@ -153,6 +153,32 @@ check("threads: first request omits the cursor variable",
 check("threads: later requests thread the endCursor through",
       [gh_vars(c).get("cursor") for c in fake.calls[:3]] == [None, "cursor-A", "cursor-B"],
       f"got {[gh_vars(c).get('cursor') for c in fake.calls[:3]]}")
+
+
+# --- a thread's finding names the commit its first comment was made on ----
+
+github, fake = install(paged_graphql({
+    None: threads_page([
+        # GitHub mapped t1 onto the latest commit at line 17; its comment was made at line 7 on `old`.
+        {**thread_node("t1", [{**comment("bot", "one"), "originalCommit": {"oid": "old"}},
+                              {**comment("human", "reply"), "originalCommit": {"oid": "new"}}]),
+         "line": 17},
+        {**thread_node("t2", [{**comment("bot", "two"), "originalCommit": None}]),
+         "originalStartLine": 3},
+        thread_node("t3", []),
+    ]),
+}))
+found = github.fetch(PR)["findings"]
+check("commit: a thread is on its first comment's commit; a null or absent commit is None",
+      [f["commit_id"] for f in found] == ["old", None, None], f'got {[f["commit_id"] for f in found]}')
+check("commit: a thread's line is its line at that commit, not GitHub's mapping onto the latest",
+      (found[0]["line_start"], found[0]["line_end"]) == (7, 7), f"got {found[0]!r}")
+check("commit: a range comment spans originalStartLine to originalLine",
+      (found[1]["line_start"], found[1]["line_end"]) == (3, 7), f"got {found[1]!r}")
+check("commit: the thread query asks for each comment's originalCommit and the thread's range",
+      all(f in gh_vars(fake.calls[0])["query"]
+          for f in ("originalCommit{oid}", "originalStartLine", "originalLine")),
+      f"got {fake.calls[0]}")
 
 
 # --- multi-page comment fetch inside _complete_comments -------------------

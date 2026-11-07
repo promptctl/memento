@@ -55,11 +55,11 @@ def _split_path_line(span: str) -> tuple[Optional[str], Optional[int]]:
     return span, None
 
 
-def parse_body_findings(body: str, author: str) -> list[dict]:
+def parse_body_findings(body: str, author: str, commit_id: Optional[str]) -> list[dict]:
     """Returns the findings listed under body-finding headings in a review body. Returns [] if there are none.
 
     A body finding has no thread, so `thread_id` is None and it is cleared by dismissing its review,
-    not by `resolve`.
+    not by `resolve`. Its `commit_id` is the commit that review was made on.
     """
     findings: list[dict] = []
     in_section = False
@@ -81,6 +81,7 @@ def parse_body_findings(body: str, author: str) -> list[dict]:
             "line_end":        line_no,
             "body":            text,
             "author":          author,
+            "commit_id":       commit_id,
             "thread_id":       None,
             "is_resolved":     False,
             "thread_comments": [{"author": author, "body": text}],
@@ -96,7 +97,7 @@ def body_findings(reviews: list[dict]) -> list[dict]:
     return [
         f
         for r in reviews if github_threads.is_blocking_review(r)
-        for f in parse_body_findings(r["body"], r["author"])
+        for f in parse_body_findings(r["body"], r["author"], r["commit_id"])
     ]
 
 
@@ -129,6 +130,9 @@ class Provider:
         data = self._github.fetch(pr_url)
         data["findings"].extend(body_findings(self._github.bot_reviews(pr_url)))
         return data
+
+    def head_sha(self, pr_url: str) -> str:
+        return self._github.head_sha(*github_threads.parse_pr(pr_url))
 
     def setup_check(self, owner: str, repo: str) -> dict:
         """Verify code-review.yml workflow is installed on the repo.

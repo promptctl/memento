@@ -43,10 +43,16 @@ class Provider:
             '"sha\": \"\", \"url\": None, \"poll_errors\": []}. If it runs asynchronously, poll for completion.'
         )
 
+    def head_sha(self, pr_url: str) -> str:
+        raise NotImplementedError(
+            "local_provider.head_sha is not yet implemented. "
+            "Return the SHA of the commit the PR's head is at."
+        )
+
     def fetch(self, pr_url: str) -> dict:
         raise NotImplementedError(
             "local_provider.fetch is not yet implemented. "
             "Run the local review agent on the PR and return its findings in "
-            "canonical form: {\"findings\": [{...}]}. See PROVIDER_CONTRACT.md "
+            "canonical form: {\"findings\": [{...}]}, each naming its commit_id. See PROVIDER_CONTRACT.md "
             "for the Finding schema."
         )

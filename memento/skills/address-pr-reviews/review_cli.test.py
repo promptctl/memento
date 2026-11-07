@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for `wait` and `reply` in bin/review.
+"""Tests for `wait`, `fetch`, and `reply` in bin/review.
 
 A reviewer run that errored, and a reply GitHub did not confirm, must each become a nonzero exit.
 Run with: python3 review_cli.test.py
@@ -100,6 +100,28 @@ code, out, err, calls = run_cli(workflow_list, "--provider", "action", "setup-ch
 check("setup-check: the provider's gh call goes through the runner main was given",
       code == 0 and json.loads(out)["installed"] is True and len(calls) == 1,
       f"code={code} out={out!r} err={err!r} calls={calls!r}")
+
+def pr_with_one_thread(args):
+    if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
+        return "new"
+    if args[:2] == ["api", "graphql"]:
+        return json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [{"id": "T_1", "isResolved": False, "path": "a.py", "originalLine": 1, "comments": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"author": {"login": "bot"}, "body": "x",
+                           "originalCommit": {"oid": "old"}}]}}]}}}}})
+    if args[:3] == ["api", "--paginate", "repos/o/r/pulls/7/reviews"]:
+        return ""
+    raise AssertionError(f"unexpected gh call: {args}")
+
+
+code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR)
+got = json.loads(out) if code == 0 else None
+check("fetch: prints the head and each finding placed against it",
+      got is not None and got["head_sha"] == "new"
+      and [f["against_head"] for f in got["findings"]] == ["older"],
+      f"code={code} out={out!r} err={err!r}")
 
 code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

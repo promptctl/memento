@@ -16,6 +16,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
+import findings  # noqa: E402
 import github_threads  # noqa: E402
 import provider_loader  # noqa: E402
 from ports import Ports, production_ports  # noqa: E402
@@ -75,7 +76,7 @@ def cmd_wait(provider, github, args) -> tuple[dict, str | None]:
 
 
 def cmd_fetch(provider, github, args) -> tuple[dict, str | None]:
-    return provider.fetch(pr_url(github, args.pr)), None
+    return findings.fetch(provider, pr_url(github, args.pr)), None
 
 
 def cmd_change_requests(provider, github, args) -> tuple[dict, str | None]:
@@ -132,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
                  "unless conclusion is success")
     p.add_argument("pr", help="PR URL or number")
 
-    p = add("fetch", cmd_fetch, help="canonical findings JSON")
+    p = add("fetch", cmd_fetch, help="canonical findings JSON, each placed against the head")
     p.add_argument("pr", help="PR URL or number")
 
     p = add("change-requests", cmd_change_requests, capability="dismiss_review",
