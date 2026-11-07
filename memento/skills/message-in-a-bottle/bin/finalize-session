@@ -592,10 +592,10 @@ case "$MODE" in
       # handoff is already on disk, so the refusal names its path. The nonzero exit tells the caller the
       # close-out did not happen.
       if [[ -n "$HOSTED" ]]; then
-        _refuse "this session is hosted by a claude daemon, so no pane or iTerm2
-session shows it, and the detached transport needs a tmux binary; none is installed."
+        _refuse "this session is hosted by a claude daemon, so no pane or iTerm2 session shows it,
+and the detached transport needs a tmux binary; none is installed."
       fi
-      _refuse "no tmux, iTerm2, or tmux binary to spawn a fresh window with.
+      _refuse "no owned tmux pane, no reachable iTerm2 session, and no tmux binary to start a detached window with.
 Nothing on this machine to deliver the close-out into."
       # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
     fi
