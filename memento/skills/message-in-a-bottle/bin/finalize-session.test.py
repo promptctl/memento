@@ -988,6 +988,23 @@ check("the daemon's --bg-pty-host process is not a session to relaunch",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
+# An unlisted long flag followed by a flag is skipped, so the scan still reaches the
+# classifier behind it rather than calling the process an unreadable session.
+for classifier in ("--print", "--bg-pty-host /tmp/cc-daemon/pty/a.sock"):
+    done = run(panes=None, forge_command=f"/x/claude --frobnicate {classifier}")
+    check(f"an unlisted flag before {classifier.split()[0]} does not make the process a session",
+          f"claude_pid={done.root_pid} " not in done.stdout
+          and f"cannot read the flags of claude process {done.root_pid}" not in done.stderr,
+          f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# An unlisted short flag may be a cluster hiding `-p` (`-cp` is `-c -p`), so it is
+# refused even with a flag after it, never relaunched as an interactive session.
+done = run(panes=None, forge_command="/x/claude -cp --model opus")
+check("an unlisted short-flag cluster is refused, since it may hide -p",
+      done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
+      and "'-cp'" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
 # The headless check reads only the flag region. A session started from a prior
 # handoff carries that handoff as its positional prompt, unquoted in ps output, and
 # the prompt can contain `--print` in prose.
@@ -1031,10 +1048,9 @@ for shell in shells:
           f"line={line!r} parsed={parsed!r} out={done.stdout!r}")
 shutil.rmtree(quoted_dir)
 
-# The flags a daemon-hosted session is launched with, in the order the daemon writes
-# them: harness flags first, `--permission-mode` last. Each flag before it must be
-# consumed with its value, or the value is read as the prompt and the scan halts before
-# the permission mode.
+# The flags a daemon-hosted session is launched with: harness flags before
+# `--permission-mode`. Each flag before it must be consumed with its value, or the value
+# is read as the prompt and the scan halts before the permission mode.
 DAEMON_ARGV = ("/x/claude/versions/2.1.283 --session-id a00eaf96 --fork-session"
                " --resume /x/p.jsonl --allowed-tools mcp__a --allowed-tools mcp__b"
                " --permission-mode bypassPermissions")
@@ -1055,13 +1071,37 @@ check("variadic and boolean flags are dropped by arity and the scan halts at the
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A flag the table does not know: whether the next token is its value or the prompt
-# cannot be determined. The launcher refuses, names the flag, and leaves the handoff on
-# disk rather than guessing.
+# A session /background forked carries the hidden `--reply-on-resume` (boolean) and
+# `--proactivity <level>`, which `claude --help` does not list.
+done = run(panes=None, forge_command=(
+    "/x/claude/versions/2.1.299 --resume /x/p.jsonl --fork-session --reply-on-resume"
+    " --allowed-tools mcp__a --model opus --effort high --permission-mode bypassPermissions"
+    " --proactivity high --name worker"))
+check("a session forked by /background (--reply-on-resume, --proactivity) relaunches with its model and permission mode",
+      picked(done) == DETACHED and "flags=[--model opus --permission-mode bypassPermissions]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Boolean by the table, not by the token after it: followed by the prompt it is still
+# no value, and the scan stops at the prompt.
+done = run(panes=None, forge_command=(
+    "/x/claude/versions/2.1.299 --permission-mode plan --reply-on-resume resume the review"))
+check("--reply-on-resume before the prompt is read as boolean, not refused",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# A flag the table does not list has no value when the token after it is a flag or
+# there is none, whatever its arity, so it is skipped.
+done = run(panes=None, forge_command="/x/claude --frobnicate --permission-mode plan --frobnicate")
+check("an unlisted flag followed by a flag, or last, is skipped and the permission mode kept",
+      picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# Followed by anything else, whether that token is its value or the prompt cannot be
+# determined. The launcher refuses, names the flag and the token, and leaves the handoff
+# on disk rather than guessing.
 done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
-check("an unknown claude flag is a refusal naming the flag, not a guess at the prompt",
+check("an unlisted flag followed by a non-flag is a refusal naming both, not a guess at the prompt",
       done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
-      and "--frobnicate" in done.stderr,
+      and "--frobnicate" in done.stderr and "'maybe'" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The daemon itself: a subcommand where a session's prompt would be. The walk passes it
