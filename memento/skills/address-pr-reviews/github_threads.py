@@ -94,7 +94,7 @@ _COMMENTS_QUERY = (
     "  node(id:$id){ ... on PullRequestReviewThread {"
     "    comments(first:100,after:$cursor){"
     "      pageInfo{ hasNextPage endCursor }"
-    "      nodes{ author{login} body originalCommit{oid} } } } } }"
+    "      nodes{ author{login} body } } } } }"
 )
 
 

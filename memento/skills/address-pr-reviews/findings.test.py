@@ -73,7 +73,7 @@ got = findings.fetch(
     PR)
 check("the head the findings were placed against is returned",
       got["head_sha"] == "new", f"got {got['head_sha']!r}")
-check("findings from the older review read as older; the one on the head as head; none unknown",
+check("findings from the older review read as older; the one on the head as head; the one with no commit unknown",
       [(f["body"], f["commit_id"], f["against_head"]) for f in got["findings"]] == [
           ("on-old", "old", "older"),
           ("on-new", "new", "head"),

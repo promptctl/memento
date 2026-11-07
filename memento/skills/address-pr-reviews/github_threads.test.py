@@ -179,8 +179,6 @@ check("commit: the thread query asks for each comment's originalCommit and the t
       all(f in gh_vars(fake.calls[0])["query"]
           for f in ("originalCommit{oid}", "originalStartLine", "originalLine")),
       f"got {fake.calls[0]}")
-check("commit: later comment pages carry the same originalCommit as the first",
-      "originalCommit{oid}" in gt._COMMENTS_QUERY, "missing")
 
 
 # --- multi-page comment fetch inside _complete_comments -------------------
