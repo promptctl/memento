@@ -62,8 +62,13 @@ _COMMENTS_QUERY = (
 )
 
 
+_RESOLVE_MUTATION = (
+    "mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }"
+)
+
+
 def _graphql(query: str, **variables) -> dict:
-    """Runs one GraphQL query.
+    """Runs one GraphQL query or mutation; every GraphQL call in this module goes through here.
 
     Strings go through `-f`, which sends them raw, and ints through `-F`. `-F` would type-infer an
     all-digit cursor or id into a number. A `None` variable is omitted, so GraphQL reads it as null
@@ -191,17 +196,13 @@ def fetch(pr_url: str) -> dict:
 def resolve(thread_id: str) -> dict:
     """Resolves one review thread and returns only after GitHub confirms it. Raises RuntimeError if it
     does not."""
-    confirmed = gh(
-        "api", "graphql",
-        "-f", "query=mutation($id:ID!){resolveReviewThread(input:{threadId:$id})"
-              "{thread{isResolved}}}",
-        "-F", f"id={thread_id}",
-        "--jq", ".data.resolveReviewThread.thread.isResolved",
-    )
-    if confirmed != "true":
+    data = _graphql(_RESOLVE_MUTATION, id=thread_id)
+    # A false, a null, and a missing payload are all one outcome: no confirmation.
+    payload = (data.get("data") or {}).get("resolveReviewThread") or {}
+    if (payload.get("thread") or {}).get("isResolved") is not True:
         raise RuntimeError(
             f"resolveReviewThread did not confirm resolution for {thread_id} "
-            f"(got {confirmed!r}). The thread is NOT resolved — do not move on."
+            f"(response: {data!r}). The thread is NOT resolved — do not move on."
         )
     return {"thread_id": thread_id, "is_resolved": True}
 

@@ -393,27 +393,46 @@ check_raises("shape: null data.node in the comment page names that field",
 # unconfirmed one raises, naming the thread or review it acted on.
 
 
-def resolve_handler(confirmation):
+def resolve_response(payload):
+    return json.dumps({"data": {"resolveReviewThread": payload}})
+
+
+def resolve_handler(response, thread_id="T_abc"):
     def handler(args):
         if args[:2] != ["api", "graphql"]:
             raise AssertionError(f"unexpected gh call: {args}")
         variables = gh_vars(args)
         if "resolveReviewThread" not in variables["query"]:
             raise AssertionError(f"not the resolve mutation: {variables['query']!r}")
-        if variables["id"] != "T_abc":
+        if variables["id"] != thread_id:
             raise AssertionError(f"resolving the wrong thread: {variables['id']!r}")
-        return confirmation
+        # `-F` would type-infer an all-digit id into a number, so an id is always sent raw.
+        if args[args.index(f"id={thread_id}") - 1] != "-f":
+            raise AssertionError(f"thread id not sent with -f: {args}")
+        return response
 
     return handler
 
 
-install(resolve_handler("true"))
+CONFIRMED = resolve_response({"thread": {"isResolved": True}})
+
+install(resolve_handler(CONFIRMED))
 check_returns("resolve: a confirmed resolution returns the resolved thread",
               lambda: gt.resolve("T_abc"),
               {"thread_id": "T_abc", "is_resolved": True})
 
-for label, confirmation in [("false", "false"), ("absent", ""), ("null", "null")]:
-    install(resolve_handler(confirmation))
+install(resolve_handler(CONFIRMED, thread_id="12345"))
+check_returns("resolve: an all-digit thread id is sent as a string",
+              lambda: gt.resolve("12345"),
+              {"thread_id": "12345", "is_resolved": True})
+
+for label, response in [
+    ("false", resolve_response({"thread": {"isResolved": False}})),
+    ("null", resolve_response({"thread": {"isResolved": None}})),
+    ("absent thread", resolve_response({"thread": None})),
+    ("absent payload", resolve_response(None)),
+]:
+    install(resolve_handler(response))
     check_raises(f"resolve: confirmation {label} raises and names the thread",
                  RuntimeError, lambda: gt.resolve("T_abc"),
                  must_mention=("T_abc", "NOT resolved"))
