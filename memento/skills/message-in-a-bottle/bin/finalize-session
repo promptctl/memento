@@ -58,17 +58,21 @@ _clear_box() {
   sleep 0.3
 }
 
-# Prints the process table the ancestry walk reads, one row per process: `pid ppid etime argv...`.
+# Prints the process table the ancestry walk reads, one row per process: `pid ppid etime uid exe argv...`,
+# where exe is the executable's name as the kernel records it (ps's ucomm), which no process can retitle.
 #
 # `ps` joins argv with spaces, so `--name 'review worker'` reads back as two words and a path with a space
-# loses its argv0. So `ps` supplies only the tree, and each pid's argv is read whole from the kernel:
-# KERN_PROCARGS2 on macOS, /proc/<pid>/cmdline on Linux. Each element is printed as one token with no
-# whitespace: every byte outside [A-Za-z0-9_./:=@%+,-] becomes \xHH, and an empty element becomes \c.
-# `printf %b` decodes either, and a literal backslash is itself encoded, so decoding cannot misread one.
+# loses its argv0. So `ps` supplies the tree, the owner and the executable name, and each pid's argv is
+# read whole from the kernel: KERN_PROCARGS2 on macOS, /proc/<pid>/cmdline on Linux. exe and each argv
+# element are printed as one token with no whitespace: every byte outside [A-Za-z0-9_./:=@%+,-] becomes
+# \xHH, and an empty element becomes \c. `printf %b` decodes \xHH, and a literal backslash is itself
+# encoded, so decoding cannot misread one.
 #
-# A pid whose argv cannot be read gets a row with no argv: another user's process (the kernel refuses
-# root's `login`, which only a privileged /bin/ps can show) or one that exited after ps listed it. The
-# walk reads such a row as neither claude nor tmux, as it read an empty command.
+# A pid whose argv cannot be read gets a row with no argv. The kernel withholds the argv of another user's
+# process, root's included, which /bin/ps reads only by being privileged; a zombie and a pid that exited
+# after ps listed it have none either. ps reads the owner and exe of every process, so the walk can still
+# tell a root-owned row from another user's, and a tmux server from anything else. A perl that cannot
+# read even its own argv fails the table read, since every row would otherwise read as withheld.
 #
 # The two reads are not atomic. A pid that exits and is reissued between them carries the newcomer's argv
 # under the old row's ppid and elapsed time, which the walk's age check cannot see, and nothing later
@@ -79,7 +83,7 @@ _clear_box() {
 # perl is found on PATH like ps. macOS ships it but has deprecated it, and a missing or failing perl fails
 # the table read, which the launcher refuses.
 _process_table() {
-  ps -eo pid=,ppid=,etime= | perl -e '
+  ps -eo pid=,ppid=,etime=,uid=,ucomm= | perl -e '
     use strict; use warnings;
     my $linux = -e "/proc/self/cmdline";
     my $buf = "\0" x 1048576;  # kern.argmax on macOS
@@ -95,13 +99,17 @@ _process_table() {
         $raw =~ s/\0\z//;
         return split(/\0/, $raw, -1);
       }
-      # sysctl({CTL_KERN, KERN_PROCARGS2, pid}): argc, the exec path, NUL padding, argv, then the environment.
+      # sysctl({CTL_KERN, KERN_PROCARGS2, pid}): argc, the exec path NUL-padded to a multiple of 8 bytes,
+      # argv, then the environment. The padding is skipped by its length, not as a run of NULs, since an
+      # empty argv0 is one more NUL and skipping it would read the first environment string as argv.
       my $len = pack("Q", length $buf);
       return () unless syscall(202, pack("i3", 1, 49, $pid), 3, $buf, $len, 0, 0) == 0;
       $raw = substr($buf, 0, unpack("Q", $len));
       my $argc = unpack("i", $raw);
-      return () unless $raw =~ /\A.{4}[^\0]*\0+/s;
-      my @argv = split(/\0/, substr($raw, $+[0]), -1);
+      return () unless $raw =~ /\A.{4}([^\0]*)\0/s;
+      my $start = 4 + ((length($1) + 8) & ~7);
+      return () unless substr($raw, 0, $start) =~ /\A.{4}[^\0]*\0+\z/s;
+      my @argv = split(/\0/, substr($raw, $start), -1);
       return () unless $argc > 0 && @argv >= $argc;
       return @argv[0 .. $argc - 1];
     }
@@ -111,9 +119,13 @@ _process_table() {
       $arg =~ s/([^A-Za-z0-9_.\/:=@%+,-])/sprintf("\\x%02x", ord $1)/ge;
       return $arg;
     }
+    my @own = argv_of($$);
+    @own or die "perl cannot read its own argv from the kernel, so no row would carry one\n";
     while (my $row = <STDIN>) {
-      my ($pid, $ppid, $etime) = split " ", $row;
-      print join(" ", $pid, $ppid, $etime, map { token($_) } argv_of($pid)), "\n";
+      # exe is last because it may hold spaces: Linux tmux names its server `tmux: server`.
+      my ($pid, $ppid, $etime, $uid, $exe) = $row =~ /^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*$/
+        or die "unreadable ps row: $row";
+      print join(" ", $pid, $ppid, $etime, $uid, map { token($_) } $exe, argv_of($pid)), "\n";
     }'
 }
 
@@ -146,6 +158,9 @@ _process_table() {
 #   - Any other claude above the own one ends the walk as confined, whatever its flags, since the tree's
 #     shape is what shows hosting. A claude is checked before its pane, since a pane's process is usually
 #     the claude it shows.
+#   - A row with no argv ends the walk as confined unless root owns it, since it could be another user's
+#     claude. Root's are walked past, since root's `login` and `sshd` sit above every terminal session and
+#     the kernel withholds their argv; a claude run as root above this session is the one host this misses.
 #   - The walk examines this process and 15 ancestors. At that bound it ends as confined.
 # A wrong confinement costs a relaunch, and a wrong pane costs a /clear in someone else's session, so every
 # doubt resolves to confined.
@@ -172,12 +187,10 @@ _ancestry() {
       sub(/ .*/, "", argv0)
       return argv0 == "claude" || argv0 ~ /\/claude$/ || argv0 ~ /\/claude\/versions\//
     }
-    # A tmux process by argv0: the server runs as `tmux ...` on macOS, and on Linux it may retitle its
-    # argv0 to the one string `tmux: server ...`.
-    function istmux(pid,   argv0) {
-      argv0 = command[pid]
-      sub(/ .*/, "", argv0)
-      return argv0 ~ /(^|\/)tmux(:|$)/
+    # A tmux process by the executable the kernel records, which ps reads for every owner, so a tmux server
+    # whose argv is withheld is still one. Linux may record the server as `tmux: server`.
+    function istmux(pid) {
+      return exe[pid] ~ /^tmux(:|$)/
     }
     # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
     function unsound(pid, younger) {
@@ -208,11 +221,13 @@ _ancestry() {
     # counts only if it positively reports the pane alive: tmux renders an unknown format field as empty,
     # so a tmux without #{pane_dead} matches no pane.
     $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
-    NF >= 3 {
+    NF >= 5 {
       parent[$1] = $2
       elapsed[$1] = $3
+      owner[$1] = $4
+      exe[$1] = $5
       line = $0
-      sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
+      sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
       command[$1] = line
     }
     END {
@@ -233,6 +248,8 @@ _ancestry() {
                                                        : "it met claude process " pid " first")
           own = pid; passed = 1
         }
+        if (command[pid] == "" && owner[pid] != 0)
+          answer("confined", "", "the argv of process " pid " (uid " owner[pid] ") cannot be read, so it could be another claude")
         if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
         # A pane process sits directly below its tmux server, so reaching the server means tmux listed
         # no live pane of this session: whatever terminal shows it, that terminal does not belong to this session.
@@ -255,9 +272,23 @@ _ancestry() {
 # it before signaling, since by then the pid may belong to another process. A pid that cannot be identified
 # is never signaled, so this is a hard stop.
 _relaunch_target() { # <transport name> <own claude pid> <its argv tokens>
-  local rc=0
+  local rc=0 tok dec
+  local -a enc
   CLAUDE_PID=$2
-  FLAGS=$(_claude_flags "$3") || rc=$?
+  # _process_table's tokens, one per argv element, decoded once here. The empty element is decoded by
+  # name: given output that \c leaves empty, bash 3.2's `printf -v` assigns whatever its previous call
+  # printed, so `--model ''` would decode as `--model --model`.
+  CLAUDE_ARGV=()
+  IFS=' ' read -r -a enc <<<"$3" || true
+  for tok in ${enc[@]+"${enc[@]}"}; do
+    case "$tok" in
+      '\c') dec="" ;;
+      *) printf -v dec '%b' "$tok" ;;
+    esac
+    CLAUDE_ARGV+=("$dec")
+  done
+  [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] claude argv:$(printf ' %q' ${CLAUDE_ARGV[@]+"${CLAUDE_ARGV[@]}"})"
+  FLAGS=$(_claude_flags ${CLAUDE_ARGV[@]+"${CLAUDE_ARGV[@]}"}) || rc=$?
   [ "$rc" -ne 2 ] \
     || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
   [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
@@ -323,12 +354,9 @@ _retire() { # <pid> <identity captured at launch>
 # `--print`/`-p`, subcommands such as `claude mcp serve`, and the daemon and its hosts (`claude daemon
 # run`, `--bg-pty-host`, `--bg-spare`) mean the process is not a session, so the function returns 2. Only
 # the flag region is read, so a prompt that contains those words is never misread.
-_claude_flags() {
+_claude_flags() { # <argv elements>
   local out="" tok next i n
-  local -a enc toks=() keep=()
-  # _process_table's tokens, one per argv element, so a value with a space is one token here.
-  IFS=' ' read -r -a enc <<<"$1" || true
-  for tok in ${enc[@]+"${enc[@]}"}; do printf -v tok '%b' "$tok"; toks+=("$tok"); done
+  local -a toks=(${@+"$@"}) keep=()
   n=${#toks[@]}
   i=1  # skip argv0
   while [ "$i" -lt "$n" ]; do
