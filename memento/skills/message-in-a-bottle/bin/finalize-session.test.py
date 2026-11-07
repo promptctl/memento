@@ -45,8 +45,6 @@ TMUX = r"""#!/bin/bash
 # cannot answer; that exits loudly rather than handing back a line the launcher
 # would parse into a plausible wrong pane.
 # $FIXTURE_PANES unset stands for no server, which real tmux reports by exiting 1.
-# display-message echoes a target naming the pane it was asked about, so an
-# assertion can see which pane won.
 set -uo pipefail
 case "${1:-}" in
   list-panes)
@@ -68,53 +66,6 @@ case "${1:-}" in
       esac
       printf '%s\n' "$line"
     done <<< "$FIXTURE_PANES"
-    ;;
-  display-message)
-    # Real tmux does NOT validate -t here: for a pane no server owns it exits 0
-    # with every field empty, so the launcher's format renders as the bare ":."
-    # - non-empty, and a live tmux address for the CURRENT pane at that. Modelling
-    # this as a failure would be the comfortable lie; it is what let a stale
-    # $TMUX_PANE retarget the handoff unnoticed. Known panes echo their id and a
-    # target naming them, so an assertion can see which pane won.
-    pane=""; fmt=""
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        -t) pane="${2:-}"; shift 2 ;;
-        -p) shift ;;
-        *)  fmt="$1"; shift ;;
-      esac
-    done
-    # ':.' is not a pane id but a target expression meaning current-session:
-    # current-window.current-pane, and tmux resolves it to a REAL pane - which is
-    # why an unresolvable id rendering into ':.' was dangerous rather than merely
-    # wrong. The first live record stands in for "current" here.
-    known=""; pane_dead=""; resolved=""
-    while read -r id pid dead; do
-      [ -n "$id" ] || continue
-      [ "$id" = "$pane" ] && { known=yes; pane_dead="$dead"; resolved="$id"; }
-      [ "$pane" = ":." ] && [ "$dead" = 0 ] && [ -z "$resolved" ] \
-        && { known=yes; pane_dead="$dead"; resolved="$id"; }
-    done <<< "${FIXTURE_PANES:-}"
-    pane="$resolved"
-    if [ -n "$known" ]; then
-      line="${fmt//\#\{pane_id\}/$pane}"
-      line="${line//\#\{pane_dead\}/$pane_dead}"
-      line="${line//\#\{session_name\}/target-for-$pane}"
-      line="${line//\#\{window_index\}/0}"
-      line="${line//\#\{pane_index\}/0}"
-    else
-      # Every field empty, exit 0 - tmux's actual answer for a pane it does not
-      # own, and the reason ":." reaches the launcher looking like a target.
-      line="${fmt//\#\{pane_id\}/}"
-      line="${line//\#\{pane_dead\}/}"
-      line="${line//\#\{session_name\}/}"
-      line="${line//\#\{window_index\}/}"
-      line="${line//\#\{pane_index\}/}"
-    fi
-    case "$line" in
-      *'#{'*) echo "fixture tmux: cannot expand '$fmt'" >&2; exit 2 ;;
-    esac
-    printf '%s\n' "$line"
     ;;
   new-session|has-session|capture-pane|load-buffer|paste-buffer|send-keys|kill-session)
     # The detached WORKER's half of the fixture. It needs almost no state: the
@@ -210,73 +161,47 @@ env -u TMUX -u TMUX_PANE "$@"
 exit $?
 """
 
-PS_FORGING = r"""#!/bin/bash
-# The real process table with one ancestor's elapsed time rewritten to
-# $FIXTURE_FORGE_AGE - a pid younger than the descendant claiming it is the
-# signature of a recycled pid, and the one thing no live machine will produce on
-# cue.
-#
-# The age is a parameter rather than a constant so the same wrapper can also
-# forge an age that is OLDER, which the walk must still accept. That pairing is
-# the control: both runs drive this identical rewrite of $3 for the identical
-# pid and differ only in the value written, so a wrapper that mangled `ps -eo`
-# into an unparseable table would fail the accepting run instead of quietly
-# handing the refusing one a pass it did not earn. A control that skips this
-# wrapper entirely - as the first version did - cannot see that failure mode at
-# all, because it never runs the thing it is controlling for.
-#
-# Only the whole-table form is forged. A per-pid query carries no pid column to
-# key on, so rewriting its fields would corrupt the launcher's answer instead of
-# forging an age. Anything else passes straight through.
-set -uo pipefail
-out=$(/bin/ps "$@") || exit $?
-case "${1:-}" in
-  -e*) printf '%s\n' "$out" \
-         | /usr/bin/awk -v forge="$(cat "$FIXTURE_ROOT_PID")" \
-                        -v age="$FIXTURE_FORGE_AGE" \
-             '$1 == forge { $3 = age } { print }' ;;
-  *)   printf '%s\n' "$out" ;;
-esac
-"""
-
-
-PS_FORGE_COMMAND = r"""#!/bin/bash
-# The real ps, except that the planted claude's command line reads as
-# $FIXTURE_FORGE_COMMAND. A daemon-hosted session is launched with a dozen flags
-# the fixture chain cannot carry in its own argv - `nest` owns every token after
-# argv0 - so the one read that asks what the pid was launched with is answered
-# with the shape the field reports. Only the `-o command= -p <pid>` form, and only
-# for that pid; the identity read and every ancestry hop pass through untouched.
-set -uo pipefail
-if [ "${1:-}" = "-o" ] && [ "${2:-}" = "command=" ] && [ "${3:-}" = "-p" ] \
-   && [ "${4:-}" = "$(cat "$FIXTURE_ROOT_PID")" ]; then
-  printf '%s\n' "$FIXTURE_FORGE_COMMAND"
-  exit 0
-fi
-exec /bin/ps "$@"
-"""
-
-
-PS_MUTE_IDENTITY = r"""#!/bin/bash
-# The real ps everywhere except the one query that asks what a pid is HOLDING:
-# `ps -o lstart=,command= -p <pid>` exits 0 and prints nothing, which is what a
-# pid whose holder exited between the lookup and the query actually reports. It
-# is the one answer a bare exit-code check cannot see — success, with no identity
-# in it — and the launcher must read it as "I could not identify this process",
-# never as an identity of its own.
-#
-# Selectivity is keyed on the field list, not on the subcommand shape, because
-# `-o command=` and `-o ppid=` (the ancestry hops) and `-eo pid=,ppid=,etime=`
-# (the whole-table walk) are the same `-p`/`-o` grammar and must all pass
-# through untouched. Muting them instead would collapse discovery for a reason
-# having nothing to do with the identity read, and the case would pass on the
-# wrong evidence. The control below runs under this same wrapper and still
-# resolves a pane, which is what proves the pass-through is real.
+PS = r"""#!/bin/bash
+# The real ps, with the forgeries a case asks for written into the one read the
+# launcher's walk takes, the whole table (`ps -eo pid=,ppid=,etime=,command=`).
+# Each forgery is a value in the environment, applied to a row the case names, so
+# every case runs this same wrapper and differs only in what it writes:
+#   $FIXTURE_FORGE_AGE      the chain root's elapsed time. A pid younger than the
+#                           descendant claiming it is the signature of a reissued
+#                           pid, and the one thing no live machine produces on cue.
+#                           An older age is the control: the same rewrite of the
+#                           same row, which must still resolve.
+#   $FIXTURE_FORGE_COMMAND  the chain root's command line. A daemon-hosted session
+#                           is launched with a dozen flags the fixture chain cannot
+#                           carry in its own argv, since `nest` owns every token
+#                           after argv0. Set but empty, the row reads back with no
+#                           command, as for a live pid whose argv is withheld.
+#   $FIXTURE_RUNNER_PID     the suite runner, whose parent reads as pid 1. Without
+#                           it, a walk that meets no pane climbs past the runner into
+#                           whatever session launched the suite. A host a case plants
+#                           sits below the runner and is still seen.
+#   $FIXTURE_PS_FAILS       the whole table read exits 1.
+#   $FIXTURE_MUTE_IDENTITY  the identity read (`-o lstart=,command= -p <pid>`)
+#                           exits 0 printing nothing, which is what a pid whose
+#                           holder exited reports: success with no identity in it.
+# Every other ps call passes straight through.
 set -uo pipefail
 for arg in "$@"; do
-  [ "$arg" = "lstart=,command=" ] && exit 0
+  [ "$arg" = "lstart=,command=" ] && [ -n "${FIXTURE_MUTE_IDENTITY:-}" ] && exit 0
 done
-exec /bin/ps "$@"
+[ "${1:-}" = "-eo" ] || exec /bin/ps "$@"
+[ -z "${FIXTURE_PS_FAILS:-}" ] || { echo "ps: fixture refuses the process table" >&2; exit 1; }
+/bin/ps "$@" | /usr/bin/awk -v root="$(cat "$FIXTURE_ROOT_PID")" -v runner="${FIXTURE_RUNNER_PID:-}" \
+    -v age="${FIXTURE_FORGE_AGE:-}" -v forge="${FIXTURE_FORGE_COMMAND+set}" '
+  {
+    line = $0
+    sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
+    ppid = $1 == runner ? 1 : $2
+    etime = ($1 == root && age != "") ? age : $3
+    # Read from the environment: awk would expand backslash escapes in a -v value.
+    if ($1 == root && forge == "set") line = ENVIRON["FIXTURE_FORGE_COMMAND"]
+    print $1, ppid, etime, line
+  }'
 """
 
 
@@ -298,72 +223,9 @@ NEST_BIN = install(FIXTURES, "nest", NEST)
 # path rather than `claude`.
 NEST_AS_CLAUDE = os.path.join(FIXTURES, "as-claude", "claude")
 NEST_AS_VERSIONED_CLAUDE = os.path.join(FIXTURES, "claude", "versions", "2.1.270")
-FORGE_DIR = os.path.join(FIXTURES, "forge")
-os.mkdir(FORGE_DIR)
-install(FORGE_DIR, "ps", PS_FORGING)
-FORGE_COMMAND_DIR = os.path.join(FIXTURES, "forge-command")
-os.mkdir(FORGE_COMMAND_DIR)
-install(FORGE_COMMAND_DIR, "ps", PS_FORGE_COMMAND)
-MUTE_DIR = os.path.join(FIXTURES, "mute")
-os.mkdir(MUTE_DIR)
-install(MUTE_DIR, "ps", PS_MUTE_IDENTITY)
-
-# The real ps, except that the `-o command=` read of the planted claude fails.
-# $FIXTURE_PS_MODE picks the failure: `status` is a nonzero exit, `empty` is exit 0
-# printing nothing (a live pid whose argv the platform withholds). The identity
-# read, the ancestry hops, and the whole-table walk use different field lists and
-# pass through untouched.
-PS_ROOT_COMMAND = r"""#!/bin/bash
-set -uo pipefail
-fields=""; want=""; prev=""
-for arg in "$@"; do
-  [ "$prev" = "-o" ] && fields="$arg"
-  [ "$prev" = "-p" ] && want="$arg"
-  prev="$arg"
-done
-if [ "$fields" = "command=" ] && [ "$want" = "$(cat "$FIXTURE_ROOT_PID")" ]; then
-  [ "${FIXTURE_PS_MODE:-status}" = "empty" ] && exit 0
-  echo "ps: no such process" >&2
-  exit 1
-fi
-exec /bin/ps "$@"
-"""
-PS_ROOT_COMMAND_DIR = os.path.join(FIXTURES, "psrootcommand")
-os.mkdir(PS_ROOT_COMMAND_DIR)
-install(PS_ROOT_COMMAND_DIR, "ps", PS_ROOT_COMMAND)
-
-# The next ps on PATH, except that the suite runner's parent reads as pid 1. When no
-# pane ends the hosted check's ancestry walk (no tmux, or no pane of the chain's),
-# the walk would otherwise climb past the runner into whatever session launched the
-# suite, and a daemon host there would make the case hosted. A host the case plants
-# itself sits below the runner and is still seen. It delegates to the next ps rather
-# than /bin/ps, so it sits first on every case's PATH and the other ps fixtures
-# still apply behind it.
-PS_RUNNER_IS_TOP = r"""#!/bin/bash
-set -uo pipefail
-fields=""; want=""; prev=""
-for arg in "$@"; do
-  [ "$prev" = "-o" ] && fields="$arg"
-  [ "$prev" = "-p" ] && want="$arg"
-  prev="$arg"
-done
-here=$(cd "$(dirname "$0")" && pwd)
-rest=""
-IFS=: read -ra dirs <<<"$PATH"
-for dir in "${dirs[@]}"; do
-  [ "$dir" = "$here" ] || rest="${rest:+$rest:}$dir"
-done
-if [ "$want" = "$FIXTURE_RUNNER_PID" ]; then
-  case "$fields" in
-    ppid=) echo 1; exit 0 ;;
-    ppid=,command=) cmd=$(PATH="$rest" ps -o command= -p "$want") || exit; echo "1 $cmd"; exit 0 ;;
-  esac
-fi
-PATH="$rest" exec ps "$@"
-"""
-RUNNER_IS_TOP_DIR = os.path.join(FIXTURES, "runneristop")
-os.mkdir(RUNNER_IS_TOP_DIR)
-install(RUNNER_IS_TOP_DIR, "ps", PS_RUNNER_IS_TOP)
+PS_DIR = os.path.join(FIXTURES, "ps")
+os.mkdir(PS_DIR)
+install(PS_DIR, "ps", PS)
 
 # A `date` that removes a directory on its first call, then behaves normally.
 # This makes the launcher's own directory disappear mid-run at a fixed point: the
@@ -455,7 +317,7 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
-        log_mktemp_fails=False, cwd_gone=False, ps_root_command=None,
+        log_mktemp_fails=False, cwd_gone=False, ps_fails=False,
         self_dir_gone=False, as_claude=None, claude_pid=None,
         forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False,
         launcher_flags=(), host_as=None, export_claude_pid=False):
@@ -468,20 +330,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     pidfile = os.path.join(workdir, "root.pid")
     # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
     # not include REAL_DIRS, since that is where a packaged tmux would be found.
-    path = [FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN]
-    if forge_age is not None:
-        path.insert(0, FORGE_DIR)
-    if mute_identity:
-        path.insert(0, MUTE_DIR)
-    if forge_command is not None:
-        path.insert(0, FORGE_COMMAND_DIR)
+    # The ps fixture sits first on every case's PATH; a case changes only the
+    # forgeries it writes.
+    path = [PS_DIR] + ([FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN])
     if log_mktemp_fails:
         path.insert(0, NO_LOGFILE_BIN)
-    # 'status' or 'empty' - which answer PS_ROOT_COMMAND gives for the planted
-    # claude; the fixture above says why a process that has just exited has both.
-    if ps_root_command is not None:
-        path.insert(0, PS_ROOT_COMMAND_DIR)
-    path.insert(0, RUNNER_IS_TOP_DIR)
     # The launcher is invoked through a symlinked directory that the fixture `date`
     # deletes on its first call. The symlink is what disappears, not the script file,
     # so the launcher keeps running as it would in the field.
@@ -522,8 +375,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["NEST_HOST_AS"] = host_as
     if host_keeps_tmux:
         env["FIXTURE_HOST_KEEPS_TMUX"] = "1"
-    if ps_root_command is not None:
-        env["FIXTURE_PS_MODE"] = ps_root_command
+    if ps_fails:
+        env["FIXTURE_PS_FAILS"] = "1"
+    if mute_identity:
+        env["FIXTURE_MUTE_IDENTITY"] = "1"
     if self_dir_gone:
         env["FIXTURE_RM_DIR"] = selfdir
     if forge_age is not None:
@@ -588,15 +443,21 @@ def picked(done):
     crash cannot read as a decline.
     """
     for line in done.stdout.splitlines():
-        if line.startswith("[dry-run] transport=tmux target=target-for-"):
-            # The fixture's target is `target-for-<pane>:0.0`; take the pane back
-            # out of it rather than matching the whole rendered string.
-            return line.split("target-for-", 1)[1].split(" ", 1)[0].split(":", 1)[0]
+        if line.startswith("[dry-run] transport=tmux target="):
+            return line.split("target=", 1)[1].split(" ", 1)[0]
         if line.startswith("[dry-run] transport=detached "):
             return DETACHED
     if done.returncode == NO_TRANSPORT_RC:
         return DECLINED
     return f"<no decision: rc={done.returncode} out={done.stdout!r} err={done.stderr!r}>"
+
+
+def ancestry(done):
+    """Return the walk's decision as the dry run reports it, its kind and reason."""
+    for line in done.stdout.splitlines():
+        if line.startswith("[dry-run] ancestry: "):
+            return line[len("[dry-run] ancestry: "):]
+    return ""
 
 
 # --- preconditions --------------------------------------------------------
@@ -633,15 +494,20 @@ def argv_case(*args, path_prefix=""):
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
     handoffs = os.path.join(workdir, "handoffs")
+    # The pane's process is this runner, and the launcher runs under a claude below
+    # it, as it would in a real pane's session. The trailing `exit` keeps bash from
+    # exec-ing the launcher in place of the claude process.
+    rootfile = os.path.join(workdir, "root.pid")
+    with open(rootfile, "w") as handle:
+        handle.write(str(os.getpid()))
+    under_claude = ["/bin/bash", "-c", 'exec -a "$0" /bin/bash -c \'"$@"; exit $?\' wrap "$@"',
+                    NEST_AS_CLAUDE]
     try:
         done = subprocess.run(
-            [LAUNCHER, *args], text=True, capture_output=True, timeout=30,
+            [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 # The pane's process is this runner, so the launcher descends from it as
-                 # it would from a real pane's shell. Without that ancestry the pid reads
-                 # as hosted when the suite runs under a host.
-                 "TMUX_PANE": "%99", "FIXTURE_PANES": f"%99 {os.getpid()} 0"})
+                 "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
@@ -725,27 +591,28 @@ check("a give-up with no guard of its own still exits 2 and names the preserved 
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(cwdgone_dir, ignore_errors=True)
 
-# The flags the successor is relaunched under. A failing `ps` must refuse the handoff
-# rather than relaunch the successor without its --model or permission flags. The
-# assertion checks the refusal, not only a non-zero status.
+# Every transport question is answered from one read of the process table, so a
+# failing `ps` refuses the handoff before any transport is chosen. Nothing can then
+# be shown to be this session's: not a pane, and not a claude to relaunch with its
+# --model or permission flags. The assertion checks the refusal, not only a non-zero
+# status.
 nocmd_dir = tempfile.mkdtemp(prefix="finalize-nocmd.")
-done = run(panes=None, handoff_dir=nocmd_dir, ps_root_command="status")
+done = run(panes=None, handoff_dir=nocmd_dir, ps_fails=True)
 recorded = sorted(os.listdir(nocmd_dir))
-check("a claude whose command line cannot be read is refused, not relaunched flagless",
+check("a process table that cannot be read is refused, not walked as if it were empty",
       done.returncode == REFUSED_RC and len(recorded) == 1
-      and "cannot locate the claude process" in done.stderr
+      and "cannot read the process table" in done.stderr
       and os.path.join(nocmd_dir, recorded[0]) in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(nocmd_dir, ignore_errors=True)
 
-# The same fact arriving as success. `ps` exiting 0 with nothing to say is not a
-# claude launched with no flags: a pid with no argv is no claude at all, walked
-# past like any other. What the walk meets above is the runner's ancestry - a
-# real claude on a developer's machine, nothing on CI - so the assertion is that
-# the planted pid was not the pick.
-done = run(panes=None, ps_root_command="empty")
+# A row whose command reads back empty is not a claude launched with no flags: a
+# pid with no argv is no claude at all, walked past like any other. The walk then
+# leaves the chain with no claude, so nothing is handed off.
+done = run(panes=None, forge_command="")
 check("a claude whose command line reads back empty is not read as flagless",
-      f"claude_pid={done.root_pid} " not in done.stdout,
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
+      and f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The failure that reported success. Resolving the launcher's own path used to
@@ -923,18 +790,54 @@ for export in (False, True):
 done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=f"{NEST_AS_CLAUDE} --print")
 check("the claude $CLAUDE_PID names is never another claude, even reading as --print",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# $CLAUDE_PID's parent is checked directly. Here the walk from the launcher ends at its
-# 16-hop bound before reaching either, and only $TMUX_PANE offers a pane.
-done = run(depth=17, rehost_at=17, claude_at=[16], tmux_pane="%99", host_keeps_tmux=True,
-           host_as=UNREADABLE_HOST, export_claude_pid=True)
-check("a claude parent of $CLAUDE_PID makes the session hosted beyond the walk's reach",
-      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# The same, with $CLAUDE_PID on the walk's last hop: the walk passes it and ends at its
-# bound before reaching the host.
-done = run(depth=15, rehost_at=15, claude_at=[14], tmux_pane="%99", host_keeps_tmux=True,
-           host_as=UNREADABLE_HOST, export_claude_pid=True)
-check("a claude parent of a $CLAUDE_PID on the walk's last hop makes the session hosted",
-      picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A $CLAUDE_PID beyond the 16-hop bound is unproven, so relaunching it could signal a
+# session that never asked: it is refused, not relaunched.
+done = run(depth=17, claude_at=[16], panes=None, export_claude_pid=True)
+check("a $CLAUDE_PID beyond the walk's reach is refused, not relaunched",
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
+      and "16-hop bound" in done.stderr and f"claude_pid={done.session_claude_pid} " not in done.stdout,
+      f"ancestry={ancestry(done)!r} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The own claude is identified by the walk passing it, not by argv0: a claude run under
+# node keeps its pane. A relaunch rebuilds it from its command line, so with no pane
+# that command line must be a claude binary's.
+NODE_CLAUDE = "/usr/local/bin/node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=NODE_CLAUDE)
+check("a $CLAUDE_PID claude run under node keeps its pane",
+      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=NODE_CLAUDE, panes=None)
+check("a $CLAUDE_PID claude run under node is not relaunched",
+      done.returncode == NO_TRANSPORT_RC and "does not run as a claude binary" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# Without $CLAUDE_PID, a pane reached before any claude shows no session of this one's,
+# so nothing is typed into it.
+done = run(depth=2, claude_at=[])
+check("a pane reached with no claude below it is refused, not cleared",
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
+      and picked(done) != "%99",
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A tmux server the walk climbs through lists no live pane of this session (another
+# socket, or a tmux that cannot report it), so whatever terminal shows this session is
+# not its own to type into: confined, never paneless.
+done = run(depth=2, claude_at=[1], panes=None, forge_command="tmux new-session -s other")
+check("a tmux server above this session with no pane of it confines the session",
+      ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# $CLAUDE_PID is matched as the pid's exact string: awk would compare `0<pid>` with
+# <pid> as numbers. The runner is on every chain's ancestry and is given a pane here,
+# so a numeric match would take it.
+done = run(panes=f"%55 {os.getpid()} 0", claude_pid=f"0{os.getpid()}", claude_at=[])
+check("a $CLAUDE_PID that only numerically equals an ancestor's pid is never passed",
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID 0" in done.stderr
+      and picked(done) != "%55",
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The hop bound itself: a walk that ends there has not shown that nothing above this
+# session shows another one, so it is confined, and no inherited terminal is trusted.
+# The own claude sits low in the chain, so the walk has passed it before the bound.
+done = run(depth=15, panes=None, claude_at=[1])
+check("a walk that ends at its hop bound confines the session",
+      ancestry(done).startswith("confined, the walk ended at its 16-hop bound")
+      and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 # The relaunch target is the same own claude the hosted walk reads. Without $CLAUDE_PID,
 # a headless claude started inside an interactive session's shell is this process's own
 # claude, and the interactive one above it is another session, never relaunched in its place.
@@ -993,11 +896,10 @@ check("a versioned claude path in the arguments, not argv0, is not a claude",
       f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# $CLAUDE_PID names the session's own pid for every tool call, and the named pid wins
-# over ancestry. The chain still plants a claude at its top hop, and the launcher must
-# relaunch the named one instead. The named process is not in this launcher's ancestry,
-# so only the environment can explain how it was found. It runs in its own session so
-# the whole group can be terminated, since nest runs its command as a child.
+# $CLAUDE_PID names the session's own pid for every tool call, and it is this session's
+# only if the walk passes it. This named claude is a live claude outside the launcher's
+# ancestry. It runs in its own session so the whole group can be terminated, since
+# nest runs its command as a child.
 NAMED_CLAUDE = subprocess.Popen(
     [NEST_BIN, "0", "sleep", "600"],
     env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
@@ -1010,33 +912,37 @@ for _ in range(100):
         break
     time.sleep(0.05)
 try:
-    done = run(panes=None, claude_pid=NAMED_CLAUDE.pid)
-    check("$CLAUDE_PID names the claude to relaunch ahead of the ancestry walk",
-          picked(done) == DETACHED and f"claude_pid={NAMED_CLAUDE.pid} " in done.stdout
-          and identity_names(done, NEST_AS_CLAUDE),
-          f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
-          f"out={done.stdout!r} err={done.stderr!r}")
+    # With no pane, the walk ends at the chain's planted claude, or with none planted at
+    # whatever the runner's ancestry ends in: another claude or init. Either way it has
+    # shown the named claude is outside this tree, so it is never relaunched.
+    for claude_at, where in ((None, "another claude"), ([], "the end of the ancestry")):
+        done = run(panes=None, claude_pid=NAMED_CLAUDE.pid, claude_at=claude_at)
+        check(f"a $CLAUDE_PID the walk reaches {where} without passing is refused, not relaunched",
+              done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
+              and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout,
+              f"named={NAMED_CLAUDE.pid} root_pid={done.root_pid} rc={done.returncode} "
+              f"out={done.stdout!r} err={done.stderr!r}")
     # A pane is this session's only when its own claude sits at or below it. The named
     # claude is not under the chain's pane, and no other claude is planted, so the walk
     # has shown $CLAUDE_PID contradicts the tree: neither the pane nor the named claude
     # is taken, and the named claude is not relaunched.
     done = run(claude_pid=NAMED_CLAUDE.pid, claude_at=[])
     check("a pane the walk reaches without passing the $CLAUDE_PID claude is refused, not taken or relaunched",
-          done.returncode == NO_TRANSPORT_RC and "is not an ancestor of this process" in done.stderr
+          done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
           and f"claude_pid={NAMED_CLAUDE.pid} " not in done.stdout and picked(done) != "%99",
           f"named={NAMED_CLAUDE.pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 finally:
     os.killpg(NAMED_CLAUDE.pid, 15)
     NAMED_CLAUDE.wait()
 
-# A named pid that is not a claude is refused, not used as a starting point for the
-# walk. STRANGER's ancestry is this runner's ancestry, which may end in a real claude
-# session that the walk would find and terminate. The planted claude is unreachable
-# here too: the named pid is the whole answer.
+# A named pid that is not a claude is refused, never replaced by the claude the walk
+# meets: that planted claude, or a real session in the runner's ancestry, would
+# otherwise be terminated in its place.
 done = run(panes=None, claude_pid=STRANGER.pid)
 check("$CLAUDE_PID naming a non-claude process is refused, not walked past",
       done.returncode == NO_TRANSPORT_RC
-      and "cannot locate the claude process" in done.stderr,
+      and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
+      and f"claude_pid={done.root_pid} " not in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 def refused_as_not_a_session(done):
@@ -1205,7 +1111,7 @@ check("a prompt starting with a host word is still a session",
 # launcher's own voice, not the shell's `integer expression expected` diagnostic.
 done = run(panes=None, claude_pid="abc")
 check("a non-numeric $CLAUDE_PID is refused cleanly",
-      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID" in done.stderr
       and "integer expression" not in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
@@ -1280,12 +1186,7 @@ done = run(depth=2, panes="%99 ROOTPID 1\n%98 ROOTPID 0")
 check("a live pane is still found past a dead one holding the same pid",
       picked(done) == "%98", f"rc={done.returncode} out={done.stdout!r}")
 
-# Liveness is checked on two paths: the walk screens what enters discovery, and
-# `_pane_target` screens the inherited $TMUX_PANE. Every dead-pane case above is decided
-# by the second, so this case pins the walk's own check, which mutation testing showed
-# the suite would otherwise miss.
-#
-# Order matters because the walk keeps one pane per pid, last row winning: listed
+# The walk keeps one pane per pid, last row winning, so order matters: listed
 # live-then-dead, a walk that screens for liveness keeps %98, while one that does not
 # lets the dead %99 overwrite it.
 done = run(depth=2, panes="%98 ROOTPID 0\n%99 ROOTPID 1")
@@ -1300,15 +1201,19 @@ done = run(depth=2, panes="%99 ROOTPID")
 check("a pane whose liveness tmux never stated is refused, not assumed - falls to detached",
       picked(done) == DETACHED, picked(done))
 
-done = run(depth=2, sleep=2, forge_age="00:00")
+# A pid reissued to a process younger than the descendant claiming it ends the walk:
+# nothing at or above it is this session's ancestry. These cases forge the chain
+# root, which is the pane's process, and plant the own claude one hop below it, so
+# refusing the pane still leaves a claude to relaunch.
+done = run(depth=2, sleep=2, forge_age="00:00", claude_at=[1])
 check("an ancestor younger than its own descendant is refused as a recycled pid - falls to detached",
-      picked(done) == DETACHED, picked(done))
+      picked(done) == DETACHED and "pid was reissued" in ancestry(done), picked(done))
 # The control runs under the forging ps, differing only in the value written. Without
 # it, a mangled process table could decline cleanly with the no-transport code for a
 # reason unrelated to the age check. Only a run that forges and still resolves shows
 # the wrapper leaves the subject intact.
 check("the same forged pid resolves when the age is older instead of younger",
-      picked(run(depth=2, sleep=2, forge_age="99:00:00")) == "%99",
+      picked(run(depth=2, sleep=2, forge_age="99:00:00", claude_at=[1])) == "%99",
       "without this the forging fixture, not the age check, could be doing the work")
 
 # The walk refuses an elapsed time it cannot parse rather than treating it as age zero.
@@ -1316,47 +1221,43 @@ check("the same forged pid resolves when the age is older instead of younger",
 # folds to zero, which the age check already refuses, so the format guard would go
 # untested. `1:2:3:4` has too many fields for [[dd-]hh:]mm:ss yet folds to about 62
 # hours, so only the format check can refuse it.
-done = run(depth=2, sleep=2, forge_age="1:2:3:4")
+done = run(depth=2, sleep=2, forge_age="1:2:3:4", claude_at=[1])
 check("an elapsed time the walk cannot read refuses the pane - falls to detached",
+      picked(done) == DETACHED and "cannot be read" in ancestry(done), picked(done))
+
+# The same guard holds for the other two questions the walk answers. A claude at a
+# reissued pid is no claude of this session's: it is not the own claude to relaunch,
+# since signalling it would hit whatever now holds the pid,
+# with or without $CLAUDE_PID naming it, and the refusal says why.
+for export in (False, True):
+    done = run(depth=2, sleep=2, forge_age="00:00", panes=None, export_claude_pid=export)
+    check(f"a claude at a reissued pid is never relaunched as this session's own "
+          f"({'with' if export else 'without'} $CLAUDE_PID)",
+          done.returncode == NO_TRANSPORT_RC and "pid was reissued" in done.stderr
+          and f"claude_pid={done.root_pid} " not in done.stdout,
+          f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# and it is not a host either. The walk's reason names the reissued pid, not a host.
+done = run(depth=2, sleep=2, forge_age="00:00", panes=None, claude_at=[1, 2])
+check("a claude at a reissued pid above the own claude is read as a reissued pid, not a host",
+      picked(done) == DETACHED and "pid was reissued" in ancestry(done)
+      and "hosted by" not in ancestry(done),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+
+# --- the environment's pane ------------------------------------------------
+# $TMUX_PANE is inherited, so it can name a pane of some other session: a daemon's
+# spawner, a stale id, a dead pane, or the ':.' target an unresolvable id renders
+# into. Only the walk's pane is this session's, whatever $TMUX_PANE names. Every value
+# here names a pane other than %99, the one the walk reaches; the live ones are a
+# stranger's.
+ELSEWHERE = f"%42 {STRANGER.pid} 0\n%77 {STRANGER.pid} 1\n%99 ROOTPID 0"
+for elsewhere in ("%42", "%4242", "%77", ":."):
+    done = run(depth=2, panes=ELSEWHERE, tmux_pane=elsewhere)
+    check(f"a $TMUX_PANE naming a pane the walk did not reach ({elsewhere}) loses to the walk's pane",
+          picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# With no pane to reach, a live $TMUX_PANE is still not taken.
+done = run(depth=2, panes=f"%42 {STRANGER.pid} 0", tmux_pane="%42")
+check("a live $TMUX_PANE the walk did not reach is never taken, even with no other pane",
       picked(done) == DETACHED, picked(done))
-
-# --- precedence -----------------------------------------------------------
-# Both candidates must be resolvable, or the case cannot tell which one won. Here
-# discovery can reach %99 and the environment names %42, so the two genuinely compete.
-
-done = run(depth=2, panes=f"%99 ROOTPID 0\n%42 {STRANGER.pid} 0", tmux_pane="%42")
-check("an inherited $TMUX_PANE wins outright and discovery never runs",
-      picked(done) == "%42", f"rc={done.returncode} out={done.stdout!r}")
-
-# A $TMUX_PANE naming a pane that has since gone must not consume the attempt. tmux
-# answers display-message for an unowned pane with exit 0 and empty fields, so the
-# target renders as the bare ":." (a live address for the current pane). Taking it
-# would hand the session to whichever window is focused.
-done = run(depth=2, tmux_pane="%4242")
-check("a stale $TMUX_PANE hands the question on and discovery answers it",
-      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
-
-# With nothing to fall back to, the answer is still no pane, never the ':.' an
-# unresolvable id renders into. The launcher still has the detached transport to try.
-done = run(depth=2, panes="%5 1 0", tmux_pane="%4242")
-check("a stale $TMUX_PANE with nothing to discover falls to detached rather than guessing a pane",
-      picked(done) == DETACHED, picked(done))
-
-# Owning a pane and displaying a live process are different facts; remain-on-exit keeps
-# tmux answering for a pane whose process has exited. An inherited $TMUX_PANE can name
-# such a dead pane, which echoes its id just as a live one does, so an id-only check
-# would send the handoff into it.
-done = run(depth=2, panes=f"%99 ROOTPID 0\n%77 {STRANGER.pid} 1", tmux_pane="%77")
-check("an inherited $TMUX_PANE naming a dead pane loses to a live discovered one",
-      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
-
-# ':.' is what an unresolvable pane id renders into, and tmux resolves it to the
-# current pane, which is live. Liveness cannot refuse it, so only comparing the echoed
-# id against the id requested can. %77 is listed first so 'current' is a pane the
-# ancestry does not own, which makes taking it a wrong answer rather than a lucky one.
-done = run(depth=2, panes=f"%77 {STRANGER.pid} 0\n%99 ROOTPID 0", tmux_pane=":.")
-check("a $TMUX_PANE that resolves to someone else's live pane is refused",
-      picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
 # --- the detached worker: what it retires, and in what order ----------------
 # The launcher cases above run in dry-run, so the detached transport's promise (after

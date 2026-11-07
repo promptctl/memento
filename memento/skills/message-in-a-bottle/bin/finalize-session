@@ -17,7 +17,7 @@
 # Modes:
 #   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
-#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
+#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <claude_ident> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
 
 set -euo pipefail
@@ -58,90 +58,151 @@ _clear_box() {
   sleep 0.3
 }
 
-# Prints the pid of every live tmux pane's process, each between spaces, so membership is one glob match.
-# A row counts only if it positively reports the pane alive. With no tmux or no server the list is empty.
-_live_pane_pids() {
-  printf ' %s' "$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
-                  | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
+# Decides, from one snapshot of the tmux panes and one of the process table, what this session's ancestry
+# lets a handoff reach: _ancestry <pane rows> <process rows>. Pure: it reads only its arguments, $$, and
+# $CLAUDE_PID. It prints five lines: the kind, the pane id, the own claude's pid, its command line, and the
+# reason, which comes last because it is never empty, so the empty fields before it survive `$(...)`.
+#   pane      a live pane shows this session; the pane id names it.
+#   paneless  the walk reached init with no pane and no other claude, so this session owns its terminal.
+#   confined  something above this session may show another one: another claude (a daemon host, or an
+#             outer session this claude was started inside), a tmux server that lists no pane of this
+#             session, or ancestry the walk could not establish.
+#             Only a fresh detached window is safe.
+#   refused   the walk ended, however, without passing this session's claude, or the claude a relaunch
+#             needs does not run as a claude binary; the reason says which, and how the walk ended.
+#
+# [LAW:single-enforcer] This is the one walk. The own claude, the hosted decision, and the pane are all
+# read in it, hop by hop, under the same rules:
+#   - A row that is missing, or whose elapsed time is unreadable or younger than its child's, ends the walk
+#     as confined. A parent is never younger than its child, so a younger one holds a reissued pid, and
+#     nothing above it is this session's ancestry. The clock has one-second resolution, so a pid reissued
+#     within the same second as its child's start can still pass.
+#   - The own claude is $CLAUDE_PID, which Claude Code sets for every tool call. It is authoritative and
+#     identified by the walk passing it, not by its argv0, so a claude run under node keeps its pane. Only
+#     when it is unset is the first claude the walk meets the own claude.
+#   - Nothing is handed off unless the walk passed the own claude. Any ending reached first is refused:
+#     a pane, another claude, or init shows $CLAUDE_PID is outside this process's tree, or that no claude
+#     sits below that pane, and an unsound row or the hop bound leaves $CLAUDE_PID unproven, so
+#     relaunching it could signal a session that never asked.
+#   - Any other claude above the own one ends the walk as confined, whatever its flags, since the tree's
+#     shape is what shows hosting. A claude is checked before its pane, since a pane's process is usually
+#     the claude it shows.
+#   - The walk examines this process and 15 ancestors. At that bound it ends as confined.
+# A wrong confinement costs a relaunch, and a wrong pane costs a /clear in someone else's session, so every
+# doubt resolves to confined.
+_ancestry() {
+  printf '%s\n%s\n' "$1" "$2" | awk -v self=$$ -v claude_pid="${CLAUDE_PID:-}" -v maxhops=16 '
+    # ps renders elapsed time as [[dd-]hh:]mm:ss; fold it left into seconds so
+    # any of the three widths compares against any other.
+    function ageof(raw,   days, parts, fields, i, seconds) {
+      days = 0
+      if (raw ~ /-/) {
+        days = substr(raw, 1, index(raw, "-") - 1) + 0
+        raw = substr(raw, index(raw, "-") + 1)
+      }
+      fields = split(raw, parts, ":")
+      seconds = 0
+      for (i = 1; i <= fields; i++) seconds = seconds * 60 + parts[i] + 0
+      return days * 86400 + seconds
+    }
+    # The one place argv0 is matched against the claude binary, so the versioned install path
+    # (`.../claude/versions/<n>`) matches too. Only argv0 counts: a shell or a host can carry the path as an
+    # argument.
+    function isclaude(pid,   argv0) {
+      argv0 = command[pid]
+      sub(/ .*/, "", argv0)
+      return argv0 == "claude" || argv0 ~ /\/claude$/ || argv0 ~ /\/claude\/versions\//
+    }
+    # A tmux process by argv0: the server shows as `tmux ...` on macOS and as `tmux: server ...` on Linux.
+    function istmux(pid,   argv0) {
+      argv0 = command[pid]
+      sub(/ .*/, "", argv0)
+      return argv0 ~ /(^|\/)tmux:?$/
+    }
+    # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
+    function unsound(pid, younger) {
+      if (!(pid in parent)) return "process " pid " has no row in the process table"
+      if (elapsed[pid] !~ /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9][0-9]$/)
+        return "the elapsed time of process " pid " cannot be read"
+      if (ageof(elapsed[pid]) < younger)
+        return "process " pid " is younger than its child, so its pid was reissued"
+      return ""
+    }
+    # Every ending passes through here, so the two rules a handoff needs are each kept once. Nothing is
+    # handed off unless the walk passed the own claude, whatever ended it. And a pane handoff only clears
+    # the pane, but a relaunch rebuilds the own claude from its command line, which must then be a claude
+    # binary'\''s.
+    function answer(kind, pane, reason) {
+      if (!passed) {
+        reason = (own == "" ? "the ancestry walk passed no claude" : "the ancestry walk never passed $CLAUDE_PID " own) \
+                 ", so nothing it reached is this session'\''s to hand off: " reason
+        kind = "refused"; pane = ""
+      } else if (kind != "pane" && !isclaude(own)) {
+        reason = "claude process " own " does not run as a claude binary, so no relaunch can be built from its command line; " reason
+        kind = "refused"
+      }
+      printf "%s\n%s\n%s\n%s\n%s\n", kind, pane, own, (own == "" ? "" : command[own]), reason
+      exit 0
+    }
+    # tmux labels its own rows with a literal "pane", so one pass tells the two snapshots apart. A row
+    # counts only if it positively reports the pane alive: tmux renders an unknown format field as empty,
+    # so a tmux without #{pane_dead} matches no pane.
+    $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
+    NF >= 3 {
+      parent[$1] = $2
+      elapsed[$1] = $3
+      line = $0
+      sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
+      command[$1] = line
+    }
+    END {
+      own = claude_pid
+      passed = 0
+      pid = self
+      younger = -1
+      for (hop = 0; hop < maxhops; hop++) {
+        why = unsound(pid, younger)
+        if (why != "") answer("confined", "", why)
+        # Compared as strings: awk compares two numeric-looking strings as numbers, so `0300` would
+        # match pid 300.
+        if (pid "" == own "") passed = 1
+        else if (isclaude(pid)) {
+          # With no own claude yet, this one is it. Otherwise it is another claude: above the own one it
+          # hosts this session, and below it $CLAUDE_PID was never passed.
+          if (own != "") answer("confined", "", passed ? "hosted by another claude (process " pid ")" \
+                                                       : "it met claude process " pid " first")
+          own = pid; passed = 1
+        }
+        if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
+        # A pane process sits directly below its tmux server, so reaching the server means tmux listed
+        # no live pane of this session: whatever terminal shows it, that terminal does not belong to this session.
+        if (istmux(pid)) answer("confined", "", "tmux process " pid " is above this session, but tmux lists no live pane of it")
+        younger = ageof(elapsed[pid])
+        pid = parent[pid]
+        if (pid + 0 <= 1) break
+      }
+      if (hop == maxhops) answer("confined", "", "the walk ended at its " maxhops "-hop bound without a pane")
+      answer("paneless", "", "the walk reached init without a pane")
+    }'
 }
 
-# Prints this session's own claude: its pid, then its command line, from one read of the process table.
-# That is $CLAUDE_PID, which Claude Code sets for every tool call. When it is unset, it is the first claude
-# binary among this process and its 15 ancestors, the same reach as _hosted_by_other_claude's walk, and a live
-# pane met first ends the search, since a claude above a pane shows another session. The launcher reads
-# it once, and the hosted decision and the relaunch target both take it from there.
-_own_claude() { # <live pane pids>
-  local panes="$1" pid="${CLAUDE_PID:-$$}" hops="${CLAUDE_PID:+1}" cmd i
-  for ((i = 0; i < ${hops:-16}; i++)); do
-    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$pid" -gt 1 ] || return 1
-    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    _is_claude_binary "$cmd" && { printf '%s\n%s' "$pid" "$cmd"; return 0; }
-    [[ "$panes" == *" $pid "* ]] && return 1
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-  done
-  return 1
-}
-
-# Sets CLAUDE_PID, CLAUDE_CMD and FLAGS from the own claude, as _own_claude printed it, or refuses in the
-# named transport's voice. A claude that is not an interactive session (headless, a subcommand, a daemon
-# host) is refused, since relaunching it would sever its client or kill every session it hosts. Flags the
-# scan cannot place are refused, never guessed.
-_relaunch_target() { # <transport name> <own claude, empty when there is none>
+# Sets CLAUDE_PID, CLAUDE_IDENT and FLAGS from the own claude, or refuses in the named transport's voice. A
+# claude that is not an interactive session (headless, a subcommand, a daemon host) is refused, since
+# relaunching it would sever its client or kill every session it hosts. Flags the scan cannot place are
+# refused, never guessed.
+#
+# The identity is captured at the same instant as the pid and passed on as data. The worker compares against
+# it before signaling, since by then the pid may belong to another process. A pid that cannot be identified
+# is never signaled, so this is a hard stop.
+_relaunch_target() { # <transport name> <own claude pid> <its command line>
   local rc=0
-  [ -n "$2" ] || _refuse "$1: cannot locate the claude process to relaunch"
-  CLAUDE_PID=${2%%$'\n'*}
-  CLAUDE_CMD=${2#*$'\n'}
-  FLAGS=$(_claude_flags "$CLAUDE_CMD") || rc=$?
+  CLAUDE_PID=$2
+  FLAGS=$(_claude_flags "$3") || rc=$?
   [ "$rc" -ne 2 ] \
     || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
   [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
-}
-
-# Succeeds if this session is hosted by another claude: a daemon host, or an outer session this claude
-# was started inside. A hosted session is displayed only through that claude, so any pane or iTerm2
-# session reachable from it belongs to another session. A hosted session therefore takes the detached
-# transport.
-#
-# [LAW:types-are-the-program] Hosted is read from the shape of the process tree, never from flags. Any
-# claude binary other than the own one, met before a live pane, means the pane shows that claude's
-# session, whatever its flags. A claude is checked before its pane, since a pane's process is usually the
-# claude it shows. A pane reached without passing the own claude is refused: $CLAUDE_PID then names a
-# process outside this one's tree, so neither that pane nor a relaunch of that claude is this session's
-# to take. The own claude's parent is read directly, since $CLAUDE_PID may lie beyond the walk's reach.
-# A read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a wrong pane
-# costs a /clear in someone else's session.
-_hosted_by_other_claude() { # <live pane pids> <own claude pid, empty when there is none>
-  local panes="$1" own="$2" pid=$$ passed="" line ppid cmd i
-  for ((i = 0; i < 16; i++)); do
-    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$pid" -gt 1 ] || break
-    line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
-    [ -n "$line" ] || return 0
-    read -r ppid cmd <<<"$line"
-    if [ "$pid" = "$own" ]; then passed=1
-    elif _is_claude_binary "$cmd"; then return 0
-    fi
-    if [[ "$panes" == *" $pid "* ]]; then
-      [ -z "$own" ] || [ -n "$passed" ] \
-        || _refuse "\$CLAUDE_PID $own is not an ancestor of this process: the walk reached pane process $pid without passing it, so neither that pane nor claude $own is this session's to hand off."
-      return 1
-    fi
-    pid=$ppid
-  done
-  [ -n "$own" ] || return 1
-  line=$(ps -o ppid= -p "$own" 2>/dev/null | tr -d '[:space:]')
-  [ -n "$line" ] && [ "$line" -gt 1 ] || return 1
-  _is_claude_binary "$(ps -o command= -p "$line" 2>/dev/null)"
-}
-
-# Succeeds for a command line whose argv0 is a claude binary. This is the one place argv0 is matched
-# against the claude binary, so the versioned install path (`.../claude/versions/<n>`) matches too.
-_is_claude_binary() {
-  case "${1%% *}" in
-    claude|*/claude|*/claude/versions/*) return 0 ;;
-  esac
-  return 1
+  CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
+    || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
 }
 
 # Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
@@ -149,7 +210,7 @@ _is_claude_binary() {
 #
 # A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
 # time tells the two apart. The detached worker signals a pid up to about 41 seconds after capturing it, so
-# this check is as strict as the pane walk in _discover_tmux_pane.
+# this check is as strict as the ancestry walk's pid-reuse guard.
 _process_identity() {
   local pid="${1:-}" raw
   [ -n "$pid" ] || return 1
@@ -168,78 +229,24 @@ _still_captured_process() { # <pid> <identity captured at launch>
   [[ "$IDENT_NOW" == "$2" ]]
 }
 
-# Finds the tmux pane this process runs in, by process ancestry rather than $TMUX_PANE, which the
-# environment can lose. The launcher runs this only when _hosted_by_other_claude says no. A process with no
-# pane ancestor returns 1, so the caller falls through to the next transport.
-#
-# Pids are recycled, so a matching pid alone does not prove descent. The snapshot therefore guards two cases:
-#   - A pane whose process has exited can stay listed under its old pid with remain-on-exit. #{pane_dead}
-#     keeps those rows out of the match.
-#   - An ancestor that exited can be replaced by a younger process with the same pid. Elapsed time must not
-#     decrease while climbing, since a parent is never younger than its child, and the walk stops if it does.
-#
-# With non-decreasing age, every matched ancestor has held its pid since before this process started. The
-# clock has one-second resolution, so a pid reused within the same second as this process's start can still
-# pass. Both snapshots are taken once, at the start, and the walk is arithmetic over them.
-_discover_tmux_pane() {
-  local panes proctable
-  command -v tmux >/dev/null 2>&1 || return 1
-  panes=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || return 1
-  [ -n "$panes" ] || return 1
-  proctable=$(ps -eo pid=,ppid=,etime=) || return 1
-  # The literal 'pane' lead-in is tmux labelling its own rows, so one pass can
-  # tell the two snapshots apart without a separator line to get out of step.
-  printf '%s\n%s\n' "$panes" "$proctable" | awk -v self=$$ -v maxhops=16 '
-    # ps renders elapsed time as [[dd-]hh:]mm:ss; fold it left into seconds so
-    # any of the three widths compares against any other.
-    function ageof(raw,   days, parts, fields, i, seconds) {
-      days = 0
-      if (raw ~ /-/) {
-        days = substr(raw, 1, index(raw, "-") - 1) + 0
-        raw = substr(raw, index(raw, "-") + 1)
-      }
-      fields = split(raw, parts, ":")
-      seconds = 0
-      for (i = 1; i <= fields; i++) seconds = seconds * 60 + parts[i] + 0
-      return days * 86400 + seconds
-    }
-    # A row counts only if it positively reports the pane alive. tmux renders an unknown format field as
-    # empty, so on a tmux without #{pane_dead} the row would otherwise read as alive. Such a tmux matches
-    # no pane, and the caller declines.
-    $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
-    NF == 3      { parent[$1] = $2; elapsed[$1] = $3 }
-    END {
-      pid = self
-      descendant_age = -1
-      for (hop = 0; hop < maxhops; hop++) {
-        if (!(pid in parent)) exit 1
-        # An unreadable elapsed time counts as a failure to establish descent, so the pane is refused.
-        if (elapsed[pid] !~ /^([0-9]+-)?([0-9]+:)?[0-9]+:[0-9][0-9]$/) exit 1
-        age = ageof(elapsed[pid])
-        if (age < descendant_age) exit 1
-        if (pid in pane) { print pane[pid]; exit 0 }
-        descendant_age = age
-        pid = parent[pid]
-        if (pid + 0 <= 1) exit 1
-      }
-      exit 1
-    }'
-}
-
-# Returns the tmux target that addresses a pane id, or exits 1 if tmux does not own that pane.
-#
-# display-message exits 0 for an unknown pane, with an empty target that tmux then reads as the current
-# window. The reply must therefore echo the pane id back, and must show the pane alive: `#{pane_dead}` has
-# to read "0", since a dead pane still answers.
-_pane_target() {
-  local pane="${1:-}" reply rest
-  [ -n "$pane" ] || return 1
-  reply=$(tmux display-message -p -t "$pane" \
-            '#{pane_id} #{pane_dead} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
-  [ "${reply%% *}" = "$pane" ] || return 1
-  rest="${reply#* }"
-  [ "${rest%% *}" = "0" ] || return 1
-  printf '%s' "${rest#* }"
+# Retires the claude captured at launch, TERM first and KILL if it lingers. Both relaunching workers use
+# this, so neither signals a pid that no longer holds the captured process. Reports through the worker's log.
+_retire() { # <pid> <identity captured at launch>
+  if _still_captured_process "$1" "$2"; then
+    kill -TERM "$1" 2>/dev/null || true
+    # The poll stops when the captured process has exited or the pid holds another process.
+    for _ in $(seq 1 20); do
+      _still_captured_process "$1" "$2" || break
+      sleep 0.5
+    done
+    if _still_captured_process "$1" "$2"; then
+      log "old claude $1 survived TERM; sending KILL"
+      kill -KILL "$1" 2>/dev/null || true
+    fi
+    log "old claude $1 terminated"
+  else
+    log "old claude $1 is gone: pid now holds [${IDENT_NOW:-nothing}], not the process captured at launch [$2]. Nothing to retire."
+  fi
 }
 
 # Reduces claude's flags to a whitelist of those that carry over to a fresh session: permission mode,
@@ -531,23 +538,23 @@ case "$MODE" in
     # Transport detection runs once, here. Each worker receives the result as a typed value and does not
     # re-detect.
     #
-    # A daemon-hosted session owns no pane and no iTerm2 session, so it always takes the detached transport.
-    # This session's own claude is read once, here, so the hosted decision and the relaunch target name
-    # the same process. Empty when there is none.
-    PANE_PIDS=$(_live_pane_pids)
-    OWN=$(_own_claude "$PANE_PIDS") || OWN=""
-    HOSTED=""
-    _hosted_by_other_claude "$PANE_PIDS" "${OWN%%$'\n'*}" && HOSTED=1
-    #
-    # The pane comes from $TMUX_PANE, or from process ancestry if that is missing. Each candidate is accepted
-    # only after tmux confirms it names that pane, so a stale $TMUX_PANE cannot block discovery.
-    TARGET=""
-    if [[ -z "$HOSTED" ]]; then
-      TARGET=$(_pane_target "${TMUX_PANE:-}") \
-        || TARGET=$(_pane_target "$(_discover_tmux_pane || true)") \
-        || TARGET=""
-    fi
-    if [[ -n "$TARGET" ]]; then
+    # [LAW:effects-at-boundaries] The process table and the panes are each read once, here, and _ancestry
+    # decides every transport question from those two readings. No tmux binary, or no server, means no
+    # panes. The environment's $TMUX_PANE is never read: it is inherited, so a daemon passes its spawner's
+    # down, and a pane the walk did not reach is not this session's whatever the environment says.
+    PROCS=$(ps -eo pid=,ppid=,etime=,command=) \
+      || _refuse "cannot read the process table, so no transport can be shown to be this session's"
+    PANES=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || PANES=""
+    # Captured before it is read, since a substitution inside a redirection escapes the ERR trap.
+    WALK=$(_ancestry "$PANES" "$PROCS")
+    { IFS= read -r KIND; IFS= read -r PANE; IFS= read -r OWN_PID; IFS= read -r OWN_CMD; IFS= read -r REASON; } \
+      <<<"$WALK"
+    [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] ancestry: $KIND, $REASON"
+    [[ "$KIND" != refused ]] || _refuse "$REASON"
+    # The pane id is the target: tmux keeps it for the pane's life, where a session:window.pane index can
+    # shift before the worker wakes.
+    if [[ "$KIND" == pane ]]; then
+      TARGET="$PANE"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
@@ -560,34 +567,32 @@ case "$MODE" in
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
-    elif [[ -z "$HOSTED" && "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
+    # $ITERM_SESSION_ID is inherited like $TMUX_PANE, so it names this session's terminal only when the walk
+    # showed nothing above this session that could own it.
+    elif [[ "$KIND" == paneless && "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
-      _relaunch_target "iTerm2 transport" "$OWN"
+      _relaunch_target "iTerm2 transport" "$OWN_PID" "$OWN_CMD"
       _requested_flags
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: $(_relaunch_line claude)"
+        echo "[dry-run] old-process identity: $CLAUDE_IDENT"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$MSGFILE" "$GOALFILE" "$FLAGS" \
+      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$CLAUDE_IDENT" "$MSGFILE" "$GOALFILE" "$FLAGS" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → iTerm2 (kill+relaunch, fresh) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
     elif command -v tmux >/dev/null 2>&1; then
       # No owned pane and no reachable iTerm2 session, as with a session hosted by `claude daemon run`.
-      # `new-session -d` starts a tmux server if none is running. The relaunch process is found by the same
-      # function the iTerm2 transport uses.
-      _relaunch_target "detached transport" "$OWN"
+      # `new-session -d` starts a tmux server if none is running. The relaunch process is the walk's own
+      # claude, as for the iTerm2 transport.
+      _relaunch_target "detached transport" "$OWN_PID" "$OWN_CMD"
       _requested_flags
-      # The identity is captured at the same instant as the pid and passed on as data. The worker compares
-      # against it before signaling, since by then the pid may belong to another process. A pid that cannot
-      # be identified is never signaled, so this is a hard stop.
-      CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
-        || _refuse "detached transport: cannot read the identity of claude process $CLAUDE_PID"
       # A fresh detached window starts a login shell that may rebuild PATH, so the absolute path is resolved
       # here and passed down as data. An unresolvable `claude` is a refusal, not a fallback to a bare name.
       CLAUDE_BIN=$(command -v claude) \
@@ -611,12 +616,8 @@ case "$MODE" in
     else
       # Nothing can deliver the handoff: no owned pane, no reachable iTerm2 session, and no tmux binary. The
       # handoff is already on disk, so the refusal names its path. The nonzero exit tells the caller the
-      # close-out did not happen.
-      if [[ -n "$HOSTED" ]]; then
-        _refuse "this session is hosted by another claude (a daemon host or an outer session), so no pane or iTerm2 session shows it,
-and the detached transport needs a tmux binary; none is installed."
-      fi
-      _refuse "no owned tmux pane, no reachable iTerm2 session, and no tmux binary to start a detached window with.
+      # close-out did not happen. The walk's reason says why no pane or iTerm2 session could be used.
+      _refuse "no owned tmux pane and no reachable iTerm2 session ($REASON), and no tmux binary to start a detached window with.
 Nothing on this machine to deliver the close-out into."
       # GOALFILE cleaned by the EXIT trap; MSGFILE deliberately kept.
     fi
@@ -699,15 +700,16 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   iterm-worker)
-    if [[ $# -lt 4 ]]; then
-      echo "internal error: iterm-worker expects at least 4 args" >&2
+    if [[ $# -lt 5 ]]; then
+      echo "internal error: iterm-worker expects at least 5 args" >&2
       exit 2
     fi
     UUID="$1"
     CLAUDE_PID="$2"
-    MSGFILE="$3"
-    GOALFILE="$4"
-    FLAGS="${5:-}"
+    CLAUDE_IDENT="$3"
+    MSGFILE="$4"
+    GOALFILE="$5"
+    FLAGS="${6:-}"
 
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -715,19 +717,8 @@ Nothing on this machine to deliver the close-out into."
     log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    # Stop the running claude so the shell regains the session. TERM first, then KILL if it lingers.
-    if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-      kill -TERM "$CLAUDE_PID" 2>/dev/null || true
-      for _ in $(seq 1 20); do kill -0 "$CLAUDE_PID" 2>/dev/null || break; sleep 0.5; done
-      if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        log "claude $CLAUDE_PID survived TERM; sending KILL"
-        kill -KILL "$CLAUDE_PID" 2>/dev/null || true
-        sleep 1
-      fi
-      log "claude $CLAUDE_PID terminated"
-    else
-      log "claude $CLAUDE_PID already gone"
-    fi
+    # Stop the running claude so the shell regains the session.
+    _retire "$CLAUDE_PID" "$CLAUDE_IDENT"
 
     # Let the shell draw its prompt before typing into it.
     sleep 2
@@ -870,21 +861,7 @@ OSA2
     # The successor is up and has the message, so the old process is retired now, TERM first and KILL if it
     # lingers. Retirement runs before the optional goal delivery, so a failure there cannot leave the old
     # process running.
-    if _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"; then
-      kill -TERM "$OLD_CLAUDE_PID" 2>/dev/null || true
-      # The poll stops when the captured process has exited or the pid holds another process.
-      for _ in $(seq 1 20); do
-        _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT" || break
-        sleep 0.5
-      done
-      if _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"; then
-        log "old claude $OLD_CLAUDE_PID survived TERM; sending KILL"
-        kill -KILL "$OLD_CLAUDE_PID" 2>/dev/null || true
-      fi
-      log "old claude $OLD_CLAUDE_PID terminated"
-    else
-      log "old claude $OLD_CLAUDE_PID is gone: pid now holds [${IDENT_NOW:-nothing}], not the process captured at launch [$OLD_CLAUDE_IDENT]. Nothing to retire."
-    fi
+    _retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"
 
     if [[ -s "$GOALFILE" ]]; then
       sleep 1
