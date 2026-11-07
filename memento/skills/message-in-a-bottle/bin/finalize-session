@@ -10,10 +10,10 @@
 #               run`. Starts a new detached tmux window running claude with the message as its initial
 #               prompt, and retires the old process once the new one is ready.
 #
-# Every session can continue an autonomy chain. The failure common to every transport is having nothing to
-# deliver into: no tmux binary and no iTerm2 to fall back to. The relaunching transports also refuse when
-# they cannot pin down the claude process they replace (the 'iTerm2 transport:' and 'detached transport:'
-# refusals in the launcher).
+# Every session can continue an autonomy chain. The launcher refuses when no transport applies: no owned
+# pane, no reachable iTerm2 session (a daemon-hosted session never takes iTerm2), and no tmux binary to
+# start a window with. The relaunching transports also refuse when they cannot start the replacement
+# claude; those refusals are prefixed 'iTerm2 transport:' and 'detached transport:'.
 #
 # Modes:
 #   launcher:         see --help
