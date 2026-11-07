@@ -44,7 +44,7 @@ def provider_returning(result):
 
 
 def wait_with(**fields):
-    result = {"status": "completed", "sha": "ccc", **fields}
+    result = {"status": "completed", "sha": "ccc", "poll_errors": [], **fields}
     return cli.cmd_wait(provider_returning(result), None, ARGS)
 
 

@@ -235,9 +235,9 @@ def run(status, conclusion=None):
 def wait_over(polls):
     """Runs `wait` on a PR whose head SHA is `ccc` and whose run list answers `polls` in order.
 
-    Each poll is (runs, t): the runs listed, and the clock time the call returns at, as a gh call
-    that takes time would. A poll past the last one raises AssertionError. Returns (the result or the
-    exception, the clock, the poll times)."""
+    Each poll is (runs, t): the runs listed, or `failed(...)` for a poll gh failed, and the clock
+    time the call returns at, as a gh call that takes time would. A poll past the last one raises
+    AssertionError. Returns (the result or the exception, the clock, the poll times)."""
     clock = FakeClock()
     remaining = list(polls)
     poll_times = []
@@ -252,7 +252,7 @@ def wait_over(polls):
             raise AssertionError(f"poll {len(poll_times)} at t={clock.now()} is past the {len(polls)} scripted")
         runs, t = remaining.pop(0)
         clock.advance(t - clock.now())
-        return json.dumps(runs)
+        return json.dumps(runs) if isinstance(runs, list) else runs
 
     try:
         return provider(handler, clock).wait("https://github.com/o/r/pull/7"), clock, poll_times
@@ -262,7 +262,8 @@ def wait_over(polls):
 
 got, clock, _ = wait_over([([run("completed", "success")], 0)])
 check("wait: a run already completed returns it without sleeping",
-      got == {"status": "completed", "conclusion": "success", "sha": "ccc", "url": RUN_URL}
+      got == {"status": "completed", "conclusion": "success", "sha": "ccc", "url": RUN_URL,
+              "poll_errors": []}
       and clock.sleeps == [], f"got {got!r}, sleeps {clock.sleeps!r}")
 
 got, clock, _ = wait_over([([run("queued")], 1), ([run("in_progress")], 10),
@@ -300,6 +301,85 @@ check("wait: a run missing from a later poll is held to COMPLETION_TIMEOUT_S, no
       isinstance(got, RuntimeError) and RUN_URL in str(got)
       and f"{ap.COMPLETION_TIMEOUT_S}s" in str(got) and len(poll_times) == 3,
       f"got {got!r}, polls at {poll_times!r}")
+
+
+# --- wait through a gh outage: a failed poll is no news, until every poll has failed for the window
+
+BLIP = "HTTP 502: Bad Gateway"
+DNS = "dial tcp: lookup api.github.com: no such host"
+
+got, clock, _ = wait_over([([run("in_progress")], 10), (failed(BLIP), 20),
+                           ([run("completed", "success")], 30)])
+check("wait: a failed poll between in_progress polls rides through, and is listed in poll_errors",
+      isinstance(got, dict) and got["conclusion"] == "success"
+      and len(got["poll_errors"]) == 1 and BLIP in got["poll_errors"][0],
+      f"got {got!r}")
+
+# The polls fail from t=30 on, after one succeeded there; the last returns at exactly
+# 30 + OUTAGE_TIMEOUT_S. A wait that measured the window from its start would stop at the poll 10s
+# past OUTAGE_TIMEOUT_S, a poll early, and one that stopped only past the window would poll again,
+# past the script.
+got, clock, poll_times = wait_over([([run("in_progress")], 30), (failed(BLIP), 50),
+                                    (failed(BLIP), ap.OUTAGE_TIMEOUT_S + 10),
+                                    (failed(DNS), 30 + ap.OUTAGE_TIMEOUT_S)])
+check("wait: polls failing for OUTAGE_TIMEOUT_S since the last success raise, naming the window and the last error",
+      isinstance(got, RuntimeError) and f"{ap.OUTAGE_TIMEOUT_S}s" in str(got) and DNS in str(got)
+      and isinstance(got.__cause__, gt.GhError)
+      and len(poll_times) == 4, f"got {got!r}, polls at {poll_times!r}")
+
+# Failures that span nearly the window, broken by one success, start the window again.
+got, clock, _ = wait_over([(failed(BLIP), 30), (failed(BLIP), ap.OUTAGE_TIMEOUT_S - 1),
+                           ([run("in_progress")], ap.OUTAGE_TIMEOUT_S + 10),
+                           (failed(BLIP), 2 * ap.OUTAGE_TIMEOUT_S),
+                           ([run("completed", "success")], 2 * ap.OUTAGE_TIMEOUT_S + 20)])
+check("wait: a successful poll restarts the outage window",
+      isinstance(got, dict) and got["conclusion"] == "success" and len(got["poll_errors"]) == 3,
+      f"got {got!r}")
+
+# One poll that hangs until gh is killed is one failed poll, ridden out like a quick one.
+check("OUTAGE_TIMEOUT_S holds a poll killed at GH_TIMEOUT_S",
+      ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S < ap.OUTAGE_TIMEOUT_S,
+      f"{ap.POLL_INTERVAL_S} + {gt.GH_TIMEOUT_S} >= {ap.OUTAGE_TIMEOUT_S}")
+HUNG = TimeoutError("hung, then killed")
+got, clock, _ = wait_over([([run("in_progress")], 10), (HUNG, 10 + ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S),
+                           ([run("completed", "success")], 10 + 2 * ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S + 1)])
+check("wait: a poll killed at GH_TIMEOUT_S is ridden out",
+      isinstance(got, dict) and got["conclusion"] == "success" and len(got["poll_errors"]) == 1
+      and "hung, then killed" in got["poll_errors"][0], f"got {got!r}")
+
+# The outage error states how long the polls actually failed, which a slow failure can stretch past
+# the limit.
+gap = ap.OUTAGE_TIMEOUT_S + 50
+got, clock, _ = wait_over([([run("in_progress")], 0), (failed(BLIP), 100), (failed(BLIP), 200), (HUNG, gap)])
+check("wait: the outage error states the measured gap and the limit",
+      isinstance(got, RuntimeError) and f"failed for {gap}s" in str(got)
+      and f"the limit is {ap.OUTAGE_TIMEOUT_S}s" in str(got), f"got {got!r}")
+
+# A failed poll at the register deadline: the timeout says gh failed, not only that no run registered.
+got, clock, _ = wait_over([([], 200), ([], ap.REGISTER_TIMEOUT_S - 20), (failed(BLIP), ap.REGISTER_TIMEOUT_S)])
+check("wait: a register timeout reached on a failed poll names that poll's error",
+      isinstance(got, RuntimeError) and f"{ap.REGISTER_TIMEOUT_S}s" in str(got) and BLIP in str(got),
+      f"got {got!r}")
+
+# Failures ridden out earlier are still named when the last poll succeeded, so a register timeout
+# over a flaky gh does not read as only a missing workflow.
+got, clock, _ = wait_over([([], 10), (failed(BLIP), 30), ([], 200), ([], ap.REGISTER_TIMEOUT_S)])
+check("wait: a deadline raise names the polls that failed earlier",
+      isinstance(got, RuntimeError) and "Polls that failed along the way: 1" in str(got) and BLIP in str(got),
+      f"got {got!r}")
+
+# The head SHA is read once, before anything is tracked, so its failure still ends the wait at once.
+def head_sha_fails(args):
+    if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
+        return failed(BLIP)
+    raise AssertionError(f"unexpected gh call {args!r}")
+
+try:
+    got = provider(head_sha_fails).wait("https://github.com/o/r/pull/7")
+except gt.GhError as e:
+    got = e
+check("wait: a failed head-SHA read raises at once", isinstance(got, gt.GhError) and BLIP in str(got),
+      f"got {got!r}")
 
 
 # --- the production clock ----------------------------------------------------------------------

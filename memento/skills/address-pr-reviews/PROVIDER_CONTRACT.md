@@ -70,6 +70,7 @@ Blocks until the review for the PR's current head SHA is complete.
     "conclusion": "success" | "...",    # provider-specific string; skill surfaces non-success
     "sha":        "abc123",             # the head SHA that was reviewed
     "url":        "https://..." | None, # link to the review run, if available
+    "poll_errors": ["..."],             # each transient failure the wait rode out; [] if none
 }
 ```
 
@@ -78,7 +79,7 @@ failure. Never returns a dict with `status != "completed"` — callers do not po
 
 For providers that review synchronously inside `fetch`, implement `wait` as a
 no-op that returns `{"status": "completed", "conclusion": "success", "sha": "",
-"url": None}` and document that behavior.
+"url": None, "poll_errors": []}` and document that behavior.
 
 ### `fetch(pr_url: str) -> dict`
 

@@ -533,7 +533,7 @@ def missing_gh(args):
 github, fake = install(missing_gh)
 check_raises("gh missing: raises GhError, not FileNotFoundError",
              gt.GhError, lambda: github.head_sha("o", "r", 5),
-             must_mention=("gh api repos/o/r/pulls/5 could not be run", "No such file or directory"))
+             must_mention=("gh api repos/o/r/pulls/5 failed to run", "No such file or directory"))
 try:
     github.head_sha("o", "r", 5)
 except gt.GhError as e:
@@ -550,6 +550,24 @@ with tempfile.TemporaryDirectory() as empty_dir:
         os.environ["PATH"] = _saved_path
 check("run_gh: a gh that cannot start comes back as the OSError",
       isinstance(outcome, FileNotFoundError), repr(outcome))
+
+# The real Runner, with a gh that hangs: it is killed at GH_TIMEOUT_S and comes back as a
+# TimeoutError. `exec` makes the killed process the one holding the pipes, so nothing outlives it.
+_saved_timeout = gt.GH_TIMEOUT_S
+with tempfile.TemporaryDirectory() as bin_dir:
+    hung_gh = os.path.join(bin_dir, "gh")
+    with open(hung_gh, "w") as f:
+        f.write("#!/bin/sh\nexec /bin/sleep 30\n")
+    os.chmod(hung_gh, 0o755)
+    os.environ["PATH"] = bin_dir
+    gt.GH_TIMEOUT_S = 0.2
+    try:
+        outcome = gt.run_gh(["api", "x"])
+    finally:
+        os.environ["PATH"] = _saved_path
+        gt.GH_TIMEOUT_S = _saved_timeout
+check("run_gh: a gh that hangs is killed at GH_TIMEOUT_S and comes back as a TimeoutError",
+      isinstance(outcome, TimeoutError) and "0.2s" in str(outcome), repr(outcome))
 
 
 def dismiss_handler(state):

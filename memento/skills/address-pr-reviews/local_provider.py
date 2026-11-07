@@ -40,7 +40,7 @@ class Provider:
             "local_provider.wait is not yet implemented. "
             "If the local agent runs synchronously inside trigger(), implement wait "
             "as a no-op returning {\"status\": \"completed\", \"conclusion\": \"success\", "
-            '"sha\": \"\", \"url\": None}. If it runs asynchronously, poll for completion.'
+            '"sha\": \"\", \"url\": None, \"poll_errors\": []}. If it runs asynchronously, poll for completion.'
         )
 
     def fetch(self, pr_url: str) -> dict:
