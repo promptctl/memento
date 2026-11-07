@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """GitHub review-thread primitives shared by providers whose findings are PR review threads.
 
-The GraphQL thread read, the canonical finding shape, and the verified resolve mutation are defined
-here once, so providers that post review threads import them instead of keeping copies.
+The GraphQL thread read, the canonical finding shape, and the verified resolve and reply mutations
+are defined here once, so providers that post review threads import them instead of keeping copies.
 """
 
 from __future__ import annotations
@@ -66,6 +66,12 @@ _RESOLVE_MUTATION = (
     "mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }"
 )
 
+_REPLY_MUTATION = (
+    "mutation($id:ID!,$body:String!){"
+    "  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){"
+    "    comment{ id } } }"
+)
+
 
 def _graphql(query: str, **variables) -> dict:
     """Runs one GraphQL query or mutation; every GraphQL call in this module goes through here.
@@ -79,7 +85,14 @@ def _graphql(query: str, **variables) -> dict:
         if value is None:
             continue
         args += ["-F" if isinstance(value, int) else "-f", f"{key}={value}"]
-    return json.loads(gh(*args))
+    out = gh(*args)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"gh api graphql printed {out!r}, not a JSON object")
+    return data
 
 
 def _response_path(data: dict, *path: str, subject: str) -> dict:
@@ -205,6 +218,20 @@ def resolve(thread_id: str) -> dict:
             f"(response: {data!r}). The thread is NOT resolved — do not move on."
         )
     return {"thread_id": thread_id, "is_resolved": True}
+
+
+def reply(thread_id: str, body: str) -> dict:
+    """Posts a reply on one review thread and returns only after GitHub names the created comment.
+    Raises RuntimeError if it does not."""
+    data = _graphql(_REPLY_MUTATION, id=thread_id, body=body)
+    payload = (data.get("data") or {}).get("addPullRequestReviewThreadReply") or {}
+    comment_id = (payload.get("comment") or {}).get("id")
+    if not comment_id:
+        raise RuntimeError(
+            f"addPullRequestReviewThreadReply returned no comment id for {thread_id} "
+            f"(response: {data!r}). The reply was NOT posted."
+        )
+    return {"thread_id": thread_id, "comment_id": comment_id}
 
 
 # Selects the automated reviewer's reviews. Its reviews have `.user.type` "Bot" and people's are "User".

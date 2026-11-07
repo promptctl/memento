@@ -86,24 +86,7 @@ def cmd_resolve(provider, args) -> tuple[dict, str | None]:
 
 
 def cmd_reply(provider, args) -> tuple[dict, str | None]:
-    # The reply counts as posted only when GitHub returns the id of the created comment.
-    comment_id = github_threads.gh(
-        "api", "graphql",
-        "-f", "query=mutation($id:ID!,$body:String!){"
-              "addPullRequestReviewThreadReply("
-              "input:{pullRequestReviewThreadId:$id,body:$body})"
-              "{comment{id}}}",
-        "-F", f"id={args.thread_id}",
-        "-F", f"body={args.body}",
-        "--jq", ".data.addPullRequestReviewThreadReply.comment.id",
-    )
-    if not comment_id or comment_id == "null":
-        # No comment id means the reply was not posted.
-        raise RuntimeError(
-            f"addPullRequestReviewThreadReply returned no comment id for "
-            f"{args.thread_id} — the reply was NOT posted."
-        )
-    return {"thread_id": args.thread_id, "comment_id": comment_id}, None
+    return github_threads.reply(args.thread_id, args.body), None
 
 
 def cmd_dismiss(provider, args) -> tuple[dict, str | None]:

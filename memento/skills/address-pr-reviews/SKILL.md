@@ -13,7 +13,7 @@ Read every pending review finding on the PR, **post your plan on each thread fir
 
 ```python
 # Load the provider once at the start of the loop
-import provider_loader
+import github_threads, provider_loader
 provider = provider_loader.get()  # reads provider.json, validates CAPABILITIES
 # or pin one explicitly for this session: provider_loader.get("local")
 ```
@@ -145,11 +145,8 @@ For **each** unresolved finding, before writing any code: open the file at `file
 
 **Post a comment on the thread stating your plan for this finding** — what you'll do and why. This comment goes on every finding, valid or not; it is the durable record of the decision.
 
-```bash
-gh api graphql -f query='
-mutation($id:ID!,$body:String!){
-  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){ comment{id} } }
-' -F id="$THREAD_ID" -F body="Plan: ..."
+```python
+github_threads.reply(THREAD_ID, "Plan: ...")
 ```
 
 The classification carries **one discriminator: does addressing this finding require a code change this round?**
@@ -198,11 +195,8 @@ Pushing triggers re-review for providers that auto-fire on push (`trigger: False
 
 The fix now exists in a pushed commit. For **each** finding in the change-needed set: post a comment on its thread describing the fix (reference the commit), then resolve it.
 
-```bash
-gh api graphql -f query='
-mutation($id:ID!,$body:String!){
-  addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$id,body:$body}){ comment{id} } }
-' -F id="$THREAD_ID" -F body="Fixed in <sha>: ..."
+```python
+github_threads.reply(THREAD_ID, "Fixed in <sha>: ...")
 ```
 
 ```python

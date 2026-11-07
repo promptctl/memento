@@ -438,6 +438,57 @@ for label, response in [
                  must_mention=("T_abc", "NOT resolved"))
 
 
+for label, out in [("empty", ""), ("not JSON", "<html>"), ("null", "null"), ("a list", "[]")]:
+    install(resolve_handler(out))
+    check_raises(f"graphql: a response that is {label} raises RuntimeError quoting it",
+                 RuntimeError, lambda: gt.resolve("T_abc"), must_mention=(repr(out),))
+
+
+def reply_response(payload):
+    return json.dumps({"data": {"addPullRequestReviewThreadReply": payload}})
+
+
+def reply_handler(response, thread_id="T_abc", body="Plan: fix"):
+    def handler(args):
+        if args[:2] != ["api", "graphql"]:
+            raise AssertionError(f"unexpected gh call: {args}")
+        variables = gh_vars(args)
+        if "addPullRequestReviewThreadReply" not in variables["query"]:
+            raise AssertionError(f"not the reply mutation: {variables['query']!r}")
+        if (variables["id"], variables["body"]) != (thread_id, body):
+            raise AssertionError(f"wrong thread or body: {variables!r}")
+        # `-F` would read `@path` as a file and type-infer digits, so both are always sent raw.
+        for field in (f"id={thread_id}", f"body={body}"):
+            if args[args.index(field) - 1] != "-f":
+                raise AssertionError(f"{field!r} not sent with -f: {args}")
+        return response
+
+    return handler
+
+
+POSTED = reply_response({"comment": {"id": "PRRC_1"}})
+
+install(reply_handler(POSTED))
+check_returns("reply: a created comment returns its id",
+              lambda: gt.reply("T_abc", "Plan: fix"),
+              {"thread_id": "T_abc", "comment_id": "PRRC_1"})
+
+install(reply_handler(POSTED, thread_id="12345", body="@notes.txt"))
+check_returns("reply: an all-digit id and an @-prefixed body are sent as strings",
+              lambda: gt.reply("12345", "@notes.txt"),
+              {"thread_id": "12345", "comment_id": "PRRC_1"})
+
+for label, response in [
+    ("null id", reply_response({"comment": {"id": None}})),
+    ("absent comment", reply_response({"comment": None})),
+    ("absent payload", reply_response(None)),
+]:
+    install(reply_handler(response))
+    check_raises(f"reply: {label} raises and names the thread",
+                 RuntimeError, lambda: gt.reply("T_abc", "Plan: fix"),
+                 must_mention=("T_abc", "NOT posted"))
+
+
 def dismiss_handler(state):
     def handler(args):
         if args[:4] != ["api", "--method", "PUT",
