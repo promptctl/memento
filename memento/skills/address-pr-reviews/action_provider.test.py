@@ -244,9 +244,11 @@ def wait_over(polls):
     def handler(args):
         if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
             return "ccc"
-        assert args == RUNS_ARGV, args
+        if args != RUNS_ARGV:
+            raise AssertionError(f"unexpected gh call {args!r}")
         poll_times.append(clock.now())
-        assert remaining, f"poll {len(poll_times)} at t={clock.now()} is past the {len(polls)} scripted"
+        if not remaining:
+            raise AssertionError(f"poll {len(poll_times)} at t={clock.now()} is past the {len(polls)} scripted")
         runs, t = remaining.pop(0)
         clock.advance(t - clock.now())
         return json.dumps(runs)
@@ -268,9 +270,10 @@ check("wait: polls every POLL_INTERVAL_S until the run completes, and returns it
       isinstance(got, dict) and got["conclusion"] == "failure"
       and clock.sleeps == [ap.POLL_INTERVAL_S] * 2, f"got {got!r}, sleeps {clock.sleeps!r}")
 
-# A poll before the register deadline keeps polling; the first one past it stops. A wait that held
-# a missing run to the completion deadline would poll a third time.
-got, clock, poll_times = wait_over([([], 200), ([], ap.REGISTER_TIMEOUT_S + 1)])
+# A poll before the register deadline keeps polling; one that returns at exactly the deadline stops.
+# A wait that held a missing run to the completion deadline, or that stopped only past the register
+# deadline, would poll a third time.
+got, clock, poll_times = wait_over([([], 200), ([], ap.REGISTER_TIMEOUT_S)])
 check("wait: no run registered by REGISTER_TIMEOUT_S raises, naming the SHA and the deadline",
       isinstance(got, RuntimeError) and "ccc" in str(got)
       and f"{ap.REGISTER_TIMEOUT_S}s" in str(got) and len(poll_times) == 2

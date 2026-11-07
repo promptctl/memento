@@ -108,16 +108,15 @@ class Provider:
     }
 
     def __init__(self, ports: Ports):
-        github = ports.github
-        self._github = github
+        self._github = ports.github
         # [LAW:effects-at-boundaries] wait reads time only through this port, so a test drives its
         # deadlines on a fake clock.
         self._clock = ports.clock
         # Taken from the client unchanged. resolve applies to inline threads only, since a body
         # finding has no thread; it is cleared by dismiss_review.
-        self.resolve = github.resolve
-        self.change_requests = github.change_requests
-        self.dismiss_review = github.dismiss_review
+        self.resolve = self._github.resolve
+        self.change_requests = self._github.change_requests
+        self.dismiss_review = self._github.dismiss_review
 
     def fetch(self, pr_url: str) -> dict:
         """Returns every pending finding: inline review threads plus body findings from blocking

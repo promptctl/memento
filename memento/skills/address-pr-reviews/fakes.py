@@ -47,8 +47,8 @@ class FakeRunner:
 
 
 class FakeClock:
-    """Time that moves only when told. `sleep` advances `now` and records the interval in `sleeps`;
-    `advance` moves time without a sleep, as a gh call that takes time would."""
+    """Time that moves only when told, and only forward. `sleep` advances `now` and records the
+    interval in `sleeps`; `advance` moves time without a sleep, as a gh call that takes time would."""
 
     def __init__(self):
         self._now = 0.0
@@ -59,7 +59,10 @@ class FakeClock:
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
-        self._now += seconds
+        self.advance(seconds)
 
     def advance(self, seconds: float) -> None:
+        # A monotonic clock never runs backwards, so a test that scripts it to is wrong.
+        if seconds < 0:
+            raise AssertionError(f"clock moved backwards by {-seconds}s at t={self._now}")
         self._now += seconds
