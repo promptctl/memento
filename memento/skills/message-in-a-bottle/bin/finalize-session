@@ -59,7 +59,8 @@ _clear_box() {
 }
 
 # Prints the process table the ancestry walk reads, one row per process: `pid ppid etime uid exe argv...`,
-# where exe is the executable's name as the kernel records it (ps's ucomm), which no process can retitle.
+# where exe is the executable's name as the kernel records it (ps's ucomm). macOS sets it at exec; Linux
+# lets a process rename itself, as tmux does.
 #
 # `ps` joins argv with spaces, so `--name 'review worker'` reads back as two words and a path with a space
 # loses its argv0. So `ps` supplies the tree, the owner and the executable name, and each pid's argv is
@@ -119,8 +120,9 @@ _process_table() {
       $arg =~ s/([^A-Za-z0-9_.\/:=@%+,-])/sprintf("\\x%02x", ord $1)/ge;
       return $arg;
     }
-    my @own = argv_of($$);
-    @own or die "perl cannot read its own argv from the kernel, so no row would carry one\n";
+    # The parent, not perl itself: a sandbox may let a process read only its own argv.
+    my @probe = argv_of(getppid());
+    @probe or die "perl cannot read its parent argv from the kernel, so no row would carry one\n";
     while (my $row = <STDIN>) {
       # exe is last because it may hold spaces: Linux tmux names its server `tmux: server`.
       my ($pid, $ppid, $etime, $uid, $exe) = $row =~ /^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*$/
@@ -187,10 +189,14 @@ _ancestry() {
       sub(/ .*/, "", argv0)
       return argv0 == "claude" || argv0 ~ /\/claude$/ || argv0 ~ /\/claude\/versions\//
     }
-    # A tmux process by the executable the kernel records, which ps reads for every owner, so a tmux server
-    # whose argv is withheld is still one. Linux may record the server as `tmux: server`.
-    function istmux(pid) {
-      return exe[pid] ~ /^tmux(:|$)/
+    # A tmux process by either name it goes by. The executable the kernel records is read for every owner,
+    # so a tmux server whose argv is withheld is still one; argv0 catches a tmux run through a wrapper that
+    # execs a differently named binary as `tmux`. Linux may name the server `tmux: server` in either. A
+    # false match only confines.
+    function istmux(pid,   argv0) {
+      argv0 = command[pid]
+      sub(/ .*/, "", argv0)
+      return exe[pid] ~ /^tmux(:|$)/ || argv0 ~ /(^|\/)tmux(:|$)/
     }
     # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
     function unsound(pid, younger) {

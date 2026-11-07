@@ -662,8 +662,8 @@ check("a process table that cannot be read is refused, not walked as if it were 
 shutil.rmtree(nocmd_dir, ignore_errors=True)
 
 # A row with no argv, as for a pid whose argv the kernel withholds, is not a claude
-# launched with no flags: it is no claude at all, walked past like any other. The walk then
-# leaves the chain with no claude, so nothing is handed off.
+# launched with no flags: it is no claude at all. Owned by this user, it confines the
+# walk at that hop, before any claude was passed, so nothing is handed off.
 done = run(panes=None, as_claude=[])
 check("a claude whose argv reads back empty is not read as flagless",
       done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
@@ -883,6 +883,12 @@ check("a tmux server above this session with no pane of it confines the session"
 done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_bin=TMUX_SERVER_BIN,
            host_as=[], host_uid=0)
 check("a root-owned tmux server whose argv is withheld still confines the session",
+      ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A tmux run through a wrapper execs a binary named otherwise as `tmux`, so argv0
+# names the server too.
+done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_as=["tmux", "new-session", "-s", "other"])
+check("a tmux server known only by its argv0 still confines the session",
       ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 # A row whose argv cannot be read could be another user's claude hosting this session,
