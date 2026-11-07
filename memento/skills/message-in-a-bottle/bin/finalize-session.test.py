@@ -929,6 +929,14 @@ done = run(depth=17, rehost_at=17, claude_at=[16], tmux_pane="%99", host_keeps_t
            host_as=UNREADABLE_HOST, export_claude_pid=True)
 check("a claude parent of $CLAUDE_PID makes the session hosted beyond the walk's reach",
       picked(done) == DETACHED, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The relaunch target is the same own claude the hosted walk reads. Without $CLAUDE_PID,
+# a headless claude started inside an interactive session's shell is this process's own
+# claude, and the interactive one above it is another session, never relaunched in its place.
+done = run(depth=5, claude_at=[2], as_claude=f"{NEST_AS_CLAUDE} --print", panes=None,
+           rehost_at=3, host_as=f"{NEST_AS_CLAUDE} --permission-mode plan")
+check("a headless own claude is refused, not exchanged for the interactive claude above it",
+      done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # --- no pane to be had, but tmux still gives a transport --------------------
 # Refusing a pane is still correct, but it does not mean refusing to deliver: the

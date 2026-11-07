@@ -58,70 +58,65 @@ _clear_box() {
   sleep 0.3
 }
 
-# Finds the interactive claude process to kill and relaunch. It walks up from $CLAUDE_PID when that is
-# set, and from the parent otherwise. Prints the pid, then the command line the decision was made on,
-# from one read of the process table.
-#
-# Matching is on argv0 only, so the versioned install path (`.../claude/versions/<n>`) matches. Matching
-# the whole command line would also match the daemon's `--bg-pty-host`, which names that path as an
-# argument, and killing the host would kill every session it hosts.
-#
-# A process that is not a session is walked past. The daemon host ends the walk, since any claude above it
-# belongs to another session. _claude_flags decides which claude processes are sessions.
-_find_claude_session() {
-  local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i rc
-  for ((i = 0; i < ${hops:-8}; i++)); do
+# Prints this session's own claude: its pid, then its command line, from one read of the process table.
+# That is $CLAUDE_PID, which Claude Code sets for every tool call, or the first claude binary among this
+# process and its 15 ancestors, the same reach as _hosted_by_daemon's walk, when it is unset. Every claude
+# above the own one is another session, so neither walk ever looks past it for a better candidate.
+_own_claude() {
+  local pid="${CLAUDE_PID:-$$}" hops="${CLAUDE_PID:+1}" cmd i
+  for ((i = 0; i < ${hops:-16}; i++)); do
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    rc=0; _claude_host_code "$cmd" || rc=$?
-    # A host ends the walk: every claude above it is the daemon's spawner, a
-    # different session, and relaunching it kills that session.
-    [ "$rc" -eq 3 ] && return 1
-    [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; }
+    _is_claude_binary "$cmd" && { printf '%s\n%s' "$pid" "$cmd"; return 0; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
   return 1
+}
+
+# Prints this session's own claude when it is an interactive session that can be killed and relaunched.
+# A headless claude, a subcommand, or a daemon host fails, since relaunching it would sever its client or
+# kill every session it hosts. A claude whose flags cannot be read is printed, so the transport's flag
+# read refuses it by name.
+_find_claude_session() {
+  local found rc=0
+  found=$(_own_claude) || return 1
+  _claude_flags "${found#*$'\n'}" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 2 ] || return 1
+  printf '%s' "$found"
 }
 
 # Succeeds if this session is hosted by a claude daemon. A hosted session is displayed only over its
 # host's socket, so any pane or iTerm2 session reachable from it belongs to another session. A hosted
 # session therefore takes the detached transport.
 #
-# [LAW:types-are-the-program] Hosted is read from the shape of the process tree, never from flags. This
-# session's own claude is $CLAUDE_PID, or the first claude binary the walk meets when that is unset. Any
-# other claude binary met before a live pane means the pane shows that claude's session: a daemon host,
-# readable or not, or an outer session this claude was started inside. A claude is checked before its
-# pane, since a pane's process is usually the claude it shows. $CLAUDE_PID's parent is checked directly,
-# since this walk may not reach it. A read that fails mid-walk counts as hosted, because a wrong detach
-# costs a relaunch and a wrong pane costs a /clear in someone else's session.
+# [LAW:types-are-the-program] Hosted is read from the shape of the process tree, never from flags. Any
+# claude binary other than _own_claude's, met before a live pane, means the pane shows that claude's
+# session: a daemon host, readable or not, or an outer session this claude was started inside. A claude
+# is checked before its pane, since a pane's process is usually the claude it shows. A walk that ends
+# without a pane reads the own claude's parent directly, since $CLAUDE_PID may lie beyond its reach. A
+# read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a wrong pane
+# costs a /clear in someone else's session.
 _hosted_by_daemon() {
-  local panes pid=$$ own="" line ppid cmd i
+  local panes pid=$$ own line ppid cmd i
   panes=" $(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
             | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
-  case "${CLAUDE_PID:-}" in
-    ''|*[!0-9]*) ;;
-    *)
-      own=$CLAUDE_PID
-      line=$(ps -o ppid= -p "$own" 2>/dev/null | tr -d '[:space:]')
-      if [ -n "$line" ] && [ "$line" -gt 1 ]; then
-        _is_claude_binary "$(ps -o command= -p "$line" 2>/dev/null)" && return 0
-      fi ;;
-  esac
+  own=$(_own_claude) || own=""
+  own=${own%%$'\n'*}
   for ((i = 0; i < 16; i++)); do
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$pid" -gt 1 ] || return 1
+    [ "$pid" -gt 1 ] || break
     line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
     [ -n "$line" ] || return 0
     read -r ppid cmd <<<"$line"
-    if _is_claude_binary "$cmd"; then
-      own=${own:-$pid}
-      [ "$pid" = "$own" ] || return 0
-    fi
+    _is_claude_binary "$cmd" && [ "$pid" != "$own" ] && return 0
     [[ "$panes" == *" $pid "* ]] && return 1
     pid=$ppid
   done
-  return 1
+  [ -n "$own" ] || return 1
+  line=$(ps -o ppid= -p "$own" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$line" ] && [ "$line" -gt 1 ] || return 1
+  _is_claude_binary "$(ps -o command= -p "$line" 2>/dev/null)"
 }
 
 # Succeeds for a command line whose argv0 is a claude binary. This is the one place argv0 is matched
@@ -131,12 +126,6 @@ _is_claude_binary() {
     claude|*/claude|*/claude/versions/*) return 0 ;;
   esac
   return 1
-}
-
-# Returns _claude_flags' code for a command line, or 2 for anything that is not a claude binary.
-_claude_host_code() {
-  _is_claude_binary "$1" || return 2
-  _claude_flags "$1" >/dev/null 2>&1
 }
 
 # Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
@@ -248,10 +237,9 @@ _pane_target() {
 # token is its value or the prompt. An unlisted short flag always fails, since a cluster such as `-cp`
 # can hide `-p`. Adding the flag to the table with its arity fixes either.
 #
-# `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
-# function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
-# return 3, so _find_claude_session can end its walk there. Only the flag region is read, so a prompt that
-# contains those words is never misread.
+# `--print`/`-p`, subcommands such as `claude mcp serve`, and the daemon and its hosts (`claude daemon
+# run`, `--bg-pty-host`, `--bg-spare`) mean the process is not a session, so the function returns 2. Only
+# the flag region is read, so a prompt that contains those words is never misread.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks keep=()
@@ -269,9 +257,7 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         keep+=("$tok"); i=$((i+1)) ;;
-      --bg-pty-host|--bg-spare)
-        return 3 ;;
-      -p|--print)
+      -p|--print|--bg-pty-host|--bg-spare)
         return 2 ;;
       # boolean (`claude --help`, 2.1.283; `--reply-on-resume` is hidden from it)
       --reply-on-resume|-c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
@@ -305,7 +291,7 @@ _claude_flags() {
         # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
         # merely starts with the word is still a session's prompt.
         case "$tok $next" in
-          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 3 ;;
+          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 2 ;;
         esac
         [ "$tok" = daemon ] && return 2
         break ;;
