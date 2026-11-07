@@ -107,7 +107,7 @@ def pr_with_one_thread(args):
     if args[:2] == ["api", "graphql"]:
         return json.dumps({"data": {"repository": {"pullRequest": {"reviewThreads": {
             "pageInfo": {"hasNextPage": False, "endCursor": None},
-            "nodes": [{"id": "T_1", "isResolved": False, "path": "a.py", "line": 1, "comments": {
+            "nodes": [{"id": "T_1", "isResolved": False, "path": "a.py", "originalLine": 1, "comments": {
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
                 "nodes": [{"author": {"login": "bot"}, "body": "x",
                            "originalCommit": {"oid": "old"}}]}}]}}}}})

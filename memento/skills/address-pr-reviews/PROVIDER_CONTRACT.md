@@ -118,7 +118,8 @@ finding and for every finding when `resolve` is `False`. `[LAW:one-source-of-tru
 
 `commit_id` is the commit a finding is a statement about: for a thread, the commit its first
 comment was made on; for a body finding, the commit of the review it came from. It is null when the
-backend names no commit for it. A provider reports the commit and nothing more — where that commit
+backend names no commit for it. `line_start` and `line_end` are lines at that commit, not at the
+head. A provider reports the commit and nothing more — where that commit
 stands against the head is not the provider's to say (see `head_sha`).
 
 The skill treats `is_resolved: false` findings as unresolved. The loop exits

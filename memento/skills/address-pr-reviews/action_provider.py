@@ -55,7 +55,7 @@ def _split_path_line(span: str) -> tuple[Optional[str], Optional[int]]:
     return span, None
 
 
-def parse_body_findings(body: str, author: str, commit_id: str) -> list[dict]:
+def parse_body_findings(body: str, author: str, commit_id: Optional[str]) -> list[dict]:
     """Returns the findings listed under body-finding headings in a review body. Returns [] if there are none.
 
     A body finding has no thread, so `thread_id` is None and it is cleared by dismissing its review,

@@ -34,7 +34,7 @@ HEAD_READ = ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]
 
 
 def thread(tid, commit):
-    return {"id": tid, "isResolved": False, "path": "a.py", "line": 7,
+    return {"id": tid, "isResolved": False, "path": "a.py", "originalLine": 7,
             "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                          "nodes": [{"author": {"login": "github-actions[bot]"}, "body": tid,
                                     "originalCommit": commit and {"oid": commit}}]}}

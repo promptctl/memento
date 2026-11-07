@@ -85,7 +85,7 @@ def comment(login, body):
 
 def thread_node(tid, comments, has_next=False, end=None):
     return {
-        "id": tid, "isResolved": False, "path": "a.py", "line": 7,
+        "id": tid, "isResolved": False, "path": "a.py", "originalLine": 7,
         "comments": {
             "pageInfo": {"hasNextPage": has_next, "endCursor": end},
             "nodes": comments,
@@ -159,17 +159,22 @@ check("threads: later requests thread the endCursor through",
 
 github, fake = install(paged_graphql({
     None: threads_page([
-        thread_node("t1", [{**comment("bot", "one"), "originalCommit": {"oid": "old"}},
-                           {**comment("human", "reply"), "originalCommit": {"oid": "new"}}]),
+        # GitHub mapped t1 onto the latest commit at line 17; its comment was made at line 7 on `old`.
+        {**thread_node("t1", [{**comment("bot", "one"), "originalCommit": {"oid": "old"}},
+                              {**comment("human", "reply"), "originalCommit": {"oid": "new"}}]),
+         "line": 17},
         thread_node("t2", [{**comment("bot", "two"), "originalCommit": None}]),
         thread_node("t3", []),
     ]),
 }))
+found = github.fetch(PR)["findings"]
 check("commit: a thread is on its first comment's commit; a null or absent commit is None",
-      [f["commit_id"] for f in github.fetch(PR)["findings"]] == ["old", None, None],
-      f'got {[f["commit_id"] for f in github.fetch(PR)["findings"]]}')
-check("commit: the thread query asks for each comment's originalCommit",
-      "originalCommit{oid}" in gh_vars(fake.calls[0])["query"], f"got {fake.calls[0]}")
+      [f["commit_id"] for f in found] == ["old", None, None], f'got {[f["commit_id"] for f in found]}')
+check("commit: a thread's line is its line at that commit, not GitHub's mapping onto the latest",
+      (found[0]["line_start"], found[0]["line_end"]) == (7, 7), f"got {found[0]!r}")
+check("commit: the thread query asks for each comment's originalCommit and the thread's originalLine",
+      "originalCommit{oid}" in gh_vars(fake.calls[0])["query"]
+      and "originalLine" in gh_vars(fake.calls[0])["query"], f"got {fake.calls[0]}")
 
 
 # --- multi-page comment fetch inside _complete_comments -------------------
