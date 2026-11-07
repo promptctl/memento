@@ -9,6 +9,7 @@ JSONL parsing run for real, no test uses the network, and `wait` runs on a clock
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -16,7 +17,7 @@ sys.path.insert(0, HERE)
 import action_provider as ap  # noqa: E402
 import github_threads as gt  # noqa: E402
 from fakes import FakeClock, FakeRunner, failed  # noqa: E402
-from ports import Ports  # noqa: E402
+from ports import Ports, SystemClock  # noqa: E402
 
 failures = []
 
@@ -290,6 +291,23 @@ check("wait: a run not completed by COMPLETION_TIMEOUT_S raises, naming the dead
       and f"{ap.COMPLETION_TIMEOUT_S}s" in str(got) and len(poll_times) == 3
       and clock.sleeps == [ap.POLL_INTERVAL_S] * 2, f"got {got!r}, polls at {poll_times!r}")
 
+
+# A run that registered and then drops out of a poll is still the run being waited on: the register
+# deadline passes without a raise, and the timeout names the run rather than "never registered".
+got, clock, poll_times = wait_over([([run("in_progress")], 10), ([], ap.REGISTER_TIMEOUT_S),
+                                    ([], ap.COMPLETION_TIMEOUT_S)])
+check("wait: a run missing from a later poll is held to COMPLETION_TIMEOUT_S, not reported unregistered",
+      isinstance(got, RuntimeError) and RUN_URL in str(got)
+      and f"{ap.COMPLETION_TIMEOUT_S}s" in str(got) and len(poll_times) == 3,
+      f"got {got!r}, polls at {poll_times!r}")
+
+
+# --- the production clock ----------------------------------------------------------------------
+
+# Epoch time and monotonic time differ by decades on any machine, so a SystemClock that read wall
+# time would fail this.
+check("SystemClock.now is monotonic time", abs(SystemClock().now() - time.monotonic()) < 60,
+      f"now {SystemClock().now()!r}, monotonic {time.monotonic()!r}")
 
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)

@@ -19,7 +19,7 @@ class Provider:
     }
 
     def __init__(self, ports: Ports):
-        self._ports = ports
+        pass
 
     def setup_check(self, owner: str, repo: str) -> dict:
         raise NotImplementedError(

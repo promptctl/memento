@@ -1,4 +1,5 @@
-"""The in-memory fakes of the ports in `ports.py`, shared by every test that builds a provider.
+"""The in-memory fakes a test builds `ports.Ports` over, shared by every test that builds a provider:
+`FakeRunner` under the GitHub client, and `FakeClock` as the Clock.
 
 `FakeRunner` stands in for github_threads' Runner. A test teaches it gh's outcomes through a handler
 from argv (without the leading `gh`) to one of: the stdout of a gh that succeeded, `failed(...)` for

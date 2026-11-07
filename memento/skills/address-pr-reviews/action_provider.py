@@ -170,9 +170,12 @@ class Provider:
         owner, repo, pr_num = github_threads.parse_pr(pr_url)
         sha = self._github.head_sha(owner, repo, pr_num)
         start = self._clock.now()
+        # The last run any poll listed. A run that registered is held to the completion deadline
+        # even if a later poll misses it, so a gap in the run list is not reported as "never
+        # registered".
         run: Optional[dict] = None
         while True:
-            run = self._latest_run(owner, repo, sha)
+            run = self._latest_run(owner, repo, sha) or run
             if run and run.get("status") == "completed":
                 return {
                     "status":     "completed",
