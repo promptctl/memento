@@ -232,8 +232,9 @@ def runs_argv(sha):
             "--jq", ".workflow_runs"]
 
 
-def run(status, conclusion=None, url=RUN_URL):
-    return {"id": int(url.rsplit("/", 1)[1]), "status": status, "conclusion": conclusion, "html_url": url}
+def run(status, conclusion=None, url=RUN_URL, attempt=1):
+    return {"id": int(url.rsplit("/", 1)[1]), "run_attempt": attempt, "status": status,
+            "conclusion": conclusion, "html_url": url}
 
 
 def wait_over(polls):
@@ -421,6 +422,24 @@ got, clock, _ = wait_over([([run("in_progress")], 10, "ddd"), ([run("in_progress
 check("wait: a head back on a commit it left passes over the run it left there",
       isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == BACK_URL
       and got["superseded"] == ["ccc", "ddd"], f"got {got!r}")
+
+# Every run listed for ccc is left with it, not only the one held last: ccc lists run 5 and then run 7
+# before the head moves, and back on ccc the list answers run 5 again.
+got, clock, _ = wait_over([([run("in_progress")], 10), ([run("in_progress", url=BACK_URL)], 20, "ddd"),
+                           ([run("in_progress", url=NEW_URL)], 30, "ccc"),
+                           ([run("completed", "cancelled")], 40),
+                           ([run("completed", "success", BACK_URL, attempt=2)], 50)])
+check("wait: back on a commit it left, wait passes over every run it listed there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == BACK_URL,
+      f"got {got!r}")
+
+# `gh run rerun` keeps the run's id: back on ccc, the rerun of the run left there is a new review.
+got, clock, _ = wait_over([([run("in_progress")], 10, "ddd"), ([run("in_progress", url=NEW_URL)], 20, "ccc"),
+                           ([run("completed", "cancelled")], 30),
+                           ([run("completed", "success", attempt=2)], 40)])
+check("wait: a rerun of a run left on a commit is returned once the head is back there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == RUN_URL,
+      f"got {got!r}")
 
 # The head read fails in a pass whose run read saw the run completed: nothing confirms the head is
 # still ccc, so that pass returns nothing, and the next one does.
