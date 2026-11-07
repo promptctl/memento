@@ -31,6 +31,12 @@ def check(name, condition, detail=""):
 
 PR = "https://github.com/o/r/pull/7"
 HEAD_READ = ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]
+OLD, NEW = "a" * 40, "b" * 40
+
+
+def review(sha, conclusion="success"):
+    """A result in the shape wait returns."""
+    return {"status": "completed", "conclusion": conclusion, "sha": sha, "url": "https://run", "poll_errors": []}
 
 
 def thread(tid, commit):
@@ -41,7 +47,7 @@ def thread(tid, commit):
 
 
 BLOCKING_ON_OLD = {
-    "review_id": 9, "author": "github-actions[bot]", "commit_id": "old",
+    "review_id": 9, "author": "github-actions[bot]", "commit_id": OLD,
     "state": "CHANGES_REQUESTED",
     "body": "### Findings outside the reviewed diff\nx\n\n- `b.py:3` — **[S1]** a body finding",
 }
@@ -68,17 +74,17 @@ def pr(threads, reviews, head):
 # --- the ticket's shape: a review on an older commit, and a newer head ---------
 
 got = findings.fetch(
-    pr([thread("on-old", "old"), thread("on-new", "new"), thread("no-commit", None)],
-       [BLOCKING_ON_OLD], head=lambda calls: "new"),
-    PR, "new")
+    pr([thread("on-old", OLD), thread("on-new", NEW), thread("no-commit", None)],
+       [BLOCKING_ON_OLD], head=lambda calls: NEW),
+    PR, review(NEW))
 check("the head the findings were placed against is returned",
-      got["head_sha"] == "new", f"got {got['head_sha']!r}")
+      got["head_sha"] == NEW, f"got {got['head_sha']!r}")
 check("findings from the older review read as older; the one on the head as head; the one with no commit unknown",
       [(f["body"], f["commit_id"], f["against_head"]) for f in got["findings"]] == [
-          ("on-old", "old", "older"),
-          ("on-new", "new", "head"),
+          ("on-old", OLD, "older"),
+          ("on-new", NEW, "head"),
           ("no-commit", None, "unknown"),
-          ("**[S1]** a body finding", "old", "older"),
+          ("**[S1]** a body finding", OLD, "older"),
       ], f"got {got['findings']!r}")
 
 
@@ -89,12 +95,12 @@ check("findings from the older review read as older; the one on the head as head
 
 def pushed_after_findings(calls):
     findings_read = any(c[:3] == ["api", "--paginate", "repos/o/r/pulls/7/reviews"] for c in calls)
-    return "new" if findings_read else "old"
+    return NEW if findings_read else OLD
 
 
-got = findings.fetch(pr([thread("on-old", "old")], [BLOCKING_ON_OLD], pushed_after_findings), PR, "old")
+got = findings.fetch(pr([thread("on-old", OLD)], [BLOCKING_ON_OLD], pushed_after_findings), PR, review(OLD))
 check("a push during the fetch leaves findings on the superseded head reading as older",
-      [f["against_head"] for f in got["findings"]] == ["older", "older"] and got["head_sha"] == "new",
+      [f["against_head"] for f in got["findings"]] == ["older", "older"] and got["head_sha"] == NEW,
       f"got {got!r}")
 check("a push during the fetch leaves the loop not done", got["done"] is False, f"got {got!r}")
 
@@ -103,22 +109,45 @@ check("a push during the fetch leaves the loop not done", got["done"] is False, 
 # The ticket's shape: wait's review covered `old`, a push moved the head to `new`, and `new`'s review
 # has not run, so nothing is pending yet. An empty list here must not read as a clean head.
 
-got = findings.fetch(pr([], [], head=lambda calls: "new"), PR, "old")
+got = findings.fetch(pr([], [], head=lambda calls: NEW), PR, review(OLD))
 check("no findings on a head the wait did not review: not done",
-      got["findings"] == [] and got["head_sha"] == "new" and got["done"] is False,
+      got["findings"] == [] and got["head_sha"] == NEW and got["done"] is False,
       f"got {got!r}")
 
-got = findings.fetch(pr([], [], head=lambda calls: "old"), PR, "old")
+got = findings.fetch(pr([], [], head=lambda calls: OLD), PR, review(OLD))
 check("no findings on the head the wait reviewed: done",
       got["findings"] == [] and got["done"] is True, f"got {got!r}")
 
-got = findings.fetch(pr([thread("on-old", "old")], [], head=lambda calls: "old"), PR, "old")
+got = findings.fetch(pr([thread("on-old", OLD)], [], head=lambda calls: OLD), PR, review(OLD))
 check("an unresolved finding on the head the wait reviewed: not done", got["done"] is False, f"got {got!r}")
 
-got = findings.fetch(pr([{**thread("on-old", "old"), "isResolved": True}], [], head=lambda calls: "old"),
-                     PR, "old")
+got = findings.fetch(pr([{**thread("on-old", OLD), "isResolved": True}], [], head=lambda calls: OLD),
+                     PR, review(OLD))
 check("only resolved findings on the head the wait reviewed: done",
       len(got["findings"]) == 1 and got["done"] is True, f"got {got!r}")
+
+
+# --- a review that proves nothing is refused before the provider is read ----------
+# A failed review's findings are absent, not empty, so its head must never read as done; a sha that
+# is not full compares unequal to the head every round, so the loop would never end.
+
+
+def untouched(url):
+    raise AssertionError("the provider was read")
+
+
+untouched_provider = types.SimpleNamespace(fetch=untouched, head_sha=untouched)
+for name, bad, says in [
+    ("a review that concluded failure", review(OLD, conclusion="failure"), "'failure', not success"),
+    ("a short sha", review(OLD[:7]), "not a full commit SHA"),
+    ("an empty sha", review(""), "not a full commit SHA"),
+]:
+    try:
+        findings.fetch(untouched_provider, PR, bad)
+    except ValueError as e:
+        check(f"{name} is refused, saying why, before the provider is read", says in str(e), f"got {e}")
+    else:
+        check(f"{name} is refused, saying why, before the provider is read", False, "accepted")
 
 
 # --- every provider supplies the head -------------------------------------------

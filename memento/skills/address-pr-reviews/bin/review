@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -39,16 +38,6 @@ def pr_url(github: github_threads.GitHub, ref: str) -> str:
             )
         return url
     github_threads.parse_pr(ref)  # raises ValueError on a malformed URL
-    return ref
-
-
-def full_sha(ref: str) -> str:
-    """Returns `ref` if it is a full commit SHA (40 hex for SHA-1, 64 for SHA-256). fetch compares it
-    to the head exactly, so a short or empty SHA would read as an unreviewed head on every round and
-    the loop would never end. [LAW:parse-dont-validate]
-    """
-    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", ref):
-        raise argparse.ArgumentTypeError(f"{ref!r} is not a full commit SHA; pass the sha wait returned")
     return ref
 
 
@@ -87,7 +76,8 @@ def cmd_wait(provider, github, args) -> tuple[dict, str | None]:
 
 
 def cmd_fetch(provider, github, args) -> tuple[dict, str | None]:
-    return findings.fetch(provider, pr_url(github, args.pr), args.reviewed), None
+    review = json.loads(args.review)  # a malformed --review fails before any gh call
+    return findings.fetch(provider, pr_url(github, args.pr), review), None
 
 
 def cmd_change_requests(provider, github, args) -> tuple[dict, str | None]:
@@ -144,10 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
                  "unless conclusion is success")
     p.add_argument("pr", help="PR URL or number")
 
-    p = add("fetch", cmd_fetch, help="canonical findings JSON, each placed against the head")
+    p = add("fetch", cmd_fetch,
+            help="canonical findings JSON, each placed against the head, and whether the loop is done")
     p.add_argument("pr", help="PR URL or number")
-    p.add_argument("--reviewed", required=True, metavar="SHA", type=full_sha,
-                   help="the sha wait returned: the commit the completed review covered")
+    p.add_argument("--review", required=True, metavar="JSON",
+                   help="the JSON wait printed, whole: the completed review step 1 waited for")
 
     p = add("change-requests", cmd_change_requests, capability="dismiss_review",
             help="the automated reviewer's blocking CHANGES_REQUESTED reviews")

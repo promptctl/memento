@@ -67,7 +67,9 @@ def run_cli(handler, *argv):
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             code = cli.main(Ports(github_threads.GitHub(fake), FakeClock()))
-        except SystemExit as e:  # argparse refusing the arguments exits the process with this code
+        except SystemExit as e:
+            if e.code != 2:  # 2 is argparse refusing the arguments; any other exit is a bug in main
+                raise
             code = e.code
     return code, out.getvalue(), err.getvalue(), fake.calls
 
@@ -119,9 +121,13 @@ def pr_with_one_thread(args):
     raise AssertionError(f"unexpected gh call: {args}")
 
 
-REVIEWED = "0" * 40
+def waited(conclusion):
+    """The JSON `review wait` prints, for a review of a commit that is not the head."""
+    return json.dumps({"status": "completed", "conclusion": conclusion, "sha": "0" * 40,
+                       "url": "https://run", "poll_errors": []})
 
-code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", REVIEWED)
+
+code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--review", waited("success"))
 got = json.loads(out) if code == 0 else None
 check("fetch: prints the head, whether the loop is done, and each finding placed against it",
       got is not None and got["head_sha"] == "new" and got["done"] is False
@@ -129,13 +135,14 @@ check("fetch: prints the head, whether the loop is done, and each finding placed
       f"code={code} out={out!r} err={err!r}")
 
 code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR)
-check("fetch: refused without the sha the wait reviewed, before any gh call",
-      code != 0 and "--reviewed" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
+check("fetch: refused without the review wait printed, before any gh call",
+      code == 2 and "--review" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
 
-for short in ["", REVIEWED[:7]]:
-    code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", short)
-    check(f"fetch: refused a --reviewed of {short!r}, not a full SHA, before any gh call",
-          code != 0 and "not a full commit SHA" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
+for name, given, says in [("a failed review", waited("failure"), "not success"),
+                          ("a --review that is not JSON", "0" * 40, "ERROR (fetch)")]:
+    code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--review", given)
+    check(f"fetch: {name} exits 1, saying why, before any gh call",
+          code == 1 and says in err and not calls, f"code={code} err={err!r} calls={calls!r}")
 
 code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

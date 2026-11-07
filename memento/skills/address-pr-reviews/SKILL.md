@@ -7,7 +7,7 @@ description: Address open PR review findings with judgment — read every findin
 
 Read every pending review finding on the PR, **post your plan on each thread first**, then implement, push (which re-runs the reviewer), confirm-and-resolve the threads you fixed, and dismiss the reviewer's now-stale change request. Repeat until clean. Same model people use at a real company: handle reviewer findings AND human-reviewer threads in one pass, push back with reasoning when you disagree, resolve, dismiss, re-review.
 
-[LAW:one-source-of-truth] `findings.fetch(provider, PR_URL, reviewed_sha)` is the single source of pending findings for this loop — every open finding on the PR, keyed by `thread_id` when it has one. There is no second stream: a finding the reviewer could not anchor to a diff line (a **body finding**, `thread_id` null) rides the same `fetch`, and is disposed by dismissing the blocking review it lives in, not by `resolve`.
+[LAW:one-source-of-truth] `findings.fetch(provider, PR_URL, result)` is the single source of findings for this loop — every finding on the PR, resolved or not, keyed by `thread_id` when it has one. There is no second stream: a finding the reviewer could not anchor to a diff line (a **body finding**, `thread_id` null) rides the same `fetch`, and is disposed by dismissing the blocking review it lives in, not by `resolve`.
 
 **Provider** — the active review backend is loaded from `provider.json` in the skill directory (or `PR_REVIEW_PROVIDER` env var). The provider contract is in `PROVIDER_CONTRACT.md`. To switch providers, change `provider.json`; the loop below does not change.
 
@@ -66,7 +66,7 @@ Then wait for the review to complete (all providers, always):
 result = provider.wait(PR_URL)
 ```
 
-Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, poll_errors}`; `sha` is the commit that review covered, and step 2 takes it. If the head SHA's review is already complete (nothing new pushed), it returns at once. `poll_errors` lists each failed poll the wait rode out; when it is non-empty, name those failures in the recap, so a flaky gh is seen even when the wait succeeded.
+Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, poll_errors}`; `sha` is the commit that review covered, and step 2 takes the result whole. If the head SHA's review is already complete (nothing new pushed), it returns at once. `poll_errors` lists each failed poll the wait rode out; when it is non-empty, name those failures in the recap, so a flaky gh is seen even when the wait succeeded.
 
 [LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Do not treat a failed run as a clean review. Stop and surface the run `url` — with one exception: the `action` provider, on a usage-limited run, where the loop fixes the cause itself. An `action` run whose failed log carries no such annotation is any other failure and stops here like the rest. Every other provider stops here on any non-success conclusion; the mechanics below are GitHub Actions mechanics and mean nothing to them.
 
@@ -95,7 +95,7 @@ You will be reading "You've hit your limit · resets <date>", the date will be t
 ### 2. Fetch findings, and capture the change requests to dismiss
 
 ```python
-data = findings.fetch(provider, PR_URL, result["sha"])
+data = findings.fetch(provider, PR_URL, result)
 
 # Capture the blocking reviews to dismiss at round end (step 8).
 pending_reviews = []
@@ -103,7 +103,7 @@ if provider.CAPABILITIES["dismiss_review"]:
     pending_reviews = provider.change_requests(PR_URL)["reviews"]
 ```
 
-`findings.fetch` returns canonical JSON: the PR's `head_sha`, `done` (the done rule below, computed), and every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the done rule below accounts for them too.
+`findings.fetch` returns canonical JSON: the PR's `head_sha`, `done` (the done rule below, computed), and every finding on the PR, resolved or not, keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the done rule below accounts for them too.
 
 `change_requests` returns the automated reviewer's `CHANGES_REQUESTED` reviews — `[{"review_id", "author", "commit_id"}]` — captured **now, before any push**, so step 8 dismisses exactly the reviews this round addressed and never the fresh re-review your push triggers. [LAW:one-source-of-truth] the dismiss set is what you read here, not what is blocking after you mutate the PR. It is scoped to Bot authors: a human's `CHANGES_REQUESTED` is theirs to clear, never auto-dismissed. [LAW:no-silent-failure]
 
@@ -172,7 +172,7 @@ The classification carries **one discriminator: does addressing this finding req
 
 **A body finding (`thread_id` null)** has no thread — nowhere to post the plan comment, nothing for `provider.resolve` to take. It lives in its blocking review's body, so `fetch` keeps returning it for as long as that review stays CHANGES_REQUESTED, whatever the head SHA — and dismissing that review, with the finding's disposition recorded in the dismiss message (step 8), is the one thing that clears it. Classify it the same way: a change-needed body finding is fixed and pushed like any other (steps 4/6), but that fix+push earns its keep by making the *next* review come back clean so the finding does not recur — it does not clear the current finding, which only the step-8 dismissal clears. A no-change body finding (invalid, already-fixed) needs no push — recording its disposition in the dismiss message is the whole action. Either way there is nothing to `resolve` in step 7; either way the step-8 dismissal is not optional, even once the new head re-reviews clean.
 
-When `provider.CAPABILITIES["resolve"]` is `False`, findings have no resolvable thread — note each finding's disposition in a reply if the provider supports it. The loop still converges by step 2's done rule.
+When `provider.CAPABILITIES["resolve"]` is `False`, findings have no resolvable thread — note each finding's disposition in a reply if the provider supports it.
 
 ### 4. Implement the planned changes
 
