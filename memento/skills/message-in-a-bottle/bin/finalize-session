@@ -58,74 +58,90 @@ _clear_box() {
   sleep 0.3
 }
 
-# Finds the interactive claude process to kill and relaunch. It walks up from $CLAUDE_PID when that is
-# set, and from the parent otherwise. Prints the pid, then the command line the decision was made on,
-# from one read of the process table.
-#
-# Matching is on argv0 only, so the versioned install path (`.../claude/versions/<n>`) matches. Matching
-# the whole command line would also match the daemon's `--bg-pty-host`, which names that path as an
-# argument, and killing the host would kill every session it hosts.
-#
-# A process that is not a session is walked past. The daemon host ends the walk, since any claude above it
-# belongs to another session. _claude_flags decides which claude processes are sessions.
-_find_claude_session() {
-  local pid="${CLAUDE_PID:-$PPID}" hops="${CLAUDE_PID:+1}" cmd i rc
-  for ((i = 0; i < ${hops:-8}; i++)); do
+# Prints the pid of every live tmux pane's process, each between spaces, so membership is one glob match.
+# A row counts only if it positively reports the pane alive. With no tmux or no server the list is empty.
+_live_pane_pids() {
+  printf ' %s' "$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
+                  | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
+}
+
+# Prints this session's own claude: its pid, then its command line, from one read of the process table.
+# That is $CLAUDE_PID, which Claude Code sets for every tool call. When it is unset, it is the first claude
+# binary among this process and its 15 ancestors, the same reach as _hosted_by_other_claude's walk, and a live
+# pane met first ends the search, since a claude above a pane shows another session. The launcher reads
+# it once, and the hosted decision and the relaunch target both take it from there.
+_own_claude() { # <live pane pids>
+  local panes="$1" pid="${CLAUDE_PID:-$$}" hops="${CLAUDE_PID:+1}" cmd i
+  for ((i = 0; i < ${hops:-16}; i++)); do
     case "$pid" in ''|*[!0-9]*) return 1 ;; esac
     [ "$pid" -gt 1 ] || return 1
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
-    rc=0; _claude_host_code "$cmd" || rc=$?
-    # A host ends the walk: every claude above it is the daemon's spawner, a
-    # different session, and relaunching it kills that session.
-    [ "$rc" -eq 3 ] && return 1
-    [ "$rc" -eq 2 ] || { printf '%s\n%s' "$pid" "$cmd"; return 0; }
+    _is_claude_binary "$cmd" && { printf '%s\n%s' "$pid" "$cmd"; return 0; }
+    [[ "$panes" == *" $pid "* ]] && return 1
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   done
   return 1
 }
 
-# Succeeds if this session is hosted by a claude daemon. A hosted session is displayed only over its
-# host's socket, so any pane or iTerm2 session reachable from it belongs to another session. A hosted
-# session therefore takes the detached transport.
-#
-# The walk goes up from this process. Reaching a host before a live pane means the pane is not this
-# session's own. $CLAUDE_PID is checked directly, since its parent may be a host even when this walk does
-# not reach it. A read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a
-# wrong pane costs a /clear in someone else's session.
-_hosted_by_daemon() {
-  local panes pid=$$ line cmd i rc
-  panes=" $(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null \
-            | awk '$1 == "pane" && NF == 4 && $4 == "0" { printf "%s ", $3 }')"
-  case "${CLAUDE_PID:-}" in
-    ''|*[!0-9]*) ;;
-    *)
-      line=$(ps -o ppid= -p "$CLAUDE_PID" 2>/dev/null | tr -d '[:space:]')
-      if [ -n "$line" ] && [ "$line" -gt 1 ]; then
-        rc=0; _claude_host_code "$(ps -o command= -p "$line" 2>/dev/null)" || rc=$?
-        [ "$rc" -eq 3 ] && return 0
-      fi ;;
-  esac
-  for ((i = 0; i < 16; i++)); do
-    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$pid" -gt 1 ] || return 1
-    [[ "$panes" == *" $pid "* ]] && return 1
-    line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
-    [ -n "$line" ] || return 0
-    read -r pid cmd <<<"$line"
-    rc=0; _claude_host_code "$cmd" || rc=$?
-    [ "$rc" -eq 3 ] && return 0
-  done
-  return 1
+# Sets CLAUDE_PID, CLAUDE_CMD and FLAGS from the own claude, as _own_claude printed it, or refuses in the
+# named transport's voice. A claude that is not an interactive session (headless, a subcommand, a daemon
+# host) is refused, since relaunching it would sever its client or kill every session it hosts. Flags the
+# scan cannot place are refused, never guessed.
+_relaunch_target() { # <transport name> <own claude, empty when there is none>
+  local rc=0
+  [ -n "$2" ] || _refuse "$1: cannot locate the claude process to relaunch"
+  CLAUDE_PID=${2%%$'\n'*}
+  CLAUDE_CMD=${2#*$'\n'}
+  FLAGS=$(_claude_flags "$CLAUDE_CMD") || rc=$?
+  [ "$rc" -ne 2 ] \
+    || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
+  [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
 }
 
-# Returns _claude_flags' code for a command line, or 2 for anything that is not a claude binary. This is
-# the one place argv0 is matched against the claude binary.
-_claude_host_code() {
+# Succeeds if this session is hosted by another claude: a daemon host, or an outer session this claude
+# was started inside. A hosted session is displayed only through that claude, so any pane or iTerm2
+# session reachable from it belongs to another session. A hosted session therefore takes the detached
+# transport.
+#
+# [LAW:types-are-the-program] Hosted is read from the shape of the process tree, never from flags. Any
+# claude binary other than the own one, met before a live pane, means the pane shows that claude's
+# session, whatever its flags. A claude is checked before its pane, since a pane's process is usually the
+# claude it shows. A pane reached without passing the own claude is refused: $CLAUDE_PID then names a
+# process outside this one's tree, so neither that pane nor a relaunch of that claude is this session's
+# to take. The own claude's parent is read directly, since $CLAUDE_PID may lie beyond the walk's reach.
+# A read that fails mid-walk counts as hosted, because a wrong detach costs a relaunch and a wrong pane
+# costs a /clear in someone else's session.
+_hosted_by_other_claude() { # <live pane pids> <own claude pid, empty when there is none>
+  local panes="$1" own="$2" pid=$$ passed="" line ppid cmd i
+  for ((i = 0; i < 16; i++)); do
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$pid" -gt 1 ] || break
+    line=$(ps -o ppid=,command= -p "$pid" 2>/dev/null) || return 0
+    [ -n "$line" ] || return 0
+    read -r ppid cmd <<<"$line"
+    if [ "$pid" = "$own" ]; then passed=1
+    elif _is_claude_binary "$cmd"; then return 0
+    fi
+    if [[ "$panes" == *" $pid "* ]]; then
+      [ -z "$own" ] || [ -n "$passed" ] \
+        || _refuse "\$CLAUDE_PID $own is not an ancestor of this process: the walk reached pane process $pid without passing it, so neither that pane nor claude $own is this session's to hand off."
+      return 1
+    fi
+    pid=$ppid
+  done
+  [ -n "$own" ] || return 1
+  line=$(ps -o ppid= -p "$own" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$line" ] && [ "$line" -gt 1 ] || return 1
+  _is_claude_binary "$(ps -o command= -p "$line" 2>/dev/null)"
+}
+
+# Succeeds for a command line whose argv0 is a claude binary. This is the one place argv0 is matched
+# against the claude binary, so the versioned install path (`.../claude/versions/<n>`) matches too.
+_is_claude_binary() {
   case "${1%% *}" in
-    claude|*/claude|*/claude/versions/*)
-      _claude_flags "$1" >/dev/null 2>&1; return $? ;;
+    claude|*/claude|*/claude/versions/*) return 0 ;;
   esac
-  return 2
+  return 1
 }
 
 # Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
@@ -153,7 +169,7 @@ _still_captured_process() { # <pid> <identity captured at launch>
 }
 
 # Finds the tmux pane this process runs in, by process ancestry rather than $TMUX_PANE, which the
-# environment can lose. The launcher runs this only when _hosted_by_daemon says no. A process with no
+# environment can lose. The launcher runs this only when _hosted_by_other_claude says no. A process with no
 # pane ancestor returns 1, so the caller falls through to the next transport.
 #
 # Pids are recycled, so a matching pid alone does not prove descent. The snapshot therefore guards two cases:
@@ -237,10 +253,9 @@ _pane_target() {
 # token is its value or the prompt. An unlisted short flag always fails, since a cluster such as `-cp`
 # can hide `-p`. Adding the flag to the table with its arity fixes either.
 #
-# `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
-# function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
-# return 3, so _hosted_by_daemon can tell them apart. Only the flag region is read, so a prompt that
-# contains those words is never misread.
+# `--print`/`-p`, subcommands such as `claude mcp serve`, and the daemon and its hosts (`claude daemon
+# run`, `--bg-pty-host`, `--bg-spare`) mean the process is not a session, so the function returns 2. Only
+# the flag region is read, so a prompt that contains those words is never misread.
 _claude_flags() {
   local cmd="$1" out="" tok next i n
   local -a toks keep=()
@@ -258,9 +273,7 @@ _claude_flags() {
         else i=$((i+1)); fi ;;
       --model=*|--permission-mode=*)
         keep+=("$tok"); i=$((i+1)) ;;
-      --bg-pty-host|--bg-spare)
-        return 3 ;;
-      -p|--print)
+      -p|--print|--bg-pty-host|--bg-spare)
         return 2 ;;
       # boolean (`claude --help`, 2.1.283; `--reply-on-resume` is hidden from it)
       --reply-on-resume|-c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
@@ -294,7 +307,7 @@ _claude_flags() {
         # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
         # merely starts with the word is still a session's prompt.
         case "$tok $next" in
-          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 3 ;;
+          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 2 ;;
         esac
         [ "$tok" = daemon ] && return 2
         break ;;
@@ -519,8 +532,12 @@ case "$MODE" in
     # re-detect.
     #
     # A daemon-hosted session owns no pane and no iTerm2 session, so it always takes the detached transport.
+    # This session's own claude is read once, here, so the hosted decision and the relaunch target name
+    # the same process. Empty when there is none.
+    PANE_PIDS=$(_live_pane_pids)
+    OWN=$(_own_claude "$PANE_PIDS") || OWN=""
     HOSTED=""
-    _hosted_by_daemon && HOSTED=1
+    _hosted_by_other_claude "$PANE_PIDS" "${OWN%%$'\n'*}" && HOSTED=1
     #
     # The pane comes from $TMUX_PANE, or from process ancestry if that is missing. Each candidate is accepted
     # only after tmux confirms it names that pane, so a stale $TMUX_PANE cannot block discovery.
@@ -546,13 +563,7 @@ case "$MODE" in
     elif [[ -z "$HOSTED" && "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
-      FOUND=$(_find_claude_session) \
-        || _refuse "iTerm2 transport: cannot locate the claude process to relaunch"
-      CLAUDE_PID=${FOUND%%$'\n'*}
-      CLAUDE_CMD=${FOUND#*$'\n'}
-      # A flag the parser cannot place is a refusal, not a guess.
-      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
-        || _refuse "iTerm2 transport: cannot read the flags of claude process $CLAUDE_PID"
+      _relaunch_target "iTerm2 transport" "$OWN"
       _requested_flags
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
@@ -570,12 +581,7 @@ case "$MODE" in
       # No owned pane and no reachable iTerm2 session, as with a session hosted by `claude daemon run`.
       # `new-session -d` starts a tmux server if none is running. The relaunch process is found by the same
       # function the iTerm2 transport uses.
-      FOUND=$(_find_claude_session) \
-        || _refuse "detached transport: cannot locate the claude process to relaunch"
-      CLAUDE_PID=${FOUND%%$'\n'*}
-      CLAUDE_CMD=${FOUND#*$'\n'}
-      FLAGS=$(_claude_flags "$CLAUDE_CMD") \
-        || _refuse "detached transport: cannot read the flags of claude process $CLAUDE_PID"
+      _relaunch_target "detached transport" "$OWN"
       _requested_flags
       # The identity is captured at the same instant as the pid and passed on as data. The worker compares
       # against it before signaling, since by then the pid may belong to another process. A pid that cannot
@@ -607,7 +613,7 @@ case "$MODE" in
       # handoff is already on disk, so the refusal names its path. The nonzero exit tells the caller the
       # close-out did not happen.
       if [[ -n "$HOSTED" ]]; then
-        _refuse "this session is hosted by a claude daemon, so no pane or iTerm2 session shows it,
+        _refuse "this session is hosted by another claude (a daemon host or an outer session), so no pane or iTerm2 session shows it,
 and the detached transport needs a tmux binary; none is installed."
       fi
       _refuse "no owned tmux pane, no reachable iTerm2 session, and no tmux binary to start a detached window with.
