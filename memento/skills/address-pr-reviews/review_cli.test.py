@@ -65,7 +65,10 @@ def run_cli(handler, *argv):
     sys.argv = ["review", *argv]
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = cli.main(Ports(github_threads.GitHub(fake), FakeClock()))
+        try:
+            code = cli.main(Ports(github_threads.GitHub(fake), FakeClock()))
+        except SystemExit as e:  # argparse refusing the arguments exits the process with this code
+            code = e.code
     return code, out.getvalue(), err.getvalue(), fake.calls
 
 
@@ -116,12 +119,16 @@ def pr_with_one_thread(args):
     raise AssertionError(f"unexpected gh call: {args}")
 
 
-code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR)
+code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", "old")
 got = json.loads(out) if code == 0 else None
-check("fetch: prints the head and each finding placed against it",
-      got is not None and got["head_sha"] == "new"
+check("fetch: prints the head, whether the wait reviewed it, and each finding placed against it",
+      got is not None and got["head_sha"] == "new" and got["head_reviewed"] is False
       and [f["against_head"] for f in got["findings"]] == ["older"],
       f"code={code} out={out!r} err={err!r}")
+
+code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR)
+check("fetch: refused without the sha the wait reviewed, before any gh call",
+      code != 0 and "--reviewed" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
 
 code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

@@ -76,7 +76,7 @@ def cmd_wait(provider, github, args) -> tuple[dict, str | None]:
 
 
 def cmd_fetch(provider, github, args) -> tuple[dict, str | None]:
-    return findings.fetch(provider, pr_url(github, args.pr)), None
+    return findings.fetch(provider, pr_url(github, args.pr), args.reviewed), None
 
 
 def cmd_change_requests(provider, github, args) -> tuple[dict, str | None]:
@@ -135,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("fetch", cmd_fetch, help="canonical findings JSON, each placed against the head")
     p.add_argument("pr", help="PR URL or number")
+    p.add_argument("--reviewed", required=True, metavar="SHA",
+                   help="the sha wait returned: the commit the completed review covered")
 
     p = add("change-requests", cmd_change_requests, capability="dismiss_review",
             help="the automated reviewer's blocking CHANGES_REQUESTED reviews")

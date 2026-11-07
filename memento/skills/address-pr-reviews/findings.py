@@ -20,16 +20,19 @@ def against_head(commit_id: Optional[str], head_sha: str) -> AgainstHead:
     return "head" if commit_id == head_sha else "older"
 
 
-def fetch(provider, pr_url: str) -> dict:
-    """Returns `{"head_sha", "findings"}`: every pending finding, each with `against_head` set.
+def fetch(provider, pr_url: str, reviewed_sha: str) -> dict:
+    """Returns `{"head_sha", "head_reviewed", "findings"}`: every pending finding, each with
+    `against_head` set, and whether the head is the commit `reviewed_sha` names, the one the
+    provider's `wait` returned once its review completed.
 
     The head is read after the findings. A push between the two reads moves the head past those
-    findings, so they read as older; a finding never reads as on the head once the head has moved.
-    [LAW:no-ambient-temporal-coupling]
+    findings, so they read as older, and past the reviewed commit, so the head reads as unreviewed;
+    neither reads as current once the head has moved. [LAW:no-ambient-temporal-coupling]
     """
     found = provider.fetch(pr_url)["findings"]
     head = provider.head_sha(pr_url)
     return {
         "head_sha": head,
+        "head_reviewed": head == reviewed_sha,
         "findings": [{**f, "against_head": against_head(f["commit_id"], head)} for f in found],
     }

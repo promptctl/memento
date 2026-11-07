@@ -70,7 +70,7 @@ def pr(threads, reviews, head):
 got = findings.fetch(
     pr([thread("on-old", "old"), thread("on-new", "new"), thread("no-commit", None)],
        [BLOCKING_ON_OLD], head=lambda calls: "new"),
-    PR)
+    PR, "new")
 check("the head the findings were placed against is returned",
       got["head_sha"] == "new", f"got {got['head_sha']!r}")
 check("findings from the older review read as older; the one on the head as head; the one with no commit unknown",
@@ -92,10 +92,25 @@ def pushed_after_findings(calls):
     return "new" if findings_read else "old"
 
 
-got = findings.fetch(pr([thread("on-old", "old")], [BLOCKING_ON_OLD], pushed_after_findings), PR)
+got = findings.fetch(pr([thread("on-old", "old")], [BLOCKING_ON_OLD], pushed_after_findings), PR, "old")
 check("a push during the fetch leaves findings on the superseded head reading as older",
       [f["against_head"] for f in got["findings"]] == ["older", "older"] and got["head_sha"] == "new",
       f"got {got!r}")
+check("a push during the fetch leaves the head unreviewed", got["head_reviewed"] is False, f"got {got!r}")
+
+
+# --- whether the head is the commit the wait reviewed -----------------------------
+# The ticket's shape: wait's review covered `old`, a push moved the head to `new`, and `new`'s review
+# has not run, so nothing is pending yet. An empty list here must not read as a clean head.
+
+got = findings.fetch(pr([], [], head=lambda calls: "new"), PR, "old")
+check("no findings on a head the wait did not review: the head reads as unreviewed",
+      got["findings"] == [] and got["head_sha"] == "new" and got["head_reviewed"] is False,
+      f"got {got!r}")
+
+got = findings.fetch(pr([], [], head=lambda calls: "old"), PR, "old")
+check("no findings on the head the wait reviewed: the head reads as reviewed",
+      got["findings"] == [] and got["head_reviewed"] is True, f"got {got!r}")
 
 
 # --- every provider supplies the head -------------------------------------------

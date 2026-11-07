@@ -68,7 +68,7 @@ Blocks until the review for the PR's current head SHA is complete.
 {
     "status":     "completed",          # always "completed" on success
     "conclusion": "success" | "...",    # provider-specific string; skill surfaces non-success
-    "sha":        "abc123",             # the head SHA that was reviewed
+    "sha":        "abc123...",          # full SHA of the head commit the completed review covered
     "url":        "https://..." | None, # link to the review run, if available
     "poll_errors": ["..."],             # each transient failure the wait rode out; [] if none
 }
@@ -77,9 +77,10 @@ Blocks until the review for the PR's current head SHA is complete.
 Raises `RuntimeError` with a human-readable message on timeout or unrecoverable
 failure. Never returns a dict with `status != "completed"` — callers do not poll.
 
-For providers that review synchronously inside `fetch`, implement `wait` as a
-no-op that returns `{"status": "completed", "conclusion": "success", "sha": "",
-"url": None, "poll_errors": []}` and document that behavior.
+A review is complete when `wait` returns, for every provider. `fetch` reads the
+findings a review produced and never runs one: a reviewer that runs synchronously
+runs in `wait`, or in `trigger` when the provider declares it, and `wait` returns
+the commit it covered either way.
 
 ### `fetch(pr_url: str) -> dict`
 
@@ -122,20 +123,21 @@ backend names no commit for it. `line_start` and `line_end` are lines at that co
 head. A provider reports the commit and nothing more — where that commit
 stands against the head is not the provider's to say (see `head_sha`).
 
-The skill treats `is_resolved: false` findings as unresolved. The loop exits
-when this list is empty. Providers must not filter findings server-side — the
-skill owns that judgment.
+The skill treats `is_resolved: false` findings as unresolved. Providers must not
+filter findings server-side — the skill owns that judgment.
 
 ### `head_sha(pr_url: str) -> str`
 
 Returns the full SHA of the commit the PR's head is at now. `against_head` compares it to each
 `commit_id` exactly, so both are full SHAs.
 
-The skill never reads `fetch` directly. It reads `findings.fetch(provider, pr_url)`, which calls
-`fetch` and then `head_sha` — in that order, so a push between them can only make a finding read as
-older — and returns `{"head_sha": ..., "findings": [...]}` with each finding's `against_head` set to
-`"head"` (its `commit_id` is the head), `"older"` (a different commit), or `"unknown"` (`commit_id`
-null). That rule lives in `findings.py` once, for every provider. `[LAW:single-enforcer]`
+The skill never reads `fetch` directly. It reads `findings.fetch(provider, pr_url, reviewed_sha)`,
+where `reviewed_sha` is the `sha` `wait` returned. It calls `fetch` and then `head_sha` — in that
+order, so a push between them can only make a finding read as older and the head as unreviewed —
+and returns `{"head_sha": ..., "head_reviewed": ..., "findings": [...]}`: `head_reviewed` is whether
+the head is `reviewed_sha`, and each finding's `against_head` is `"head"` (its `commit_id` is the
+head), `"older"` (a different commit), or `"unknown"` (`commit_id` null). Those rules live in
+`findings.py` once, for every provider. `[LAW:single-enforcer]`
 
 ## Optional functions
 

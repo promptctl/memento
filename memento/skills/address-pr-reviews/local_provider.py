@@ -38,9 +38,8 @@ class Provider:
     def wait(self, pr_url: str) -> dict:
         raise NotImplementedError(
             "local_provider.wait is not yet implemented. "
-            "If the local agent runs synchronously inside trigger(), implement wait "
-            "as a no-op returning {\"status\": \"completed\", \"conclusion\": \"success\", "
-            '"sha\": \"\", \"url\": None, \"poll_errors\": []}. If it runs asynchronously, poll for completion.'
+            "Block until the review trigger() started has completed, then return its result "
+            "with sha set to the full SHA of the head commit it covered. See PROVIDER_CONTRACT.md."
         )
 
     def head_sha(self, pr_url: str) -> str:
@@ -52,7 +51,7 @@ class Provider:
     def fetch(self, pr_url: str) -> dict:
         raise NotImplementedError(
             "local_provider.fetch is not yet implemented. "
-            "Run the local review agent on the PR and return its findings in "
+            "Read the findings of the review wait() saw complete and return them in "
             "canonical form: {\"findings\": [{...}]}, each naming its commit_id. See PROVIDER_CONTRACT.md "
             "for the Finding schema."
         )
