@@ -315,14 +315,14 @@ check("wait: a failed poll between in_progress polls rides through, and is liste
       and len(got["poll_errors"]) == 1 and BLIP in got["poll_errors"][0],
       f"got {got!r}")
 
-# The polls fail from t=10 on, after one succeeded there; the last returns at exactly
-# 10 + OUTAGE_TIMEOUT_S. A wait that measured the window from its start would stop a poll early, and
-# one that stopped only past the window would poll again, past the script.
-got, clock, poll_times = wait_over([([run("in_progress")], 10), (failed(BLIP), 30), (failed(BLIP), 50),
-                                    (failed(DNS), 10 + ap.OUTAGE_TIMEOUT_S)])
+# The polls fail from t=30 on, after one succeeded there; the last returns at exactly
+# 30 + OUTAGE_TIMEOUT_S. A wait that measured the window from its start would stop at the t=70 poll,
+# a poll early, and one that stopped only past the window would poll again, past the script.
+got, clock, poll_times = wait_over([([run("in_progress")], 30), (failed(BLIP), 50), (failed(BLIP), 70),
+                                    (failed(DNS), 30 + ap.OUTAGE_TIMEOUT_S)])
 check("wait: polls failing for OUTAGE_TIMEOUT_S since the last success raise, naming the window and the last error",
       isinstance(got, RuntimeError) and f"{ap.OUTAGE_TIMEOUT_S}s" in str(got) and DNS in str(got)
-      and "3 failed polls" in str(got) and isinstance(got.__cause__, gt.GhError)
+      and isinstance(got.__cause__, gt.GhError)
       and len(poll_times) == 4, f"got {got!r}, polls at {poll_times!r}")
 
 # Failures that span nearly the window, broken by one success, start the window again.

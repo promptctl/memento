@@ -206,8 +206,8 @@ class Provider:
             # fails slowly uses up the outage window sooner instead of stretching it.
             if now - last_ok >= OUTAGE_TIMEOUT_S:
                 raise RuntimeError(
-                    f"every review-run poll for {sha} failed for {OUTAGE_TIMEOUT_S}s "
-                    f"({len(poll_errors)} failed polls); the last: {error}"
+                    f"every review-run poll for {sha} failed for {OUTAGE_TIMEOUT_S}s; "
+                    f"the last: {error}"
                 ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
             if now - start >= deadline:

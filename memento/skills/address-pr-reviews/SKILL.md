@@ -65,7 +65,7 @@ Then wait for the review to complete (all providers, always):
 result = provider.wait(PR_URL)
 ```
 
-Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url}`. If the head SHA's review is already complete (nothing new pushed), it returns at once.
+Blocks until the review for the PR's **current head SHA** reaches `completed`, then returns `{status, conclusion, sha, url, poll_errors}`. If the head SHA's review is already complete (nothing new pushed), it returns at once. `poll_errors` lists each failed poll the wait rode out; when it is non-empty, name those failures in the recap, so a flaky gh is seen even when the wait succeeded.
 
 [LAW:no-silent-failure] if `conclusion` is anything other than `success`, the reviewer itself errored — its findings are absent, not empty. Do not treat a failed run as a clean review. Stop and surface the run `url` — with one exception: the `action` provider, on a usage-limited run, where the loop fixes the cause itself. An `action` run whose failed log carries no such annotation is any other failure and stops here like the rest. Every other provider stops here on any non-success conclusion; the mechanics below are GitHub Actions mechanics and mean nothing to them.
 

@@ -17,15 +17,22 @@ from subprocess import CompletedProcess
 from typing import Callable, Sequence, Union
 
 # The port to the gh binary: a finished gh is its CompletedProcess, and a gh that could not be
-# started is the OSError, so every outcome is one value the client decides from.
+# started or did not finish is the OSError, so every outcome is one value the client decides from.
 Outcome = Union[CompletedProcess[str], OSError]
 Runner = Callable[[Sequence[str]], Outcome]
 
+# How long one gh call may run. A gh stalled on a dead connection never exits, and a call that never
+# returns is a failure no caller's deadline can see.
+GH_TIMEOUT_S = 120
+
 
 def run_gh(args: Sequence[str]) -> Outcome:
-    """The real Runner: runs `gh` with `args`, capturing stdout and stderr."""
+    """The real Runner: runs `gh` with `args`, capturing stdout and stderr, and kills it after
+    GH_TIMEOUT_S."""
     try:
-        return subprocess.run(["gh", *args], capture_output=True, text=True)
+        return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return TimeoutError(f"gh did not finish within {GH_TIMEOUT_S}s and was killed")
     except OSError as e:
         return e
 
@@ -191,7 +198,7 @@ class GitHub:
         command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
         result = self._run(args)
         if isinstance(result, OSError):
-            raise GhError(command, f"could not be run: {result}") from result
+            raise GhError(command, f"failed to run: {result}") from result
         if result.returncode == 0:
             return result.stdout.strip()
         reason = f"exited {result.returncode}: {result.stderr.strip() or '(no stderr)'}"
