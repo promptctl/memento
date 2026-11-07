@@ -127,9 +127,13 @@ esac
 if [ "$depth" -gt 0 ]; then
   if [ "${NEST_REHOST_AT:-}" = "$depth" ]; then
     unset NEST_REHOST_AT
-    # argv0 is the host's own spelling, so the launcher reads this hop as a real
-    # `claude --bg-pty-host` would read; a shebang script alone is argv0 /bin/bash.
-    (exec -a "${NEST_HOST_AS:-claude --bg-pty-host}" /bin/bash "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
+    # The host's own argv, carried in argv0 (see `carried`), so the launcher reads
+    # this hop as a real `claude --bg-pty-host`; a shebang script alone is argv0 /bin/bash.
+    # $NEST_HOST_BIN is the bash the host runs as, so a case can plant a host whose
+    # executable is named tmux; its pid goes to $NEST_RECORD_HOST for the ps fixture.
+    sep=$'\x1f'
+    (sh -c 'printf %s "$PPID"' > "${NEST_RECORD_HOST:-/dev/null}"
+     exec -a "${NEST_HOST_AS:-${sep}claude${sep}--bg-pty-host}" "${NEST_HOST_BIN:-/bin/bash}" "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
@@ -162,8 +166,9 @@ exit $?
 """
 
 PS = r"""#!/bin/bash
-# The real ps, with the forgeries a case asks for written into the one read the
-# launcher's walk takes, the whole table (`ps -eo pid=,ppid=,etime=,command=`).
+# The real ps, with the forgeries a case asks for written into the tree the
+# launcher's walk reads (`ps -eo pid=,ppid=,etime=,uid=,ucomm=`; the argv comes
+# from perl).
 # Each forgery is a value in the environment, applied to a row the case names, so
 # every case runs this same wrapper and differs only in what it writes:
 #   $FIXTURE_FORGE_AGE      the chain root's elapsed time. A pid younger than the
@@ -171,15 +176,12 @@ PS = r"""#!/bin/bash
 #                           pid, and the one thing no live machine produces on cue.
 #                           An older age is the control: the same rewrite of the
 #                           same row, which must still resolve.
-#   $FIXTURE_FORGE_COMMAND  the chain root's command line. A daemon-hosted session
-#                           is launched with a dozen flags the fixture chain cannot
-#                           carry in its own argv, since `nest` owns every token
-#                           after argv0. Set but empty, the row reads back with no
-#                           command, as for a live pid whose argv is withheld.
 #   $FIXTURE_RUNNER_PID     the suite runner, whose parent reads as pid 1. Without
 #                           it, a walk that meets no pane climbs past the runner into
 #                           whatever session launched the suite. A host a case plants
 #                           sits below the runner and is still seen.
+#   $FIXTURE_HOST_UID       the owner of the host hop named in $FIXTURE_HOST_PID, as
+#                           for another user's process or root's.
 #   $FIXTURE_PS_FAILS       the whole table read exits 1.
 #   $FIXTURE_MUTE_IDENTITY  the identity read (`-o lstart=,command= -p <pid>`)
 #                           exits 0 printing nothing, which is what a pid whose
@@ -192,15 +194,47 @@ done
 [ "${1:-}" = "-eo" ] || exec /bin/ps "$@"
 [ -z "${FIXTURE_PS_FAILS:-}" ] || { echo "ps: fixture refuses the process table" >&2; exit 1; }
 /bin/ps "$@" | /usr/bin/awk -v root="$(cat "$FIXTURE_ROOT_PID")" -v runner="${FIXTURE_RUNNER_PID:-}" \
-    -v age="${FIXTURE_FORGE_AGE:-}" -v forge="${FIXTURE_FORGE_COMMAND+set}" '
+    -v age="${FIXTURE_FORGE_AGE:-}" -v uid="${FIXTURE_HOST_UID:-}" \
+    -v host="$([ -n "${FIXTURE_HOST_UID:-}" ] && cat "$FIXTURE_HOST_PID")" '
   {
-    line = $0
-    sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", line)
-    ppid = $1 == runner ? 1 : $2
-    etime = ($1 == root && age != "") ? age : $3
-    # Read from the environment: awk would expand backslash escapes in a -v value.
-    if ($1 == root && forge == "set") line = ENVIRON["FIXTURE_FORGE_COMMAND"]
-    print $1, ppid, etime, line
+    if ($1 == runner) $2 = 1
+    if ($1 == root && age != "") $3 = age
+    if ($1 == host && uid != "") $4 = uid
+    print
+  }'
+"""
+
+# A hop's argv, given as a list. `nest` owns every token after a hop's argv0, so a
+# hop carries the argv a case wants in its argv0 instead: the unit separator, then
+# the elements joined by it. `carried` builds that argv0, and the perl fixture below
+# reads it back as the row's whole argv.
+SEP = "\x1f"
+
+
+def carried(argv):
+    # A string is iterable too, and would be carried one character per element.
+    if isinstance(argv, str):
+        raise TypeError(f"carried takes an argv list, not the string {argv!r}")
+    return SEP + SEP.join(argv)
+
+
+PERL = r"""#!/bin/bash
+# The real perl, so the launcher's process table is the kernel's argv read, with
+# one forgery: a row whose argv0 begins with the unit separator (see `carried`)
+# takes the elements carried there as its whole argv. The real perl has already
+# encoded them, separator included as the text \x1f, so they split on that text
+# with no decoding, and an empty element is written as \c, the encoding of one.
+set -uo pipefail
+/usr/bin/perl "$@" | /usr/bin/awk '
+  $6 !~ /^\\x1f/ { print; next }
+  {
+    row = $1 " " $2 " " $3 " " $4 " " $5
+    rest = substr($6, 5)
+    if (rest != "") {
+      n = split(rest, parts, /\\x1f/)
+      for (i = 1; i <= n; i++) row = row " " (parts[i] == "" ? "\\c" : parts[i])
+    }
+    print row
   }'
 """
 
@@ -226,6 +260,14 @@ NEST_AS_VERSIONED_CLAUDE = os.path.join(FIXTURES, "claude", "versions", "2.1.270
 PS_DIR = os.path.join(FIXTURES, "ps")
 os.mkdir(PS_DIR)
 install(PS_DIR, "ps", PS)
+install(PS_DIR, "perl", PERL)
+# A bash whose executable is named tmux, which is how the walk knows a tmux server.
+# A symlink is recorded under its target's name, and a copy of a system binary runs
+# only once it is signed again.
+TMUX_SERVER_BIN = os.path.join(FIXTURES, "tmux-server", "tmux")
+os.mkdir(os.path.dirname(TMUX_SERVER_BIN))
+shutil.copy("/bin/bash", TMUX_SERVER_BIN)
+subprocess.run(["codesign", "-f", "-s", "-", TMUX_SERVER_BIN], check=True, capture_output=True)
 
 # A `date` that removes a directory on its first call, then behaves normally.
 # This makes the launcher's own directory disappear mid-run at a fixed point: the
@@ -319,12 +361,18 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         message="handoff", handoff_dir=None, dry_run="1",
         log_mktemp_fails=False, cwd_gone=False, ps_fails=False,
         self_dir_gone=False, as_claude=None, claude_pid=None,
-        forge_command=None, claude_at=None, host_keeps_tmux=False, outer_host=False,
-        launcher_flags=(), host_as=None, export_claude_pid=False):
+        claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
+        launcher_flags=(), host_as=None, host_bin=None, host_uid=None,
+        export_claude_pid=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
     so the real transport path runs the same code as the dry-run cases.
+    `as_claude` is the planted claude's argv0 (a string), or its whole argv (a
+    list); `host_as` is the host hop's whole argv, `host_bin` the executable it
+    runs as, and `host_uid` the owner the table reports for it. `outer` is the
+    real argv of a process wrapped around the whole chain, its argv0 then extra
+    elements; `outer_is_own` makes it $CLAUDE_PID.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
@@ -361,7 +409,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         "NEST_CLAUDE_AT": " ".join(str(d) for d in (
             [depth] if claude_at is None else claude_at if isinstance(claude_at, list) else [claude_at])),
         "NEST_RECORD_CLAUDE": os.path.join(workdir, "claude.pid"),
-        "NEST_AS_CLAUDE": as_claude or NEST_AS_CLAUDE,
+        "NEST_AS_CLAUDE": (carried(as_claude) if isinstance(as_claude, list)
+                           else as_claude or NEST_AS_CLAUDE),
     }
     # The pid Claude Code hands every tool call as $CLAUDE_PID. Absent by default,
     # so the walk has to find the planted hop by ancestry alone.
@@ -370,9 +419,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # Set from inside the chain: the planted claude's pid exists only once it runs.
     if export_claude_pid:
         env["NEST_EXPORT_CLAUDE_PID"] = "1"
-    # The rehost hop's argv0, which is the host's whole command line as ps shows it.
     if host_as is not None:
-        env["NEST_HOST_AS"] = host_as
+        env["NEST_HOST_AS"] = carried(host_as)
+    if host_bin is not None:
+        env["NEST_HOST_BIN"] = host_bin
+    if host_uid is not None:
+        env["NEST_RECORD_HOST"] = env["FIXTURE_HOST_PID"] = os.path.join(workdir, "host.pid")
+        env["FIXTURE_HOST_UID"] = str(host_uid)
     if host_keeps_tmux:
         env["FIXTURE_HOST_KEEPS_TMUX"] = "1"
     if ps_fails:
@@ -383,8 +436,6 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["FIXTURE_RM_DIR"] = selfdir
     if forge_age is not None:
         env["FIXTURE_FORGE_AGE"] = forge_age
-    if forge_command is not None:
-        env["FIXTURE_FORGE_COMMAND"] = forge_command
     if panes is not None:
         env["FIXTURE_PANES"] = panes
     if rehost_at is not None:
@@ -404,11 +455,15 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
         argv = [NEST_BIN, str(depth)] + entry + list(launcher_flags) + [message]
-        # An outer daemon host wraps the whole chain, with its own pane, so the launcher
-        # must not mistake another session's host for its own. The trailing `exit` keeps
-        # bash from exec-ing the chain in place of the host process.
-        if outer_host:
-            argv = ["/bin/bash", "-c", 'exec -a "claude --bg-pty-host" /bin/bash -c \'"$@"; exit $?\' host "$@"', "wrap"] + argv
+        # A process wrapped around the whole chain, whose argv is the kernel's own:
+        # `<argv0> -c <script> host <extra...> <chain...>`. The script shifts the extra
+        # elements off and runs the chain; the trailing `exit` keeps bash from exec-ing
+        # the chain in place of the wrapper.
+        if outer is not None:
+            argv0, *extra = outer
+            script = ("export CLAUDE_PID=$$; " if outer_is_own else "") + f'shift {len(extra)}; "$@"; exit $?'
+            argv = ["/bin/bash", "-c", 'exec -a "$0" /bin/bash -c "$1" host "${@:2}"',
+                    argv0, script, *extra] + argv
         done = subprocess.run(argv,
                               text=True, capture_output=True, env=env, timeout=120)
         # The chain's top pid, read before the workdir is removed. It is both the pane
@@ -606,11 +661,11 @@ check("a process table that cannot be read is refused, not walked as if it were 
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
 shutil.rmtree(nocmd_dir, ignore_errors=True)
 
-# A row whose command reads back empty is not a claude launched with no flags: a
-# pid with no argv is no claude at all, walked past like any other. The walk then
-# leaves the chain with no claude, so nothing is handed off.
-done = run(panes=None, forge_command="")
-check("a claude whose command line reads back empty is not read as flagless",
+# A row with no argv, as for a pid whose argv the kernel withholds, is not a claude
+# launched with no flags: it is no claude at all. Owned by this user, it confines the
+# walk at that hop, before any claude was passed, so nothing is handed off.
+done = run(panes=None, as_claude=[])
+check("a claude whose argv reads back empty is not read as flagless",
       done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
       and f"claude_pid={done.root_pid} " not in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -748,7 +803,7 @@ check("the same chain without a host discovers the pane above it",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A host above the pane hosts some other session: this one keeps its pane. This
 # is also the suite run from inside a background session.
-done = run(depth=5, panes=PANES_ABOVE_HOST, outer_host=True)
+done = run(depth=5, panes=PANES_ABOVE_HOST, outer=[carried(["claude", "--bg-pty-host"])])
 check("a host above this session's pane does not make it hosted",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A handoff message naming a host flag is prompt text, not a host.
@@ -760,7 +815,7 @@ check("a handoff message containing --bg-pty-host does not trip the boundary",
 # own, met before a live pane, means the pane shows that claude's session. Each shape
 # runs both with $CLAUDE_PID, as Claude Code sets it for every tool call, and without
 # it, where the first claude met stands in.
-UNREADABLE_HOST = "claude --frobnicate value --bg-pty-host /tmp/cc-daemon/pty/a.sock"
+UNREADABLE_HOST = "claude --frobnicate value --bg-pty-host /tmp/cc-daemon/pty/a.sock".split()
 for export in (False, True):
     how = "with $CLAUDE_PID" if export else "without $CLAUDE_PID"
     # A host whose flags _claude_flags cannot read (an unlisted flag before a value)
@@ -782,12 +837,12 @@ for export in (False, True):
     # host shapes after it, still leave the pane its own.
     for argv in ("--frobnicate value", "--frobnicate value the daemon run hung on --bg-pty-host"):
         done = run(depth=2, claude_at=[1], export_claude_pid=export,
-                   as_claude=f"{NEST_AS_CLAUDE} {argv}")
+                   as_claude=[NEST_AS_CLAUDE, *argv.split()])
         check(f"this session's own claude reading `{argv}` keeps its pane ({how})",
               picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # $CLAUDE_PID names this session's claude even when its flags read as not a session,
 # so the walk never counts it as another claude.
-done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=f"{NEST_AS_CLAUDE} --print")
+done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=[NEST_AS_CLAUDE, "--print"])
 check("the claude $CLAUDE_PID names is never another claude, even reading as --print",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A $CLAUDE_PID beyond the 16-hop bound is unproven, so relaunching it could signal a
@@ -800,7 +855,7 @@ check("a $CLAUDE_PID beyond the walk's reach is refused, not relaunched",
 # The own claude is identified by the walk passing it, not by argv0: a claude run under
 # node keeps its pane. A relaunch rebuilds it from its command line, so with no pane
 # that command line must be a claude binary's.
-NODE_CLAUDE = "/usr/local/bin/node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+NODE_CLAUDE = ["/usr/local/bin/node", "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"]
 done = run(depth=2, claude_at=[1], export_claude_pid=True, as_claude=NODE_CLAUDE)
 check("a $CLAUDE_PID claude run under node keeps its pane",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -818,10 +873,31 @@ check("a pane reached with no claude below it is refused, not cleared",
 # A tmux server the walk climbs through lists no live pane of this session (another
 # socket, or a tmux that cannot report it), so whatever terminal shows this session is
 # not its own to type into: confined, never paneless.
-done = run(depth=2, claude_at=[1], panes=None, forge_command="tmux new-session -s other")
+done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_bin=TMUX_SERVER_BIN,
+           host_as=["tmux", "new-session", "-s", "other"])
 check("a tmux server above this session with no pane of it confines the session",
       ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# The server is known by its executable, which ps reads for every owner, so one whose
+# argv the kernel withholds, as for root's, still confines.
+done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_bin=TMUX_SERVER_BIN,
+           host_as=[], host_uid=0)
+check("a root-owned tmux server whose argv is withheld still confines the session",
+      ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A tmux run through a wrapper execs a binary named otherwise as `tmux`, so argv0
+# names the server too.
+done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_as=["tmux", "new-session", "-s", "other"])
+check("a tmux server known only by its argv0 still confines the session",
+      ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A row whose argv cannot be read could be another user's claude hosting this session,
+# so the pane above it is out of reach. Root's are walked past: root's login sits above
+# every terminal session, and the kernel withholds its argv.
+for uid, expect, why in ((os.getuid() + 1, DETACHED, "another user's"), (0, "%99", "root's")):
+    done = run(depth=5, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, host_as=[], host_uid=uid)
+    check(f"a process above this session whose argv is withheld as {why} reads as {expect}",
+          picked(done) == expect, f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 # $CLAUDE_PID is matched as the pid's exact string: awk would compare `0<pid>` with
 # <pid> as numbers. The runner is on every chain's ancestry and is given a pane here,
 # so a numeric match would take it.
@@ -841,8 +917,8 @@ check("a walk that ends at its hop bound confines the session",
 # The relaunch target is the same own claude the hosted walk reads. Without $CLAUDE_PID,
 # a headless claude started inside an interactive session's shell is this process's own
 # claude, and the interactive one above it is another session, never relaunched in its place.
-done = run(depth=5, claude_at=[2], as_claude=f"{NEST_AS_CLAUDE} --print", panes=None,
-           rehost_at=3, host_as=f"{NEST_AS_CLAUDE} --permission-mode plan")
+done = run(depth=5, claude_at=[2], as_claude=[NEST_AS_CLAUDE, "--print"], panes=None,
+           rehost_at=3, host_as=[NEST_AS_CLAUDE, "--permission-mode", "plan"])
 check("a headless own claude is refused, not exchanged for the interactive claude above it",
       done.returncode == NO_TRANSPORT_RC and "cannot locate the claude process" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -956,18 +1032,18 @@ def refused_as_not_a_session(done):
 # window cannot stand in for it. Relaunching it interactively would sever the remote
 # client driving it. The command line is forged onto the planted hop, which is the own
 # claude, so it is refused rather than exchanged for a claude further up.
-done = run(panes=None, forge_command=(
+done = run(panes=None, as_claude=(
     "/x/claude/versions/2.1.283 --print --sdk-url https://api.anthropic.com/v1/code/sessions/cse_1"
-    " --session-id cse_1 --input-format stream-json --model claude-opus-5-5"))
+    " --session-id cse_1 --input-format stream-json --model claude-opus-5-5").split())
 check("a headless (--print) claude is not a session to relaunch",
       refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The daemon's pty host runs the same binary. Terminating it would take every session
 # it hosts, so it is refused by its flags.
-done = run(panes=None, forge_command=(
+done = run(panes=None, as_claude=(
     "/x/claude --bg-pty-host /tmp/cc-daemon/pty/a.sock 148 38 --"
-    " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions"))
+    " /x/claude/versions/2.1.283 --session-id a --permission-mode bypassPermissions").split())
 check("the daemon's --bg-pty-host process is not a session to relaunch",
       refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -975,37 +1051,37 @@ check("the daemon's --bg-pty-host process is not a session to relaunch",
 # An unlisted long flag followed by a flag is skipped, so the scan still reaches the
 # classifier behind it rather than calling the process an unreadable session.
 for classifier in ("--print", "--bg-pty-host /tmp/cc-daemon/pty/a.sock"):
-    done = run(panes=None, forge_command=f"/x/claude --frobnicate {classifier}")
+    done = run(panes=None, as_claude=f"/x/claude --frobnicate {classifier}".split())
     check(f"an unlisted flag before {classifier.split()[0]} does not make the process a session",
           refused_as_not_a_session(done),
           f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # An unlisted short flag may be a cluster hiding `-p` (`-cp` is `-c -p`), so it is
 # refused even with a flag after it, never relaunched as an interactive session.
-done = run(panes=None, forge_command="/x/claude -cp --model opus")
+done = run(panes=None, as_claude="/x/claude -cp --model opus".split())
 check("an unlisted short-flag cluster is refused, since it may hide -p",
       done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
       and "'-cp'" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The headless check reads only the flag region. A session started from a prior
-# handoff carries that handoff as its positional prompt, unquoted in ps output, and
-# the prompt can contain `--print` in prose.
-done = run(panes=None, forge_command=(
-    "/x/claude --permission-mode plan the ceiling hook ignores --print sessions; run /next"))
+# handoff carries that handoff as its positional prompt, and the prompt can contain
+# `--print` in prose.
+done = run(panes=None, as_claude=[
+    "/x/claude", "--permission-mode", "plan", "the ceiling hook ignores --print sessions; run /next"])
 check("a prompt that mentions --print does not make the session headless",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # The relaunching transports carry a requested model and effort as claude flags, after the
 # old session's own flags so the request wins.
-done = run(panes=None, forge_command="/x/claude --model sonnet --permission-mode plan",
+done = run(panes=None, as_claude="/x/claude --model sonnet --permission-mode plan".split(),
            launcher_flags=("--model", "opus[1m]", "--effort", "high"))
 check("a detached relaunch starts on the requested model and effort",
       picked(done) == DETACHED
       and "flags=[--model sonnet --permission-mode plan --model opus\\[1m\\] --effort high]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-done = run(panes=None, forge_command="/x/claude --permission-mode plan")
+done = run(panes=None, as_claude="/x/claude --permission-mode plan".split())
 check("and without a request the relaunch flags are only the old session's",
       "flags=[--permission-mode plan]" in done.stdout and "--effort" not in done.stdout,
       f"rc={done.returncode} out={done.stdout!r}")
@@ -1016,8 +1092,8 @@ check("and without a request the relaunch flags are only the old session's",
 # worker runs; it is checked through zsh and through bash's failglob and must yield the
 # exact argv.
 quoted_dir = tempfile.mkdtemp(prefix="o'neil [1m] ")
-done = run(panes=None, handoff_dir=quoted_dir, forge_command=(
-    "/x/claude --model opus[1m] --permission-mode bypassPermissions run /next"))
+done = run(panes=None, handoff_dir=quoted_dir, as_claude=(
+    "/x/claude --model opus[1m] --permission-mode bypassPermissions run /next").split())
 line = done.stdout.partition("would launch: ")[2].partition(" in a fresh detached")[0]
 shells = [["bash", "-O", "failglob", "-c"]] + ([["zsh", "-f", "-c"]] if shutil.which("zsh") else [])
 for shell in shells:
@@ -1037,43 +1113,73 @@ shutil.rmtree(quoted_dir)
 DAEMON_ARGV = ("/x/claude/versions/2.1.283 --session-id a00eaf96 --fork-session"
                " --resume /x/p.jsonl --allowed-tools mcp__a --allowed-tools mcp__b"
                " --permission-mode bypassPermissions")
-done = run(panes=None, forge_command=DAEMON_ARGV)
+done = run(panes=None, as_claude=DAEMON_ARGV.split())
 check("a daemon-hosted session's harness flags are consumed and its permission mode kept",
       picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
+# argv is read element by element, so a flag value with a space is one value. Read as
+# ps joins it, `--name review worker` gave the flag `review`, made `worker` the prompt,
+# and the scan stopped before the permission mode, relaunching without it.
+for spaced in (["--name", "review worker"], ["--append-system-prompt", "be terse; cite files"]):
+    done = run(panes=None, as_claude=["/x/claude", *spaced, "--permission-mode", "bypassPermissions"])
+    check(f"a flag value of {spaced[1]!r} before --permission-mode is one value, and the relaunch keeps the mode",
+          picked(done) == DETACHED and "flags=[--permission-mode bypassPermissions]" in done.stdout,
+          f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# An empty value is one element too, and stays empty: bash 3.2 decoded it as a copy of
+# the element before it, relaunching `--model --model`. The kept flag shows the value.
+done = run(panes=None, as_claude=["/x/claude", "--model", "", "--permission-mode", "bypassPermissions"])
+check("an empty --model value is kept as the empty value it is",
+      picked(done) == DETACHED and "flags=[--model '' --permission-mode bypassPermissions]" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The same elements read straight from the kernel, with no forgery: a claude wrapped
+# around the chain whose real argv holds a spaced and an empty element.
+done = run(panes=None, claude_at=[], outer=[NEST_AS_CLAUDE, "review worker", "", "x"], outer_is_own=True)
+check("a real argv with a spaced and an empty element reads back element for element",
+      picked(done) == DETACHED and " host review\\ worker '' x " in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# argv0 is the first element whole, so a claude installed under a path with a space is
+# still a claude binary. Planted by `exec -a` alone, this argv0 is the kernel's own read.
+SPACED_CLAUDE = os.path.join(FIXTURES, "Application Support", "Claude", "claude-code", "2.1.300", "claude")
+done = run(panes=None, as_claude=SPACED_CLAUDE)
+check("a claude installed under a path with a space is found by its argv0",
+      picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout
+      and identity_names(done, SPACED_CLAUDE),
+      f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
 # Each flag claude takes is dropped with the number of values its arity specifies, so
 # the flag that matters is still reached. The prompt here is a recap dense with dash
-# tokens, as a handoff flattened onto one line by ps would be, and none of them may be
-# read as a flag.
-done = run(panes=None, forge_command=(
+# tokens, each word its own element as a prompt typed unquoted would be, and none of
+# them may be read as a flag.
+done = run(panes=None, as_claude=(
     "/x/claude -c --add-dir /a /b --allowed-tools Read Edit --debug api -w --effort high"
     " --permission-mode plan === recap === - shipped --print support - fixed"
-    " --permission-mode handling - never --dangerously-skip-permissions"))
+    " --permission-mode handling - never --dangerously-skip-permissions").split())
 check("variadic and boolean flags are dropped by arity and the scan halts at the prompt",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # A session /background forked carries the hidden `--reply-on-resume` (boolean) and
 # `--proactivity <level>`, which `claude --help` does not list.
-done = run(panes=None, forge_command=(
+done = run(panes=None, as_claude=(
     "/x/claude/versions/2.1.299 --resume /x/p.jsonl --fork-session --reply-on-resume"
     " --allowed-tools mcp__a --model opus --effort high --permission-mode bypassPermissions"
-    " --proactivity high --name worker"))
+    " --proactivity high --name worker").split())
 check("a session forked by /background (--reply-on-resume, --proactivity) relaunches with its model and permission mode",
       picked(done) == DETACHED and "flags=[--model opus --permission-mode bypassPermissions]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # Boolean by the table, not by the token after it: followed by the prompt it is still
 # no value, and the scan stops at the prompt.
-done = run(panes=None, forge_command=(
-    "/x/claude/versions/2.1.299 --permission-mode plan --reply-on-resume resume the review"))
+done = run(panes=None, as_claude=(
+    "/x/claude/versions/2.1.299 --permission-mode plan --reply-on-resume resume the review").split())
 check("--reply-on-resume before the prompt is read as boolean, not refused",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # A flag the table does not list has no value when the token after it is a flag or
 # there is none, whatever its arity, so it is skipped.
-done = run(panes=None, forge_command="/x/claude --frobnicate --permission-mode plan --frobnicate")
+done = run(panes=None, as_claude="/x/claude --frobnicate --permission-mode plan --frobnicate".split())
 check("an unlisted flag followed by a flag, or last, is skipped and the permission mode kept",
       picked(done) == DETACHED and "flags=[--permission-mode plan]" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -1081,7 +1187,7 @@ check("an unlisted flag followed by a flag, or last, is skipped and the permissi
 # Followed by anything else, whether that token is its value or the prompt cannot be
 # determined. The launcher refuses, names the flag and the token, and leaves the handoff
 # on disk rather than guessing.
-done = run(panes=None, forge_command="/x/claude --frobnicate maybe --permission-mode plan")
+done = run(panes=None, as_claude="/x/claude --frobnicate maybe --permission-mode plan".split())
 check("an unlisted flag followed by a non-flag is a refusal naming both, not a guess at the prompt",
       done.returncode == NO_TRANSPORT_RC and "cannot read the flags" in done.stderr
       and "--frobnicate" in done.stderr and "'maybe'" in done.stderr,
@@ -1089,20 +1195,20 @@ check("an unlisted flag followed by a non-flag is a refusal naming both, not a g
 
 # The daemon itself: a subcommand where a session's prompt would be. It is refused
 # like the pty host it spawns.
-done = run(panes=None, forge_command="/x/claude daemon run")
+done = run(panes=None, as_claude="/x/claude daemon run".split())
 check("a claude subcommand (daemon run) is not a session to relaunch",
       refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
-# A pre-warmed spare, as ps shows one live: its subcommand spelling must not be read
+# A pre-warmed spare, as one runs live: its subcommand spelling must not be read
 # as the prompt.
-done = run(panes=None, forge_command="/x/claude bg-spare --bg-spare /tmp/cc/spare/b3.claim.sock")
+done = run(panes=None, as_claude="/x/claude bg-spare --bg-spare /tmp/cc/spare/b3.claim.sock".split())
 check("a daemon spare (bg-spare --bg-spare) is not a session to relaunch",
       refused_as_not_a_session(done),
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # A host subcommand counts only with its own follow-up token; a prompt that merely
 # starts with the word is a session's prompt.
-done = run(panes=None, forge_command="/x/claude --permission-mode plan bg-pty-host leaks are fixed")
+done = run(panes=None, as_claude="/x/claude --permission-mode plan bg-pty-host leaks are fixed".split())
 check("a prompt starting with a host word is still a session",
       picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout,
       f"root_pid={done.root_pid} rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
@@ -1157,7 +1263,7 @@ check("and it names the three absences: owned pane, iTerm2 session, tmux binary"
 
 # A hosted session with no tmux declines for its own reason: the host, not a missing
 # pane, is why no pane or iTerm2 session can show it.
-done = run(tmux_on_path=False, outer_host=True)
+done = run(tmux_on_path=False, outer=[carried(["claude", "--bg-pty-host"])])
 check("a hosted session with no tmux binary declines, naming the host as the reason",
       done.returncode == NO_TRANSPORT_RC and "hosted by another claude" in done.stderr
       and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
