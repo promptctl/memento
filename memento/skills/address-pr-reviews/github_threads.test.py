@@ -512,6 +512,31 @@ except gt.GhError as e:
 else:
     check("gh failure: reply's GhError carries gh's stderr and not the body", False, "did not raise")
 
+install(failing_gh)
+check_raises("gh failure: a flag before the endpoint does not hide the endpoint",
+             gt.GhError, lambda: gt.paginated("repos/o/r/pulls/5/reviews", ".[]"),
+             must_mention=("gh api --paginate repos/o/r/pulls/5/reviews exited 1",))
+
+
+def silent_gh(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="")
+
+
+install(silent_gh)
+check_raises("gh failure: an empty stderr is said, not left blank",
+             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             must_mention=("gh api repos/o/r/pulls/5 exited 1: (no stderr)",))
+
+
+def missing_gh(args):
+    raise FileNotFoundError(2, "No such file or directory", "gh")
+
+
+install(missing_gh)
+check_raises("gh missing: raises GhError, not FileNotFoundError",
+             gt.GhError, lambda: gt.head_sha("o", "r", 5),
+             must_mention=("gh api repos/o/r/pulls/5 could not be run", "No such file or directory"))
+
 
 def dismiss_handler(state):
     def handler(args):

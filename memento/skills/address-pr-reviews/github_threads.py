@@ -11,31 +11,38 @@ import itertools
 import json
 import re
 import subprocess
+# The handler names the class directly: tests replace `subprocess` with a fake that has no such attribute.
 from subprocess import CalledProcessError
 
 
 class GhError(RuntimeError):
-    """A `gh` call that exited nonzero. The message carries gh's stderr, which is the reason."""
+    """A `gh` call that failed. The message names the command and says why; `stderr` is gh's own
+    stderr, empty when gh could not be run at all."""
 
-    def __init__(self, command: str, returncode: int, stderr: str):
-        self.command = command
-        self.returncode = returncode
+    def __init__(self, command: str, reason: str, stderr: str = ""):
         self.stderr = stderr
-        super().__init__(f"gh {command} exited {returncode}: {stderr}")
+        super().__init__(f"gh {command} {reason}")
+
+
+# Flags whose value follows them. A value can be a whole query or reply body, which would bury the
+# stderr that says why the call failed, so a failed command is named by the words before the first of
+# these: the subcommand, the endpoint, and any bare flags among them.
+_VALUE_FLAGS = frozenset({"-f", "--raw-field", "-F", "--field", "--input", "-q", "--jq"})
 
 
 def gh(*args: str) -> str:
     """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it fails.
     """
+    command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
     try:
         return subprocess.check_output(
             ["gh", *args], text=True, stderr=subprocess.PIPE
         ).strip()
     except CalledProcessError as e:
-        # The command is named by its leading words only. The `-f` values that follow can be a whole
-        # query or reply body, which would bury the stderr that says why the call failed.
-        command = " ".join(itertools.takewhile(lambda a: not a.startswith("-"), args))
-        raise GhError(command, e.returncode, e.stderr.strip()) from e
+        stderr = e.stderr.strip()
+        raise GhError(command, f"exited {e.returncode}: {stderr or '(no stderr)'}", stderr) from e
+    except OSError as e:
+        raise GhError(command, f"could not be run: {e}") from e
 
 
 def parse_pr(url: str) -> tuple[str, str, int]:

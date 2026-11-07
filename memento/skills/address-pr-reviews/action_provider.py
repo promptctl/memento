@@ -152,6 +152,10 @@ def setup_check(owner: str, repo: str) -> dict:
             ),
         }
     except github_threads.GhError as e:
+        # gh exits 1 for every API failure, and only a 404 means the workflow is absent. An auth,
+        # network, or rate-limit failure says nothing about the workflow. [LAW:no-silent-failure]
+        if "(HTTP 404)" not in e.stderr:
+            raise
         return {
             "installed": False,
             "message": (

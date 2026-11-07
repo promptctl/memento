@@ -209,5 +209,20 @@ check("setup_check: a failed lookup is not installed, and carries gh's stderr",
       f"got {check_result!r}")
 
 
+def credentials_expired(args):
+    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="gh: Bad credentials (HTTP 401)\n")
+
+
+gt.subprocess = FakeGh(credentials_expired)
+try:
+    check_result = ap.setup_check("o", "r")
+except gt.GhError as e:
+    check("setup_check: a failure other than 404 raises, not 'not installed'",
+          "Bad credentials (HTTP 401)" in str(e), f"message {str(e)!r}")
+else:
+    check("setup_check: a failure other than 404 raises, not 'not installed'", False,
+          f"returned {check_result!r}")
+
+
 print(f"\n{len(failures)} failing" if failures else "\nall passing")
 sys.exit(1 if failures else 0)
