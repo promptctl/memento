@@ -231,10 +231,11 @@ _pane_target() {
 # at the first positional argument, which is the prompt.
 #
 # The list cannot be complete: hidden flags appear in no `claude --help`, and the daemon copies a parent
-# session's own flags into the argv of the session it forks. A flag not on the list is skipped when the token after it is a flag or there is
-# none, since then it has no value whatever its arity. Followed by anything else it fails with exit 1 and
-# is named on stderr, since the scan cannot tell whether that token is its value or the prompt. Adding the
-# flag to the table with its arity fixes that.
+# session's own flags into the argv of the session it forks. A long flag not on the list is skipped when
+# the token after it is a flag or there is none, since then it has no value whatever its arity. Followed
+# by anything else it fails with exit 1 and is named on stderr, since the scan cannot tell whether that
+# token is its value or the prompt. An unlisted short flag always fails, since a cluster such as `-cp`
+# can hide `-p`. Adding the flag to the table with its arity fixes either.
 #
 # `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
 # function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
@@ -274,15 +275,20 @@ _claude_flags() {
         while [ "$i" -lt "$n" ] && [ "${toks[$i]#-}" = "${toks[$i]}" ]; do i=$((i+1)); done ;;
       --)
         break ;;
-      -*)
-        # A flag the table does not list has no value when the next token is a flag or there is none, so
-        # it is dropped like any listed flag. [LAW:no-silent-failure] Followed by anything else it is
-        # refused, never guessed.
+      --*)
+        # A long flag the table does not list has no value when the next token is a flag or there is
+        # none, so it is dropped like any listed flag. [LAW:no-silent-failure] Followed by anything else
+        # it is refused, never guessed.
         if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then
           echo "unknown claude flag '$tok': cannot tell whether '$next' is its value or the prompt; add it to _claude_flags with its arity" >&2
           return 1
         fi
         i=$((i+1)) ;;
+      -*)
+        # [LAW:no-silent-failure] An unlisted short flag may be a cluster (`-cp` is `-c -p`), which can
+        # hide `-p`, so it is refused wherever it stands.
+        echo "unknown claude flag '$tok': a short flag may cluster -p; add it to _claude_flags with its arity" >&2
+        return 1 ;;
       daemon|bg-pty-host|bg-spare)
         # A host's subcommand is followed by its own token (`daemon run`,
         # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
