@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
@@ -541,11 +542,12 @@ except gt.GhError as e:
 
 # The real Runner, with no gh on PATH: it returns the OSError rather than raising it.
 _saved_path = os.environ["PATH"]
-os.environ["PATH"] = ""
-try:
-    outcome = gt.run_gh(["--version"])
-finally:
-    os.environ["PATH"] = _saved_path
+with tempfile.TemporaryDirectory() as empty_dir:
+    os.environ["PATH"] = empty_dir  # an empty PATH would search the cwd
+    try:
+        outcome = gt.run_gh(["--version"])
+    finally:
+        os.environ["PATH"] = _saved_path
 check("run_gh: a gh that cannot start comes back as the OSError",
       isinstance(outcome, FileNotFoundError), repr(outcome))
 

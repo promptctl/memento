@@ -14,14 +14,15 @@ import json
 import re
 import subprocess
 from subprocess import CompletedProcess
-from typing import Callable, Sequence
+from typing import Callable, Sequence, Union
 
 # The port to the gh binary: a finished gh is its CompletedProcess, and a gh that could not be
 # started is the OSError, so every outcome is one value the client decides from.
-Runner = Callable[[Sequence[str]], "CompletedProcess[str] | OSError"]
+Outcome = Union[CompletedProcess[str], OSError]
+Runner = Callable[[Sequence[str]], Outcome]
 
 
-def run_gh(args: Sequence[str]) -> CompletedProcess[str] | OSError:
+def run_gh(args: Sequence[str]) -> Outcome:
     """The real Runner: runs `gh` with `args`, capturing stdout and stderr."""
     try:
         return subprocess.run(["gh", *args], capture_output=True, text=True)

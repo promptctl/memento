@@ -57,9 +57,9 @@ check("non-success conclusion: fails naming the conclusion and the run",
 # --- reply: SKILL.md posts every plan and fix comment through `bin/review reply` ----------------
 
 
-def run_reply(response, *argv):
-    """Runs `review <argv>` with a gh that answers every call with `response`."""
-    fake = FakeRunner(lambda args: response)
+def run_cli(handler, *argv):
+    """Runs `review <argv>` with a gh that answers each call with what `handler` returns for it."""
+    fake = FakeRunner(handler)
     sys.argv = ["review", *argv]
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -70,31 +70,36 @@ def run_reply(response, *argv):
 POSTED = json.dumps({"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "PRRC_1"}}}})
 UNPOSTED = json.dumps({"data": {"addPullRequestReviewThreadReply": None}})
 
-code, out, err, calls = run_reply(POSTED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
+code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a posted comment prints its id and exits 0",
       code == 0 and json.loads(out) == {"thread_id": "T_abc", "comment_id": "PRRC_1"}
       and "id=T_abc" in calls[0] and "body=Plan: x" in calls[0],
       f"code={code} out={out!r} err={err!r} calls={calls!r}")
 
-code, out, err, _ = run_reply(UNPOSTED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
+code, out, err, _ = run_cli(lambda _: UNPOSTED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
 check("reply: no comment id exits 1 saying NOT posted",
       code == 1 and "NOT posted" in err, f"code={code} err={err!r}")
 
 GH_STDERR = "GraphQL: Could not resolve to a node with the global id of 'T_abc'. (node)"
 GH_FAILED = failed(GH_STDERR + "\n")
-code, out, err, _ = run_reply(GH_FAILED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
+code, out, err, _ = run_cli(lambda _: GH_FAILED, "--provider", "action", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a failed gh call exits 1 printing gh's stderr",
       code == 1 and err == f"ERROR (reply): gh api graphql exited 1: {GH_STDERR}\n",
       f"code={code} err={err!r}")
 
 # The client main builds is the one the provider runs through, so a provider command reaches the fake too.
-code, out, err, calls = run_reply('{"state": "active"}', "--provider", "action", "setup-check", "o", "r")
+def workflow_list(args):
+    if args[:3] != ["api", "--paginate", "repos/o/r/actions/workflows?per_page=100"]:
+        raise AssertionError(f"unexpected gh call: {args}")
+    return '{"state": "active"}'
+
+
+code, out, err, calls = run_cli(workflow_list, "--provider", "action", "setup-check", "o", "r")
 check("setup-check: the provider's gh call goes through the runner main was given",
-      code == 0 and json.loads(out)["installed"] is True
-      and calls and calls[0][:3] == ["api", "--paginate", "repos/o/r/actions/workflows?per_page=100"],
+      code == 0 and json.loads(out)["installed"] is True and len(calls) == 1,
       f"code={code} out={out!r} err={err!r} calls={calls!r}")
 
-code, out, err, calls = run_reply(POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
+code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",
       code == 1 and "CAPABILITIES['resolve'] is False" in err and not calls,
       f"code={code} err={err!r} calls={calls!r}")

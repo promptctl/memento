@@ -10,7 +10,10 @@ from __future__ import annotations
 from subprocess import CompletedProcess
 from typing import Callable, Sequence, Union
 
-Outcome = Union[str, CompletedProcess[str], OSError]
+from github_threads import Outcome
+
+# What a handler returns: a gh's stdout is shorthand for the Outcome of a gh that succeeded.
+Answer = Union[str, Outcome]
 
 
 def failed(stderr: str, stdout: str = "") -> CompletedProcess[str]:
@@ -27,11 +30,11 @@ class FakeRunner:
 
     CALL_CAP = 25
 
-    def __init__(self, handler: Callable[[list[str]], Outcome]):
+    def __init__(self, handler: Callable[[list[str]], Answer]):
         self.handler = handler
         self.calls: list[list[str]] = []
 
-    def __call__(self, args: Sequence[str]) -> CompletedProcess[str] | OSError:
+    def __call__(self, args: Sequence[str]) -> Outcome:
         args = list(args)
         self.calls.append(args)
         if len(self.calls) > self.CALL_CAP:
