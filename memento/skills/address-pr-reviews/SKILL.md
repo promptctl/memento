@@ -118,6 +118,7 @@ Schema:
       "file": "path/to/file.py",
       "line_start": 42,
       "line_end": 42,
+      "diff_hunk": "@@ -40,3 +40,3 @@ ...",
       "body": "This silently swallows the error — surface it instead.",
       "author": "github-actions",
       "commit_id": "abc123",
@@ -139,9 +140,9 @@ Schema:
 
 > **Read `thread_comments` before deciding.** A finding may already contain replies (yours from a prior iteration, a human's pushback on the reviewer, or a back-and-forth). The full chain is in `thread_comments`; `body` is just the first comment for quick scanning.
 
-> **A finding is a statement about its `commit_id`, which may not be the head.** `against_head` says which: `"head"` — the finding describes the PR's pushed head, which is the code you are looking at only when `git rev-parse HEAD` equals `head_sha`; if it does not, bring your branch level with it before classifying — `git pull --rebase` if you are behind, push if you are ahead — and never detach onto `head_sha`, which strands unpushed work. `"older"` — it describes the code at `commit_id`, and its `line_start` is a line at that commit; pushes since may have changed it: diff `commit_id` against `head_sha` for its file (`git fetch origin <commit_id>` first if your clone lacks it; a commit that cannot be fetched leaves the finding `"unknown"`) and read the code at the head before classifying. If the diff leaves the lines it names untouched, judge it as a finding on the head; if they changed, it is likely `already_fixed` — check, rather than re-do work already pushed. `"unknown"` — GitHub names no commit for it: read the code at the head and judge the finding against that alone. Never classify an `"older"` or `"unknown"` finding from its quoted code.
+> **A finding is a statement about its `commit_id`, which may not be the head.** `against_head` says which: `"head"` — the finding describes the PR's pushed head, which is the code you are looking at only when `git rev-parse HEAD` equals `head_sha`; if it does not, bring your branch level with it before classifying — `git pull --rebase` if you are behind, push if you are ahead — and never detach onto `head_sha`, which strands unpushed work. `"older"` — it describes the code at `commit_id`, and its `line_start` is a line at that commit; pushes since may have changed it: diff `commit_id` against `head_sha` for its file (`git fetch origin <commit_id>` first if your clone lacks it; a commit that cannot be fetched leaves the finding `"unknown"`) and read the code at the head before classifying. If the diff leaves the lines it names untouched, judge it as a finding on the head; if they changed, it is likely `already_fixed` — check, rather than re-do work already pushed. A finding on a deleted line names no line (below): it is about code its `diff_hunk` shows removed, so check whether the head's file still lacks that code. `"unknown"` — GitHub names no commit for it: read the code at the head and judge the finding against that alone. Never classify an `"older"` or `"unknown"` finding from its quoted code.
 
-> **`line_start` may be `null`** for a file-level (non-line-anchored) comment. Open the file and read the `body`/`thread_comments` for context; the finding still resolves by `thread_id` like any other.
+> **`line_start` or `line_end` may be `null`** — for a file-level (non-line-anchored) comment, or for an end on a deleted line, which is in the diff's old side and so is no line at `commit_id`. `diff_hunk` is the diff text the comment was made on, ending at the commented row: it shows a deleted line's code, and the code around any thread finding. Read it with the `body`/`thread_comments`; never open a file at a line number the finding did not give. The finding still resolves by `thread_id` like any other.
 
 ### 3. Plan phase — triage every finding, resolve the no-change ones
 
