@@ -17,7 +17,7 @@
 # Modes:
 #   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
-#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <msgfile> <goalfile> <flags>
+#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <claude_ident> <msgfile> <goalfile> <flags>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
 
 set -euo pipefail
@@ -65,7 +65,8 @@ _clear_box() {
 #   pane      a live pane shows this session; the pane id names it.
 #   paneless  the walk reached init with no pane and no other claude, so this session owns its terminal.
 #   confined  something above this session may show another one: another claude (a daemon host, or an
-#             outer session this claude was started inside), or ancestry the walk could not establish.
+#             outer session this claude was started inside), a tmux server that lists no pane of this
+#             session, or ancestry the walk could not establish.
 #             Only a fresh detached window is safe.
 #   refused   the walk ended, however, without passing this session's claude, or the claude a relaunch
 #             needs does not run as a claude binary; the reason says which, and how the walk ended.
@@ -112,6 +113,12 @@ _ancestry() {
       sub(/ .*/, "", argv0)
       return argv0 == "claude" || argv0 ~ /\/claude$/ || argv0 ~ /\/claude\/versions\//
     }
+    # A tmux process by argv0: the server shows as `tmux ...` on macOS and as `tmux: server ...` on Linux.
+    function istmux(pid,   argv0) {
+      argv0 = command[pid]
+      sub(/ .*/, "", argv0)
+      return argv0 ~ /(^|\/)tmux:?$/
+    }
     # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
     function unsound(pid, younger) {
       if (!(pid in parent)) return "process " pid " has no row in the process table"
@@ -126,11 +133,11 @@ _ancestry() {
     # the pane, but a relaunch rebuilds the own claude from its command line, which must then be a claude
     # binary'\''s.
     function answer(kind, pane, reason) {
-      if (kind != "refused" && !passed) {
+      if (!passed) {
         reason = (own == "" ? "the ancestry walk passed no claude" : "the ancestry walk never passed $CLAUDE_PID " own) \
                  ", so nothing it reached is this session'\''s to hand off: " reason
         kind = "refused"; pane = ""
-      } else if (kind != "refused" && kind != "pane" && !isclaude(own)) {
+      } else if (kind != "pane" && !isclaude(own)) {
         reason = "claude process " own " does not run as a claude binary, so no relaunch can be built from its command line; " reason
         kind = "refused"
       }
@@ -149,20 +156,27 @@ _ancestry() {
       command[$1] = line
     }
     END {
-      adopt = (claude_pid == "")
-      own = adopt ? "" : claude_pid
+      own = claude_pid
       passed = 0
       pid = self
       younger = -1
       for (hop = 0; hop < maxhops; hop++) {
         why = unsound(pid, younger)
         if (why != "") answer("confined", "", why)
-        if (pid == own) passed = 1
+        # Compared as strings: awk compares two numeric-looking strings as numbers, so `0300` would
+        # match pid 300.
+        if (pid "" == own "") passed = 1
         else if (isclaude(pid)) {
-          if (!adopt) answer("confined", "", "hosted by another claude (process " pid ")")
-          own = pid; adopt = 0; passed = 1
+          # With no own claude yet, this one is it. Otherwise it is another claude: above the own one it
+          # hosts this session, and below it $CLAUDE_PID was never passed.
+          if (own != "") answer("confined", "", passed ? "hosted by another claude (process " pid ")" \
+                                                       : "it met claude process " pid " first")
+          own = pid; passed = 1
         }
         if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
+        # A pane process sits directly below its tmux server, so reaching the server means tmux listed
+        # no live pane of this session: whatever terminal shows it, that terminal does not belong to this session.
+        if (istmux(pid)) answer("confined", "", "tmux process " pid " is above this session, but tmux lists no live pane of it")
         younger = ageof(elapsed[pid])
         pid = parent[pid]
         if (pid + 0 <= 1) break
@@ -172,17 +186,23 @@ _ancestry() {
     }'
 }
 
-# Sets CLAUDE_PID and FLAGS from the own claude, or refuses in the named transport's voice. A claude that is
-# not an interactive session (headless, a subcommand, a daemon host) is refused, since relaunching it would
-# sever its client or kill every session it hosts. Flags the scan cannot place are refused, never guessed.
-_relaunch_target() { # <transport name> <own claude pid, empty when there is none> <its command line>
+# Sets CLAUDE_PID, CLAUDE_IDENT and FLAGS from the own claude, or refuses in the named transport's voice. A
+# claude that is not an interactive session (headless, a subcommand, a daemon host) is refused, since
+# relaunching it would sever its client or kill every session it hosts. Flags the scan cannot place are
+# refused, never guessed.
+#
+# The identity is captured at the same instant as the pid and passed on as data. The worker compares against
+# it before signaling, since by then the pid may belong to another process. A pid that cannot be identified
+# is never signaled, so this is a hard stop.
+_relaunch_target() { # <transport name> <own claude pid> <its command line>
   local rc=0
-  [ -n "$2" ] || _refuse "$1: cannot locate the claude process to relaunch"
   CLAUDE_PID=$2
   FLAGS=$(_claude_flags "$3") || rc=$?
   [ "$rc" -ne 2 ] \
     || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
   [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
+  CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
+    || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
 }
 
 # Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
@@ -207,6 +227,26 @@ _process_identity() {
 _still_captured_process() { # <pid> <identity captured at launch>
   IDENT_NOW=$(_process_identity "$1") || IDENT_NOW=""
   [[ "$IDENT_NOW" == "$2" ]]
+}
+
+# Retires the claude captured at launch, TERM first and KILL if it lingers. Both relaunching workers use
+# this, so neither signals a pid that no longer holds the captured process. Reports through the worker's log.
+_retire() { # <pid> <identity captured at launch>
+  if _still_captured_process "$1" "$2"; then
+    kill -TERM "$1" 2>/dev/null || true
+    # The poll stops when the captured process has exited or the pid holds another process.
+    for _ in $(seq 1 20); do
+      _still_captured_process "$1" "$2" || break
+      sleep 0.5
+    done
+    if _still_captured_process "$1" "$2"; then
+      log "old claude $1 survived TERM; sending KILL"
+      kill -KILL "$1" 2>/dev/null || true
+    fi
+    log "old claude $1 terminated"
+  else
+    log "old claude $1 is gone: pid now holds [${IDENT_NOW:-nothing}], not the process captured at launch [$2]. Nothing to retire."
+  fi
 }
 
 # Reduces claude's flags to a whitelist of those that carry over to a fresh session: permission mode,
@@ -537,11 +577,12 @@ case "$MODE" in
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
         echo "[dry-run] would relaunch: $(_relaunch_line claude)"
+        echo "[dry-run] old-process identity: $CLAUDE_IDENT"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$MSGFILE" "$GOALFILE" "$FLAGS" \
+      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$CLAUDE_IDENT" "$MSGFILE" "$GOALFILE" "$FLAGS" \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → iTerm2 (kill+relaunch, fresh) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
@@ -552,11 +593,6 @@ case "$MODE" in
       # claude, as for the iTerm2 transport.
       _relaunch_target "detached transport" "$OWN_PID" "$OWN_CMD"
       _requested_flags
-      # The identity is captured at the same instant as the pid and passed on as data. The worker compares
-      # against it before signaling, since by then the pid may belong to another process. A pid that cannot
-      # be identified is never signaled, so this is a hard stop.
-      CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
-        || _refuse "detached transport: cannot read the identity of claude process $CLAUDE_PID"
       # A fresh detached window starts a login shell that may rebuild PATH, so the absolute path is resolved
       # here and passed down as data. An unresolvable `claude` is a refusal, not a fallback to a bare name.
       CLAUDE_BIN=$(command -v claude) \
@@ -664,15 +700,16 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   iterm-worker)
-    if [[ $# -lt 4 ]]; then
-      echo "internal error: iterm-worker expects at least 4 args" >&2
+    if [[ $# -lt 5 ]]; then
+      echo "internal error: iterm-worker expects at least 5 args" >&2
       exit 2
     fi
     UUID="$1"
     CLAUDE_PID="$2"
-    MSGFILE="$3"
-    GOALFILE="$4"
-    FLAGS="${5:-}"
+    CLAUDE_IDENT="$3"
+    MSGFILE="$4"
+    GOALFILE="$5"
+    FLAGS="${6:-}"
 
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -680,19 +717,8 @@ Nothing on this machine to deliver the close-out into."
     log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    # Stop the running claude so the shell regains the session. TERM first, then KILL if it lingers.
-    if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-      kill -TERM "$CLAUDE_PID" 2>/dev/null || true
-      for _ in $(seq 1 20); do kill -0 "$CLAUDE_PID" 2>/dev/null || break; sleep 0.5; done
-      if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        log "claude $CLAUDE_PID survived TERM; sending KILL"
-        kill -KILL "$CLAUDE_PID" 2>/dev/null || true
-        sleep 1
-      fi
-      log "claude $CLAUDE_PID terminated"
-    else
-      log "claude $CLAUDE_PID already gone"
-    fi
+    # Stop the running claude so the shell regains the session.
+    _retire "$CLAUDE_PID" "$CLAUDE_IDENT"
 
     # Let the shell draw its prompt before typing into it.
     sleep 2
@@ -835,21 +861,7 @@ OSA2
     # The successor is up and has the message, so the old process is retired now, TERM first and KILL if it
     # lingers. Retirement runs before the optional goal delivery, so a failure there cannot leave the old
     # process running.
-    if _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"; then
-      kill -TERM "$OLD_CLAUDE_PID" 2>/dev/null || true
-      # The poll stops when the captured process has exited or the pid holds another process.
-      for _ in $(seq 1 20); do
-        _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT" || break
-        sleep 0.5
-      done
-      if _still_captured_process "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"; then
-        log "old claude $OLD_CLAUDE_PID survived TERM; sending KILL"
-        kill -KILL "$OLD_CLAUDE_PID" 2>/dev/null || true
-      fi
-      log "old claude $OLD_CLAUDE_PID terminated"
-    else
-      log "old claude $OLD_CLAUDE_PID is gone: pid now holds [${IDENT_NOW:-nothing}], not the process captured at launch [$OLD_CLAUDE_IDENT]. Nothing to retire."
-    fi
+    _retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"
 
     if [[ -s "$GOALFILE" ]]; then
       sleep 1

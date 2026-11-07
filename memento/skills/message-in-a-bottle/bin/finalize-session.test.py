@@ -815,6 +815,21 @@ check("a pane reached with no claude below it is refused, not cleared",
       done.returncode == NO_TRANSPORT_RC and "the ancestry walk passed no claude" in done.stderr
       and picked(done) != "%99",
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A tmux server the walk climbs through lists no live pane of this session (another
+# socket, or a tmux that cannot report it), so whatever terminal shows this session is
+# not its own to type into: confined, never paneless.
+done = run(depth=2, claude_at=[1], panes=None, forge_command="tmux new-session -s other")
+check("a tmux server above this session with no pane of it confines the session",
+      ancestry(done).startswith("confined, tmux process") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# $CLAUDE_PID is matched as the pid's exact string: awk would compare `0<pid>` with
+# <pid> as numbers. The runner is on every chain's ancestry and is given a pane here,
+# so a numeric match would take it.
+done = run(panes=f"%55 {os.getpid()} 0", claude_pid=f"0{os.getpid()}", claude_at=[])
+check("a $CLAUDE_PID that only numerically equals an ancestor's pid is never passed",
+      done.returncode == NO_TRANSPORT_RC and "the ancestry walk never passed $CLAUDE_PID 0" in done.stderr
+      and picked(done) != "%55",
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The hop bound itself: a walk that ends there has not shown that nothing above this
 # session shows another one, so it is confined, and no inherited terminal is trusted.
 # The own claude sits low in the chain, so the walk has passed it before the bound.
