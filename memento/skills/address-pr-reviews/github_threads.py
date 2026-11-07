@@ -188,15 +188,14 @@ class GitHub:
         """Runs `gh` with the given arguments and returns its stripped stdout. Raises GhError if it
         fails."""
         command = " ".join(itertools.takewhile(lambda a: a not in _VALUE_FLAGS, args))
-        match self._run(args):
-            case OSError() as e:
-                raise GhError(command, f"could not be run: {e}")
-            case CompletedProcess(returncode=0, stdout=stdout):
-                return stdout.strip()
-            case CompletedProcess(returncode=rc, stdout=stdout, stderr=stderr):
-                reason = f"exited {rc}: {stderr.strip() or '(no stderr)'}"
-                errors = _response_errors(stdout)
-                raise GhError(command, f"{reason} Response: {errors}" if errors else reason)
+        result = self._run(args)
+        if isinstance(result, OSError):
+            raise GhError(command, f"could not be run: {result}") from result
+        if result.returncode == 0:
+            return result.stdout.strip()
+        reason = f"exited {result.returncode}: {result.stderr.strip() or '(no stderr)'}"
+        errors = _response_errors(result.stdout)
+        raise GhError(command, f"{reason} Response: {errors}" if errors else reason)
 
     def head_sha(self, owner: str, repo: str, pr_num: int) -> str:
         return self.gh("api", f"repos/{owner}/{repo}/pulls/{pr_num}", "--jq", ".head.sha")

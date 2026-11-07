@@ -8,9 +8,9 @@ that could not be started. A handler raises AssertionError for an argv it was no
 from __future__ import annotations
 
 from subprocess import CompletedProcess
-from typing import Callable, Sequence
+from typing import Callable, Sequence, Union
 
-Outcome = "str | CompletedProcess[str] | OSError"
+Outcome = Union[str, CompletedProcess[str], OSError]
 
 
 def failed(stderr: str, stdout: str = "") -> CompletedProcess[str]:

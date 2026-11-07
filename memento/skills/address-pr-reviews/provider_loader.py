@@ -34,13 +34,12 @@ CAPABILITY_FUNCS = {
 REQUIRED_CAPABILITIES = set(CAPABILITY_FUNCS)
 
 
-def get(name: str | None, github: GitHub) -> object:
+def get(name: str, github: GitHub) -> object:
     """Returns the provider `name` names, built with `github` and validated against the contract.
 
-    A `name` of None is resolved by `resolve_name`. The caller builds `github`, so each entry point
+    `resolve_name` says which name is configured. The caller builds `github`, so each entry point
     is the one place that decides which gh its provider runs.
     """
-    name = resolve_name(name)
     provider = _provider_class(name)(github)
     _validate(provider, name)
     return provider

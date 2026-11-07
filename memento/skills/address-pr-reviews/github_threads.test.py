@@ -533,6 +533,21 @@ github, fake = install(missing_gh)
 check_raises("gh missing: raises GhError, not FileNotFoundError",
              gt.GhError, lambda: github.head_sha("o", "r", 5),
              must_mention=("gh api repos/o/r/pulls/5 could not be run", "No such file or directory"))
+try:
+    github.head_sha("o", "r", 5)
+except gt.GhError as e:
+    check("gh missing: GhError chains the OSError",
+          isinstance(e.__cause__, FileNotFoundError), repr(e.__cause__))
+
+# The real Runner, with no gh on PATH: it returns the OSError rather than raising it.
+_saved_path = os.environ["PATH"]
+os.environ["PATH"] = ""
+try:
+    outcome = gt.run_gh(["--version"])
+finally:
+    os.environ["PATH"] = _saved_path
+check("run_gh: a gh that cannot start comes back as the OSError",
+      isinstance(outcome, FileNotFoundError), repr(outcome))
 
 
 def dismiss_handler(state):
