@@ -230,8 +230,11 @@ _pane_target() {
 # model, and the skip-permissions toggles. Each dropped flag is dropped with its values. The scan stops
 # at the first positional argument, which is the prompt.
 #
-# A flag not on the list fails with exit 1 and is named on stderr, since the scan cannot tell whether
-# the next token is its value or the prompt. Adding the flag to the table with its arity fixes that.
+# The list cannot be complete: the daemon writes hidden flags (`--reply-on-resume`) and copies in the
+# parent session's own. A flag not on the list is skipped when the token after it is a flag or there is
+# none, since then it has no value whatever its arity. Followed by anything else it fails with exit 1 and
+# is named on stderr, since the scan cannot tell whether that token is its value or the prompt. Adding the
+# flag to the table with its arity fixes that.
 #
 # `--print`/`-p` and subcommands such as `claude mcp serve` mean the process is not a session, so the
 # function returns 2. The daemon and its hosts (`claude daemon run`, `--bg-pty-host`, `--bg-spare`)
@@ -262,7 +265,7 @@ _claude_flags() {
       -c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
         i=$((i+1)) ;;
       # one value
-      --session-id|--sdk-url|--input-format|--output-format|--settings|--setting-sources|--agent|--agents|--effort|-n|--name|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--system-prompt-snapshot|--autocompact|--client-data-url|--debug-file|--environment|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema|--permission-prompts|--remote-control-session-name-prefix)
+      --session-id|--sdk-url|--input-format|--output-format|--settings|--setting-sources|--agent|--agents|--effort|-n|--name|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--system-prompt-snapshot|--autocompact|--client-data-url|--debug-file|--environment|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema|--permission-prompts|--remote-control-session-name-prefix|--proactivity)
         i=$((i+2)) ;;
       # as many values as follow, up to the next flag — which is also how an
       # optional value (`--debug [filter]`, `-w [name]`) reads
@@ -272,8 +275,13 @@ _claude_flags() {
       --)
         break ;;
       -*)
-        echo "unknown claude flag '$tok': add it to _claude_flags with its arity" >&2
-        return 1 ;;
+        # [LAW:no-silent-failure] a flag the table does not list is skipped when its arity cannot matter
+        # (the next token is a flag, or there is none) and refused only when it can.
+        if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then
+          echo "unknown claude flag '$tok': cannot tell whether '$next' is its value or the prompt; add it to _claude_flags with its arity" >&2
+          return 1
+        fi
+        i=$((i+1)) ;;
       daemon|bg-pty-host|bg-spare)
         # A host's subcommand is followed by its own token (`daemon run`,
         # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
