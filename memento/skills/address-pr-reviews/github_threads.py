@@ -83,7 +83,7 @@ _THREADS_QUERY = (
     "    pullRequest(number:$num){"
     "      reviewThreads(first:100,after:$cursor){"
     "        pageInfo{ hasNextPage endCursor }"
-    "        nodes{ id isResolved path originalStartLine originalLine startDiffSide diffSide"
+    "        nodes{ id isResolved path originalStartLine originalLine startDiffSide diffSide subjectType"
     "          comments(first:100){"
     "            pageInfo{ hasNextPage endCursor }"
     "            nodes{ author{login} body originalCommit{oid} diffHunk } } } } } } }"
@@ -157,6 +157,14 @@ def _line_at_commit(side: str, line: int | None) -> int | None:
     return line if side == "RIGHT" else None
 
 
+def _hunk_of(subject: str, hunk: str | None) -> str | None:
+    """Returns a thread's diff hunk for a LINE comment and None for a FILE comment, whose recorded
+    hunk ends at no commented row. Raises ValueError for a subject GitHub does not define."""
+    if subject not in ("LINE", "FILE"):
+        raise ValueError(f"review thread subject {subject!r} is neither LINE nor FILE")
+    return hunk if subject == "LINE" else None
+
+
 def _build_findings(threads: list[dict]) -> list[dict]:
     """Builds canonical findings from threads. Reviewer and human threads share one shape.
 
@@ -176,17 +184,15 @@ def _build_findings(threads: list[dict]) -> list[dict]:
     for t in threads:
         nodes = t.get("comments", {}).get("nodes") or []
         first = nodes[0] if nodes else {}
-        row = t.get("originalLine")
         end_side = t.get("diffSide")
-        end = _line_at_commit(end_side, row)
+        end = _line_at_commit(end_side, t.get("originalLine"))
         start = _line_at_commit(t.get("startDiffSide") or end_side,
-                                t.get("originalStartLine") or row)
+                                t.get("originalStartLine") or t.get("originalLine"))
         findings.append({
             "file":            t.get("path"),
             "line_start":      start,
             "line_end":        end,
-            # GitHub records a hunk for a file-level comment too, but it ends at no commented row
-            "diff_hunk":       first.get("diffHunk") if row is not None else None,
+            "diff_hunk":       _hunk_of(t.get("subjectType"), first.get("diffHunk")),
             "body":            first.get("body", ""),
             "author":          (first.get("author") or {}).get("login"),
             "commit_id":       (first.get("originalCommit") or {}).get("oid"),

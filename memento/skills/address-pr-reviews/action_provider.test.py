@@ -154,7 +154,7 @@ check("body_findings: reads the CHANGES_REQUESTED reviews and skips the rest",
 # --- fetch: inline threads and body findings rejoin into one stream -------------
 
 def thread_node(tid, body):
-    return {"id": tid, "isResolved": False, "path": "inline.py", "originalLine": 7, "diffSide": "RIGHT",
+    return {"id": tid, "isResolved": False, "path": "inline.py", "originalLine": 7, "diffSide": "RIGHT", "subjectType": "LINE",
             "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                          "nodes": [{"author": {"login": "github-actions[bot]"},
                                     "body": body}]}}

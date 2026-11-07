@@ -85,7 +85,7 @@ def comment(login, body):
 
 def thread_node(tid, comments, has_next=False, end=None):
     return {
-        "id": tid, "isResolved": False, "path": "a.py", "originalLine": 7, "diffSide": "RIGHT",
+        "id": tid, "isResolved": False, "path": "a.py", "originalLine": 7, "diffSide": "RIGHT", "subjectType": "LINE",
         "comments": {
             "pageInfo": {"hasNextPage": has_next, "endCursor": end},
             "nodes": comments,
@@ -202,7 +202,7 @@ github, fake = install(paged_graphql({
         sided("left-to-right", "RIGHT", start_side="LEFT", start=3),
         sided("right-to-left", "LEFT", start_side="RIGHT", start=3),
         sided("replied", "RIGHT", replies=[{**comment("human", "no"), "diffHunk": "@@ reply @@"}]),
-        {**sided("file-level", "RIGHT"), "originalLine": None},
+        {**sided("file-level", "RIGHT"), "originalLine": None, "subjectType": "FILE"},
     ]),
 }))
 found = {f["thread_id"]: f for f in github.fetch(PR)["findings"]}
@@ -214,9 +214,15 @@ check_returns("side: each end is its line on the RIGHT and None on the LEFT",
 check_returns("side: a line comment carries its first comment's diff hunk; a file-level one none",
               lambda: {t: f["diff_hunk"] for t, f in found.items()},
               {**{t: HUNK for t in found}, "file-level": None})
-check("side: the thread query asks for both sides and the hunk",
-      all(f in gh_vars(fake.calls[0])["query"] for f in ("startDiffSide", "diffSide", "diffHunk")),
+check("side: the thread query asks for both sides, the subject, and the hunk",
+      all(f in gh_vars(fake.calls[0])["query"]
+          for f in ("startDiffSide", "diffSide", "subjectType", "diffHunk")),
       f"got {fake.calls[0]}")
+
+github, fake = install(paged_graphql({None: threads_page([{**sided("odd", "RIGHT"),
+                                                            "subjectType": "HUNK"}])}))
+check_raises("side: a subject GitHub does not define raises, naming it",
+             ValueError, lambda: github.fetch(PR), must_mention=("HUNK",))
 
 github, fake = install(paged_graphql({None: threads_page([sided("odd", "MIDDLE")])}))
 check_raises("side: a side GitHub does not define raises, naming it",
