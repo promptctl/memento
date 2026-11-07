@@ -194,33 +194,42 @@ check("fetch: exactly the two findings, threads then body",
       [f["thread_id"] for f in findings] == ["t1", None], f"got {findings!r}")
 
 
-# --- setup_check: a failed workflow lookup says not installed, and why --------
+# --- setup_check: reads the workflow list; absent is not installed, a gh failure raises ---
 
-def workflow_missing(args):
-    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="gh: Not Found (HTTP 404)\n")
-
-
-gt.subprocess = FakeGh(workflow_missing)
-check_result = ap.setup_check("o", "r")
-check("setup_check: a failed lookup is not installed, and carries gh's stderr",
-      check_result["installed"] is False
-      and "not found on o/r" in check_result["message"]
-      and "Not Found (HTTP 404)" in check_result["message"],
-      f"got {check_result!r}")
+def workflow_list(matches):
+    """A gh whose workflow list, filtered to code-review.yml by the jq, emits `matches`."""
+    def handler(args):
+        assert args[:3] == ["api", "--paginate", "repos/o/r/actions/workflows"], args
+        assert '.path == ".github/workflows/code-review.yml"' in args[4], args
+        return "\n".join(json.dumps({"state": s}) for s in matches)
+    return handler
 
 
-def credentials_expired(args):
-    raise gt.CalledProcessError(1, ["gh", *args], output="", stderr="gh: Bad credentials (HTTP 401)\n")
+for label, matches, installed, mention in [
+    ("active is installed", ["active"], True, "is active"),
+    ("absent is not installed, pointing at setup", [], False, "run the agent-code-review-setup skill"),
+    ("disabled is not installed, naming the state", ["disabled_manually"], False, "disabled_manually"),
+]:
+    gt.subprocess = FakeGh(workflow_list(matches))
+    check_result = ap.setup_check("o", "r")
+    check(f"setup_check: {label}",
+          check_result["installed"] is installed and mention in check_result["message"],
+          f"got {check_result!r}")
 
 
-gt.subprocess = FakeGh(credentials_expired)
+def repo_not_found(args):
+    raise gt.CalledProcessError(1, ["gh", *args], stderr="gh: Not Found (HTTP 404)\n",
+                                output='{"message":"Not Found","status":"404"}')
+
+
+gt.subprocess = FakeGh(repo_not_found)
 try:
     check_result = ap.setup_check("o", "r")
 except gt.GhError as e:
-    check("setup_check: a failure other than 404 raises, not 'not installed'",
-          "Bad credentials (HTTP 401)" in str(e), f"message {str(e)!r}")
+    check("setup_check: an unreadable repo raises, not 'not installed'",
+          "Not Found (HTTP 404)" in str(e) and '"status":"404"' in str(e), f"message {str(e)!r}")
 else:
-    check("setup_check: a failure other than 404 raises, not 'not installed'", False,
+    check("setup_check: an unreadable repo raises, not 'not installed'", False,
           f"returned {check_result!r}")
 
 

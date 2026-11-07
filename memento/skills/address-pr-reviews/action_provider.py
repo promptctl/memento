@@ -136,34 +136,34 @@ def fetch(pr_url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def setup_check(owner: str, repo: str) -> dict:
-    """Verify code-review.yml workflow is installed on the repo."""
-    try:
-        state = github_threads.gh(
-            "api", f"repos/{owner}/{repo}/actions/workflows/{WORKFLOW_FILE}",
-            "--jq", ".state",
-        )
-        if state == "active":
-            return {"installed": True, "message": f"{WORKFLOW_FILE} is active"}
-        return {
-            "installed": False,
-            "message": (
-                f"{WORKFLOW_FILE} exists but state is '{state}' — "
-                "check Actions settings on this repo."
-            ),
-        }
-    except github_threads.GhError as e:
-        # gh exits 1 for every API failure, and only a 404 means the workflow is absent. An auth,
-        # network, or rate-limit failure says nothing about the workflow. [LAW:no-silent-failure]
-        if "(HTTP 404)" not in e.stderr:
-            raise
+    """Verify code-review.yml workflow is installed on the repo.
+
+    The repo's workflow list is read rather than the workflow itself, because GitHub answers 404 for
+    a missing workflow, a missing repo, and a repo the token cannot see alike. Here an absent
+    workflow is an empty match, and every gh failure raises. [LAW:no-silent-failure]
+    """
+    states = [w["state"] for w in github_threads.paginated(
+        f"repos/{owner}/{repo}/actions/workflows",
+        f'.workflows[] | select(.path == ".github/workflows/{WORKFLOW_FILE}") | {{state}}',
+    )]
+    if not states:
         return {
             "installed": False,
             "message": (
                 f"review workflow ({WORKFLOW_FILE}) not found on "
                 f"{owner}/{repo} — run the agent-code-review-setup skill in this "
-                f"repo and merge it to the default branch first. ({e})"
+                "repo and merge it to the default branch first."
             ),
         }
+    if states == ["active"]:
+        return {"installed": True, "message": f"{WORKFLOW_FILE} is active"}
+    return {
+        "installed": False,
+        "message": (
+            f"{WORKFLOW_FILE} exists but state is {states} — "
+            "check Actions settings on this repo."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

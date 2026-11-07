@@ -16,11 +16,9 @@ from subprocess import CalledProcessError
 
 
 class GhError(RuntimeError):
-    """A `gh` call that failed. The message names the command and says why; `stderr` is gh's own
-    stderr, empty when gh could not be run at all."""
+    """A `gh` call that failed. The message names the command and says why."""
 
-    def __init__(self, command: str, reason: str, stderr: str = ""):
-        self.stderr = stderr
+    def __init__(self, command: str, reason: str):
         super().__init__(f"gh {command} {reason}")
 
 
@@ -39,8 +37,11 @@ def gh(*args: str) -> str:
             ["gh", *args], text=True, stderr=subprocess.PIPE
         ).strip()
     except CalledProcessError as e:
-        stderr = e.stderr.strip()
-        raise GhError(command, f"exited {e.returncode}: {stderr or '(no stderr)'}", stderr) from e
+        # `gh api` prints the API's error body on stdout. It says why GitHub refused, which
+        # gh's one-line stderr does not.
+        reason = f"exited {e.returncode}: {e.stderr.strip() or '(no stderr)'}"
+        body = e.output.strip()
+        raise GhError(command, f"{reason} Response: {body}" if body else reason) from e
     except OSError as e:
         raise GhError(command, f"could not be run: {e}") from e
 

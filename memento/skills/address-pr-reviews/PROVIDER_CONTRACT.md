@@ -196,8 +196,9 @@ The skill calls this once before the loop and halts with `message` if
 ## Error contract
 
 All functions raise `RuntimeError` with a message the skill can surface
-verbatim. A failed `gh` call raises `github_threads.GhError`, a
-`RuntimeError` whose message carries gh's stderr. They
+verbatim, or `ValueError` for input that does not parse (a malformed PR URL,
+gh output that is not JSON). A failed `gh` call raises `github_threads.GhError`,
+a `RuntimeError` whose message carries gh's stderr and the API's response. They
 never return a partial result and rely on the caller to detect the error —
 that is a silent failure. `[LAW:no-silent-failure]`
 
