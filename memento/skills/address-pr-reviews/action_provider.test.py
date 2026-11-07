@@ -334,10 +334,34 @@ check("wait: a successful poll restarts the outage window",
       isinstance(got, dict) and got["conclusion"] == "success" and len(got["poll_errors"]) == 3,
       f"got {got!r}")
 
+# One poll that hangs until gh is killed is one failed poll, ridden out like a quick one.
+HUNG = TimeoutError(f"gh did not finish within {gt.GH_TIMEOUT_S}s and was killed")
+got, clock, _ = wait_over([([run("in_progress")], 10), (HUNG, 10 + ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S),
+                           ([run("completed", "success")], 10 + 2 * ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S + 1)])
+check("wait: a poll killed at GH_TIMEOUT_S is ridden out",
+      isinstance(got, dict) and got["conclusion"] == "success" and len(got["poll_errors"]) == 1
+      and "did not finish" in got["poll_errors"][0], f"got {got!r}")
+
+# The outage error states how long the polls actually failed, which a slow failure can stretch past
+# the limit.
+got, clock, _ = wait_over([([run("in_progress")], 0), (HUNG, ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S),
+                           (HUNG, 2 * (ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S))])
+gap = 2 * (ap.POLL_INTERVAL_S + gt.GH_TIMEOUT_S)
+check("wait: the outage error states the measured gap and the limit",
+      isinstance(got, RuntimeError) and f"failed for {gap}s" in str(got)
+      and f"the limit is {ap.OUTAGE_TIMEOUT_S}s" in str(got), f"got {got!r}")
+
 # A failed poll at the register deadline: the timeout says gh failed, not only that no run registered.
 got, clock, _ = wait_over([([], 200), ([], ap.REGISTER_TIMEOUT_S - 20), (failed(BLIP), ap.REGISTER_TIMEOUT_S)])
 check("wait: a register timeout reached on a failed poll names that poll's error",
       isinstance(got, RuntimeError) and f"{ap.REGISTER_TIMEOUT_S}s" in str(got) and BLIP in str(got),
+      f"got {got!r}")
+
+# Failures ridden out earlier are still named when the last poll succeeded, so a register timeout
+# over a flaky gh does not read as only a missing workflow.
+got, clock, _ = wait_over([([], 10), (failed(BLIP), 30), ([], 200), ([], ap.REGISTER_TIMEOUT_S)])
+check("wait: a deadline raise names the polls that failed earlier",
+      isinstance(got, RuntimeError) and "1 polls failed along the way" in str(got) and BLIP in str(got),
       f"got {got!r}")
 
 # The head SHA is read once, before anything is tracked, so its failure still ends the wait at once.

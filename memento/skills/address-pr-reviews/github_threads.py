@@ -22,8 +22,8 @@ Outcome = Union[CompletedProcess[str], OSError]
 Runner = Callable[[Sequence[str]], Outcome]
 
 # How long one gh call may run. A gh stalled on a dead connection never exits, and a call that never
-# returns is a failure no caller's deadline can see.
-GH_TIMEOUT_S = 120
+# returns is a failure no caller's deadline can see. A healthy call takes seconds.
+GH_TIMEOUT_S = 30
 
 
 def run_gh(args: Sequence[str]) -> Outcome:
@@ -32,7 +32,9 @@ def run_gh(args: Sequence[str]) -> Outcome:
     try:
         return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return TimeoutError(f"gh did not finish within {GH_TIMEOUT_S}s and was killed")
+        return TimeoutError(
+            f"gh did not finish within {GH_TIMEOUT_S}s and was killed; whether it took effect is unknown"
+        )
     except OSError as e:
         return e
 

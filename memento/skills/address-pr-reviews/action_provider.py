@@ -24,8 +24,9 @@ REGISTER_TIMEOUT_S = 300
 COMPLETION_TIMEOUT_S = 3600
 POLL_INTERVAL_S = 8
 # How long every runs poll may fail, measured from the last one that succeeded (or the start of the
-# wait), before wait gives up on gh rather than on the review.
-OUTAGE_TIMEOUT_S = 60
+# wait), before wait gives up on gh rather than on the review. Two killed calls' worth, so one hung
+# poll is ridden out like any other failure.
+OUTAGE_TIMEOUT_S = 2 * github_threads.GH_TIMEOUT_S
 
 
 # ---------------------------------------------------------------------------
@@ -206,25 +207,28 @@ class Provider:
             # fails slowly uses up the outage window sooner instead of stretching it.
             if now - last_ok >= OUTAGE_TIMEOUT_S:
                 raise RuntimeError(
-                    f"every review-run poll for {sha} failed for {OUTAGE_TIMEOUT_S}s; "
-                    f"the last: {error}"
+                    f"every review-run poll for {sha} failed for {now - last_ok:.0f}s "
+                    f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}"
                 ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
             if now - start >= deadline:
                 break
             self._clock.sleep(POLL_INTERVAL_S)
-        # A deadline reached on a failed poll names it, so a gh outage is not read as a missing workflow.
-        last_poll = f" The last poll failed: {error}" if error else ""
+        # A deadline raise names the polls that failed, so a flaky gh is not read as a missing workflow.
+        failed_polls = (
+            f" {len(poll_errors)} polls failed along the way; the last: {poll_errors[-1]}"
+            if poll_errors else ""
+        )
         if run is None:
             raise RuntimeError(
                 f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
                 f"{REGISTER_TIMEOUT_S}s. Is the workflow installed on this repo "
-                f"(run the agent-code-review-setup skill) and are Actions enabled?{last_poll}"
+                f"(run the agent-code-review-setup skill) and are Actions enabled?{failed_polls}"
             ) from error
         raise RuntimeError(
             f"review run for {sha} did not complete within {COMPLETION_TIMEOUT_S}s "
             f"(status: {run.get('status')}). The runner may be wedged: {run.get('html_url')}"
-            f"{last_poll}"
+            f"{failed_polls}"
         ) from error
 
 

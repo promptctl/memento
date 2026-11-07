@@ -557,7 +557,7 @@ _saved_timeout = gt.GH_TIMEOUT_S
 with tempfile.TemporaryDirectory() as bin_dir:
     hung_gh = os.path.join(bin_dir, "gh")
     with open(hung_gh, "w") as f:
-        f.write("#!/bin/sh\nexec sleep 30\n")
+        f.write("#!/bin/sh\nexec /bin/sleep 30\n")
     os.chmod(hung_gh, 0o755)
     os.environ["PATH"] = bin_dir
     gt.GH_TIMEOUT_S = 0.2
