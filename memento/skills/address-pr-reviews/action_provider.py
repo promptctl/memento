@@ -14,6 +14,7 @@ import re
 from typing import Optional
 
 import github_threads
+from github_threads import GhError
 from ports import Ports
 
 # The workflow file this provider watches.
@@ -22,6 +23,9 @@ WORKFLOW_FILE = "code-review.yml"
 REGISTER_TIMEOUT_S = 300
 COMPLETION_TIMEOUT_S = 3600
 POLL_INTERVAL_S = 8
+# How long every runs poll may fail, measured from the last one that succeeded (or the start of the
+# wait), before wait gives up on gh rather than on the review.
+OUTAGE_TIMEOUT_S = 60
 
 
 # ---------------------------------------------------------------------------
@@ -166,37 +170,62 @@ class Provider:
         return runs[0] if runs else None
 
     def wait(self, pr_url: str) -> dict:
-        """Block until the GitHub Action run for the current head SHA completes."""
+        """Block until the GitHub Action run for the current head SHA completes.
+
+        A failed runs poll is no news: the wait goes on to the same deadlines, and gives up on gh only
+        once every poll for OUTAGE_TIMEOUT_S has failed. Each failure it rode out is returned in
+        `poll_errors`. [LAW:no-silent-failure]
+        """
         owner, repo, pr_num = github_threads.parse_pr(pr_url)
         sha = self._github.head_sha(owner, repo, pr_num)
-        start = self._clock.now()
+        start = last_ok = self._clock.now()
         # The last run any poll listed. A run that registered is held to the completion deadline
         # even if a later poll misses it, so a gap in the run list is not reported as "never
         # registered".
         run: Optional[dict] = None
+        poll_errors: list[str] = []
         while True:
-            run = self._latest_run(owner, repo, sha) or run
+            # This pass's poll failure, if it failed.
+            error: Optional[GhError] = None
+            try:
+                run = self._latest_run(owner, repo, sha) or run
+                last_ok = self._clock.now()
+            except GhError as e:
+                error = e
+                poll_errors.append(str(e))
             if run and run.get("status") == "completed":
                 return {
-                    "status":     "completed",
-                    "conclusion": run.get("conclusion"),
-                    "sha":        sha,
-                    "url":        run.get("html_url"),
+                    "status":      "completed",
+                    "conclusion":  run.get("conclusion"),
+                    "sha":         sha,
+                    "url":         run.get("html_url"),
+                    "poll_errors": poll_errors,
                 }
+            now = self._clock.now()
+            # [LAW:no-ambient-temporal-coupling] every bound is seconds on the one clock, so a gh that
+            # fails slowly uses up the outage window sooner instead of stretching it.
+            if now - last_ok >= OUTAGE_TIMEOUT_S:
+                raise RuntimeError(
+                    f"every review-run poll for {sha} failed for {OUTAGE_TIMEOUT_S}s "
+                    f"({len(poll_errors)} failed polls); the last: {error}"
+                ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
-            if self._clock.now() - start >= deadline:
+            if now - start >= deadline:
                 break
             self._clock.sleep(POLL_INTERVAL_S)
+        # A deadline reached on a failed poll names it, so a gh outage is not read as a missing workflow.
+        last_poll = f" The last poll failed: {error}" if error else ""
         if run is None:
             raise RuntimeError(
                 f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
                 f"{REGISTER_TIMEOUT_S}s. Is the workflow installed on this repo "
-                "(run the agent-code-review-setup skill) and are Actions enabled?"
-            )
+                f"(run the agent-code-review-setup skill) and are Actions enabled?{last_poll}"
+            ) from error
         raise RuntimeError(
             f"review run for {sha} did not complete within {COMPLETION_TIMEOUT_S}s "
             f"(status: {run.get('status')}). The runner may be wedged: {run.get('html_url')}"
-        )
+            f"{last_poll}"
+        ) from error
 
 
 # ---------------------------------------------------------------------------
