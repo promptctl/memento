@@ -133,9 +133,9 @@ Returns the full SHA of the commit the PR's head is at now. `against_head` compa
 
 The skill never reads `fetch` directly. It reads `findings.fetch(provider, pr_url, reviewed_sha)`,
 where `reviewed_sha` is the `sha` `wait` returned. It calls `fetch` and then `head_sha` — in that
-order, so a push between them can only make a finding read as older and the head as unreviewed —
-and returns `{"head_sha": ..., "head_reviewed": ..., "findings": [...]}`: `head_reviewed` is whether
-the head is `reviewed_sha`, and each finding's `against_head` is `"head"` (its `commit_id` is the
+order, so a push between them can only make a finding read as older and the loop as not done —
+and returns `{"head_sha": ..., "done": ..., "findings": [...]}`: `done` is whether the head is
+`reviewed_sha` and no finding has `is_resolved: false`, and each finding's `against_head` is `"head"` (its `commit_id` is the
 head), `"older"` (a different commit), or `"unknown"` (`commit_id` null). Those rules live in
 `findings.py` once, for every provider. `[LAW:single-enforcer]`
 

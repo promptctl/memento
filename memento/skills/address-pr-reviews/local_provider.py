@@ -45,7 +45,8 @@ class Provider:
     def head_sha(self, pr_url: str) -> str:
         raise NotImplementedError(
             "local_provider.head_sha is not yet implemented. "
-            "Return the SHA of the commit the PR's head is at."
+            "Return the full SHA of the commit the PR's head is at; fetch compares it to "
+            "wait's sha exactly."
         )
 
     def fetch(self, pr_url: str) -> dict:

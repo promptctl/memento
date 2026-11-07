@@ -119,16 +119,23 @@ def pr_with_one_thread(args):
     raise AssertionError(f"unexpected gh call: {args}")
 
 
-code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", "old")
+REVIEWED = "0" * 40
+
+code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", REVIEWED)
 got = json.loads(out) if code == 0 else None
-check("fetch: prints the head, whether the wait reviewed it, and each finding placed against it",
-      got is not None and got["head_sha"] == "new" and got["head_reviewed"] is False
+check("fetch: prints the head, whether the loop is done, and each finding placed against it",
+      got is not None and got["head_sha"] == "new" and got["done"] is False
       and [f["against_head"] for f in got["findings"]] == ["older"],
       f"code={code} out={out!r} err={err!r}")
 
 code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR)
 check("fetch: refused without the sha the wait reviewed, before any gh call",
       code != 0 and "--reviewed" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
+
+for short in ["", REVIEWED[:7]]:
+    code, out, err, calls = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--reviewed", short)
+    check(f"fetch: refused a --reviewed of {short!r}, not a full SHA, before any gh call",
+          code != 0 and "not a full commit SHA" in err and not calls, f"code={code} err={err!r} calls={calls!r}")
 
 code, out, err, calls = run_cli(lambda _: POSTED, "--provider", "local", "reply", "T_abc", "--body", "Plan: x")
 check("reply: a provider without resolve is refused before any gh call",

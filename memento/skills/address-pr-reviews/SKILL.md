@@ -103,7 +103,7 @@ if provider.CAPABILITIES["dismiss_review"]:
     pending_reviews = provider.change_requests(PR_URL)["reviews"]
 ```
 
-`findings.fetch` returns canonical JSON: the PR's `head_sha`, `head_reviewed` (whether the head is the commit step 1's review covered), and every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the done rule below accounts for them too.
+`findings.fetch` returns canonical JSON: the PR's `head_sha`, `done` (the done rule below, computed), and every open finding on the PR keyed by `thread_id` (nullable for providers without GitHub threads). One shape per finding — and that includes **body findings**: the reviewer's out-of-diff findings, rendered in the `CHANGES_REQUESTED` review body (under `### Findings outside the reviewed diff` or `### Findings the host would not post inline`) because no diff line could anchor them. A body finding carries `thread_id` null; it is a second *rendering* the reviewer split its findings across, not a second stream — so the done rule below accounts for them too.
 
 `change_requests` returns the automated reviewer's `CHANGES_REQUESTED` reviews — `[{"review_id", "author", "commit_id"}]` — captured **now, before any push**, so step 8 dismisses exactly the reviews this round addressed and never the fresh re-review your push triggers. [LAW:one-source-of-truth] the dismiss set is what you read here, not what is blocking after you mutate the PR. It is scoped to Bot authors: a human's `CHANGES_REQUESTED` is theirs to clear, never auto-dismissed. [LAW:no-silent-failure]
 
@@ -112,7 +112,7 @@ Schema:
 ```json
 {
   "head_sha": "abc123",
-  "head_reviewed": true,
+  "done": false,
   "findings": [
     {
       "file": "path/to/file.py",
@@ -133,7 +133,7 @@ Schema:
 }
 ```
 
-**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null for a thread finding when the provider declares `resolve: True`; a **body finding carries `thread_id` null even under `resolve: True`** — it has no thread and cannot be resolved. **The loop is done when `head_reviewed` is true and the unresolved list is empty.** Proceed to **Finalize** below. `head_reviewed` false means a push landed after step 1's wait and the review of that head has not been read: an empty list says nothing about it. Work any unresolved findings as usual, then go back to step 1, which waits for the new head's review — never Finalize.
+**Unresolved findings** = every entry where `is_resolved` is false. `thread_id` is non-null for a thread finding when the provider declares `resolve: True`; a **body finding carries `thread_id` null even under `resolve: True`** — it has no thread and cannot be resolved. **The loop is done when `done` is true: the head is the commit step 1's review covered, and the unresolved list is empty.** Proceed to **Finalize** below. `done` false with nothing unresolved means the head moved past the commit that review covered, whenever the push landed, and the new head's review has not been read: an empty list says nothing about it. Work any unresolved findings as usual, then go back to step 1, which waits for the new head's review — never Finalize.
 
 [LAW:verifiable-goals] this done rule is the **only** thing that establishes done. Never infer doneness from "I pushed my fixes" or "I addressed everything" — re-run steps 1 and 2 and read it. A fixed-but-unresolved finding still counts as unresolved here, which is the safety net: it re-surfaces as `already_fixed`, and you resolve it now rather than leaving it open forever.
 

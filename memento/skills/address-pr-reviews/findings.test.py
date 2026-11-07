@@ -96,21 +96,29 @@ got = findings.fetch(pr([thread("on-old", "old")], [BLOCKING_ON_OLD], pushed_aft
 check("a push during the fetch leaves findings on the superseded head reading as older",
       [f["against_head"] for f in got["findings"]] == ["older", "older"] and got["head_sha"] == "new",
       f"got {got!r}")
-check("a push during the fetch leaves the head unreviewed", got["head_reviewed"] is False, f"got {got!r}")
+check("a push during the fetch leaves the loop not done", got["done"] is False, f"got {got!r}")
 
 
-# --- whether the head is the commit the wait reviewed -----------------------------
+# --- the done rule: the head is the commit the wait reviewed, and nothing is unresolved ----------
 # The ticket's shape: wait's review covered `old`, a push moved the head to `new`, and `new`'s review
 # has not run, so nothing is pending yet. An empty list here must not read as a clean head.
 
 got = findings.fetch(pr([], [], head=lambda calls: "new"), PR, "old")
-check("no findings on a head the wait did not review: the head reads as unreviewed",
-      got["findings"] == [] and got["head_sha"] == "new" and got["head_reviewed"] is False,
+check("no findings on a head the wait did not review: not done",
+      got["findings"] == [] and got["head_sha"] == "new" and got["done"] is False,
       f"got {got!r}")
 
 got = findings.fetch(pr([], [], head=lambda calls: "old"), PR, "old")
-check("no findings on the head the wait reviewed: the head reads as reviewed",
-      got["findings"] == [] and got["head_reviewed"] is True, f"got {got!r}")
+check("no findings on the head the wait reviewed: done",
+      got["findings"] == [] and got["done"] is True, f"got {got!r}")
+
+got = findings.fetch(pr([thread("on-old", "old")], [], head=lambda calls: "old"), PR, "old")
+check("an unresolved finding on the head the wait reviewed: not done", got["done"] is False, f"got {got!r}")
+
+got = findings.fetch(pr([{**thread("on-old", "old"), "isResolved": True}], [], head=lambda calls: "old"),
+                     PR, "old")
+check("only resolved findings on the head the wait reviewed: done",
+      len(got["findings"]) == 1 and got["done"] is True, f"got {got!r}")
 
 
 # --- every provider supplies the head -------------------------------------------
