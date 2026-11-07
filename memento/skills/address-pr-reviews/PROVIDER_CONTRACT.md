@@ -77,7 +77,9 @@ Blocks until the review for the PR's current head SHA is complete.
 
 `wait` follows the PR's head: when the head moves while it waits, the review of
 the commit it left is never returned, whatever its conclusion, and that SHA is
-listed in `superseded`. A non-success `conclusion` is always the review of the
+listed in `superseded`. A run `wait` held for a commit it left is never returned,
+even when a force-push brings the head back to that commit. Every raise names
+the commits in `superseded`. A non-success `conclusion` is always the review of the
 head the PR was at when it completed.
 
 Raises `RuntimeError` with a human-readable message on timeout or unrecoverable

@@ -233,7 +233,7 @@ def runs_argv(sha):
 
 
 def run(status, conclusion=None, url=RUN_URL):
-    return {"status": status, "conclusion": conclusion, "html_url": url}
+    return {"id": int(url.rsplit("/", 1)[1]), "status": status, "conclusion": conclusion, "html_url": url}
 
 
 def wait_over(polls):
@@ -407,9 +407,20 @@ check("wait: a completed run on a superseded head is passed over, whatever its c
 # poll at t=500, a poll early.
 got, clock, poll_times = wait_over([([run("in_progress")], 10), ([run("in_progress")], 290, "ddd"),
                                     ([], 500), ([], 290 + ap.REGISTER_TIMEOUT_S)])
-check("wait: the deadlines restart when the head moves, and the timeout names the new head",
+check("wait: the deadlines restart when the head moves, and the timeout names the new head and the one left",
       isinstance(got, RuntimeError) and "ddd" in str(got) and "registered" in str(got)
+      and "the commits it left: ccc" in str(got)
       and len(poll_times) == 4, f"got {got!r}, polls at {poll_times!r}")
+
+# A force-push brings the head back to ccc. Until that push's run registers, ccc's newest listed run
+# is the one the push to ddd cancelled, and a wait that took it would return cancelled.
+BACK_URL = "https://github.com/o/r/actions/runs/7"
+got, clock, _ = wait_over([([run("in_progress")], 10, "ddd"), ([run("in_progress", url=NEW_URL)], 20, "ccc"),
+                           ([run("completed", "cancelled")], 30),
+                           ([run("completed", "success", BACK_URL)], 40)])
+check("wait: a head back on a commit it left passes over the run it left there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == BACK_URL
+      and got["superseded"] == ["ccc", "ddd"], f"got {got!r}")
 
 # The head read fails in a pass whose run read saw the run completed: nothing confirms the head is
 # still ccc, so that pass returns nothing, and the next one does.

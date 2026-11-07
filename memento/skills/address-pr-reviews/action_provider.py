@@ -195,6 +195,10 @@ class Provider:
         # deadline even if a later poll misses it, so a gap in the run list is not reported as "never
         # registered".
         run: Optional[dict] = None
+        # The id of each run wait held for a head it left. The head can come back to a commit it left (a
+        # force-push back), and until that push's run registers, the newest run listed for the commit is
+        # the one the earlier push cancelled.
+        left_runs: set[int] = set()
         poll_errors: list[str] = []
         superseded: list[str] = []
         while True:
@@ -206,7 +210,9 @@ class Provider:
                 # [LAW:no-ambient-temporal-coupling] the run is read before the head. A push lands before
                 # the cancel it causes, so a head read made after a run read that saw the cancel sees the
                 # push; the other order could see the cancel and an unmoved head in one pass.
-                run = self._latest_run(owner, repo, sha) or run
+                listed = self._latest_run(owner, repo, sha)
+                if listed and listed["id"] not in left_runs:
+                    run = listed
                 head = self._github.head_sha(owner, repo, pr_num)
                 last_ok = self._clock.now()
             except GhError as e:
@@ -222,15 +228,20 @@ class Provider:
                     "superseded":  superseded,
                 }
             if head not in (None, sha):
+                if run:
+                    left_runs.add(run["id"])
                 superseded.append(sha)
                 sha, since, run = head, self._clock.now(), None
             now = self._clock.now()
+            # [LAW:nothing-unseen] every raise names the heads wait left, so a timeout on a head the PR
+            # moved to is not read as a timeout on the head the wait began on.
+            moved = f" The head moved during the wait; the commits it left: {', '.join(superseded)}." if superseded else ""
             # [LAW:no-ambient-temporal-coupling] every bound is seconds on the one clock, so a gh that
             # fails slowly uses up the outage window sooner instead of stretching it.
             if now - last_ok >= OUTAGE_TIMEOUT_S:
                 raise RuntimeError(
                     f"every review-run poll for {sha} failed for {now - last_ok:.0f}s "
-                    f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}"
+                    f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}{moved}"
                 ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
             if now - since >= deadline:
@@ -245,12 +256,12 @@ class Provider:
             raise RuntimeError(
                 f"No review run ({WORKFLOW_FILE}) registered for {sha} within "
                 f"{REGISTER_TIMEOUT_S}s. Is the workflow installed on this repo "
-                f"(run the agent-code-review-setup skill) and are Actions enabled?{failed_polls}"
+                f"(run the agent-code-review-setup skill) and are Actions enabled?{failed_polls}{moved}"
             ) from error
         raise RuntimeError(
             f"review run for {sha} did not complete within {COMPLETION_TIMEOUT_S}s "
             f"(status: {run.get('status')}). The runner may be wedged: {run.get('html_url')}"
-            f"{failed_polls}"
+            f"{failed_polls}{moved}"
         ) from error
 
 
