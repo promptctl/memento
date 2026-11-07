@@ -44,7 +44,7 @@ def provider_returning(result):
 
 
 def wait_with(**fields):
-    result = {"status": "completed", "sha": "c" * 40, "poll_errors": [], **fields}
+    result = {"status": "completed", "sha": "c" * 40, "poll_errors": [], "superseded": [], **fields}
     return cli.cmd_wait(provider_returning(result), None, ARGS)
 
 
@@ -124,7 +124,7 @@ def pr_with_one_thread(args):
 def waited(conclusion, sha="0" * 40):
     """The JSON `review wait` prints; by default for a review of a commit that is not the head."""
     return json.dumps({"status": "completed", "conclusion": conclusion, "sha": sha,
-                       "url": "https://run", "poll_errors": []})
+                       "url": "https://run", "poll_errors": [], "superseded": []})
 
 
 code, out, err, _ = run_cli(pr_with_one_thread, "--provider", "action", "fetch", PR, "--review", waited("success"))

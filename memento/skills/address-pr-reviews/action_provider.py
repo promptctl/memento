@@ -106,6 +106,12 @@ def body_findings(reviews: list[dict]) -> list[dict]:
 # The provider: the contract operations over its ports
 # ---------------------------------------------------------------------------
 
+def _moved_note(superseded: list[str]) -> str:
+    """The clause every wait raise ends with when the head moved, so a timeout on a head the PR moved
+    to is not read as a timeout on the head the wait began on. [LAW:nothing-unseen]"""
+    return f" The head moved during the wait; the commits it left: {', '.join(superseded)}." if superseded else ""
+
+
 class Provider:
     CAPABILITIES = {
         "resolve":        True,   # GitHub review threads are resolvable
@@ -176,54 +182,81 @@ class Provider:
         return runs[0] if runs else None
 
     def wait(self, pr_url: str) -> dict:
-        """Block until the GitHub Action run for the current head SHA completes.
+        """Block until the GitHub Action run for the head the PR is at completes.
 
-        A failed runs poll is no news: the wait goes on to the same deadlines, and gives up on gh only
-        once every poll for OUTAGE_TIMEOUT_S has failed. Each failure it rode out is returned in
+        The reviewer workflow cancels a run when a push supersedes it, so wait follows the head: a run
+        for a commit the PR has moved past is never returned, whatever its conclusion, and each SHA wait
+        stopped following is returned in `superseded`. [LAW:nothing-unseen]
+
+        A failed poll is no news: the wait goes on to the same deadlines, and gives up on gh only once
+        every poll for OUTAGE_TIMEOUT_S has failed. Each failure it rode out is returned in
         `poll_errors`. [LAW:no-silent-failure]
         """
         owner, repo, pr_num = github_threads.parse_pr(pr_url)
         sha = self._github.head_sha(owner, repo, pr_num)
-        start = last_ok = self._clock.now()
-        # The last run any poll listed. A run that registered is held to the completion deadline
-        # even if a later poll misses it, so a gap in the run list is not reported as "never
+        # `since` is when wait began following `sha`: the register and completion deadlines bound one
+        # head's run, so they restart when the head moves. The outage window bounds gh and does not.
+        since = last_ok = self._clock.now()
+        # The last run any poll listed for `sha`. A run that registered is held to the completion
+        # deadline even if a later poll misses it, so a gap in the run list is not reported as "never
         # registered".
         run: Optional[dict] = None
+        # Each run attempt listed for `sha`, and each listed for a head wait left. The head can come back
+        # to a commit it left (a force-push back), and until that push's run registers, the newest run
+        # listed for the commit is the one the earlier push cancelled. An attempt, not a run id, since
+        # `gh run rerun` keeps the id and a rerun is a new review.
+        listed_here: set[tuple[int, int]] = set()
+        left_runs: set[tuple[int, int]] = set()
         poll_errors: list[str] = []
+        superseded: list[str] = []
         while True:
             # This pass's poll failure, if it failed.
             error: Optional[GhError] = None
+            # The head this pass read; None when the pass failed before reading it, so it confirms nothing.
+            head: Optional[str] = None
             try:
-                run = self._latest_run(owner, repo, sha) or run
+                # [LAW:no-ambient-temporal-coupling] the run is read before the head. A push lands before
+                # the cancel it causes, so a head read made after a run read that saw the cancel sees the
+                # push; the other order could see the cancel and an unmoved head in one pass.
+                listed = self._latest_run(owner, repo, sha)
+                if listed and (attempt := (listed["id"], listed["run_attempt"])) not in left_runs:
+                    run = listed
+                    listed_here.add(attempt)
+                head = self._github.head_sha(owner, repo, pr_num)
                 last_ok = self._clock.now()
             except GhError as e:
                 error = e
                 poll_errors.append(str(e))
-            if run and run.get("status") == "completed":
+            if head == sha and run and run.get("status") == "completed":
                 return {
                     "status":      "completed",
                     "conclusion":  run.get("conclusion"),
                     "sha":         sha,
                     "url":         run.get("html_url"),
                     "poll_errors": poll_errors,
+                    "superseded":  superseded,
                 }
+            if head not in (None, sha):
+                left_runs |= listed_here
+                superseded.append(sha)
+                sha, since, run, listed_here = head, self._clock.now(), None, set()
             now = self._clock.now()
             # [LAW:no-ambient-temporal-coupling] every bound is seconds on the one clock, so a gh that
             # fails slowly uses up the outage window sooner instead of stretching it.
             if now - last_ok >= OUTAGE_TIMEOUT_S:
                 raise RuntimeError(
                     f"every review-run poll for {sha} failed for {now - last_ok:.0f}s "
-                    f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}"
+                    f"(the limit is {OUTAGE_TIMEOUT_S}s); the last: {error}{_moved_note(superseded)}"
                 ) from error
             deadline = COMPLETION_TIMEOUT_S if run else REGISTER_TIMEOUT_S
-            if now - start >= deadline:
+            if now - since >= deadline:
                 break
             self._clock.sleep(POLL_INTERVAL_S)
         # A deadline raise names the polls that failed, so a flaky gh is not read as a missing workflow.
         failed_polls = (
             f" Polls that failed along the way: {len(poll_errors)}; the last: {poll_errors[-1]}"
             if poll_errors else ""
-        )
+        ) + _moved_note(superseded)
         if run is None:
             raise RuntimeError(
                 f"No review run ({WORKFLOW_FILE}) registered for {sha} within "

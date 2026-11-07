@@ -224,33 +224,46 @@ else:
 # --- wait: polls the head SHA's run until it completes, or until the deadline for its state ------
 
 RUN_URL = "https://github.com/o/r/actions/runs/5"
-RUNS_ARGV = ["api", "repos/o/r/actions/workflows/code-review.yml/runs?head_sha=ccc&per_page=1",
-             "--jq", ".workflow_runs"]
+HEAD_ARGV = ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]
 
 
-def run(status, conclusion=None):
-    return {"status": status, "conclusion": conclusion, "html_url": RUN_URL}
+def runs_argv(sha):
+    return ["api", f"repos/o/r/actions/workflows/code-review.yml/runs?head_sha={sha}&per_page=1",
+            "--jq", ".workflow_runs"]
+
+
+def run(status, conclusion=None, url=RUN_URL, attempt=1):
+    return {"id": int(url.rsplit("/", 1)[1]), "run_attempt": attempt, "status": status,
+            "conclusion": conclusion, "html_url": url}
 
 
 def wait_over(polls):
-    """Runs `wait` on a PR whose head SHA is `ccc` and whose run list answers `polls` in order.
+    """Runs `wait` on a PR whose head SHA starts at `ccc` and whose run list answers `polls` in order.
 
-    Each poll is (runs, t): the runs listed, or `failed(...)` for a poll gh failed, and the clock
-    time the call returns at, as a gh call that takes time would. A poll past the last one raises
-    AssertionError. Returns (the result or the exception, the clock, the poll times)."""
+    Each poll is (runs, t) or (runs, t, head): the runs listed, or `failed(...)` for a poll gh failed;
+    the clock time the call returns at, as a gh call that takes time would; and what the head read after
+    it answers, a SHA or `failed(...)`, the last SHA answered when not given. Each runs poll must be for
+    the last SHA the head read answered, the head wait should be following, or it raises
+    AssertionError, as does a poll past the last one. Returns (the result or the exception, the clock,
+    the poll times)."""
     clock = FakeClock()
     remaining = list(polls)
     poll_times = []
+    # What the next head read answers, and the last SHA one answered.
+    head = {"answer": "ccc", "sha": "ccc"}
 
     def handler(args):
-        if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
-            return "ccc"
-        if args != RUNS_ARGV:
-            raise AssertionError(f"unexpected gh call {args!r}")
+        if args == HEAD_ARGV:
+            return head["answer"]
+        if args != runs_argv(head["sha"]):
+            raise AssertionError(f"unexpected gh call {args!r}; the head is {head['sha']}")
         poll_times.append(clock.now())
         if not remaining:
             raise AssertionError(f"poll {len(poll_times)} at t={clock.now()} is past the {len(polls)} scripted")
-        runs, t = remaining.pop(0)
+        runs, t, *answer = remaining.pop(0)
+        head["answer"] = answer[0] if answer else head["sha"]
+        if isinstance(head["answer"], str):
+            head["sha"] = head["answer"]
         clock.advance(t - clock.now())
         return json.dumps(runs) if isinstance(runs, list) else runs
 
@@ -263,7 +276,7 @@ def wait_over(polls):
 got, clock, _ = wait_over([([run("completed", "success")], 0)])
 check("wait: a run already completed returns it without sleeping",
       got == {"status": "completed", "conclusion": "success", "sha": "ccc", "url": RUN_URL,
-              "poll_errors": []}
+              "poll_errors": [], "superseded": []}
       and clock.sleeps == [], f"got {got!r}, sleeps {clock.sleeps!r}")
 
 got, clock, _ = wait_over([([run("queued")], 1), ([run("in_progress")], 10),
@@ -368,9 +381,78 @@ check("wait: a deadline raise names the polls that failed earlier",
       isinstance(got, RuntimeError) and "Polls that failed along the way: 1" in str(got) and BLIP in str(got),
       f"got {got!r}")
 
-# The head SHA is read once, before anything is tracked, so its failure still ends the wait at once.
+# --- wait follows the head: a run for a commit the PR has left is never the review returned -------
+
+NEW_URL = "https://github.com/o/r/actions/runs/6"
+
+# The run read sees ccc's run cancelled, and the head read after it sees the push that cancelled it. A
+# wait that read the head first would see ccc unmoved and the cancel in one pass, and return cancelled.
+got, clock, _ = wait_over([([run("in_progress")], 10), ([run("completed", "cancelled")], 20, "ddd"),
+                           ([run("completed", "success", NEW_URL)], 30)])
+check("wait: a run cancelled by a push is superseded, and the new head's review is returned",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["sha"] == "ddd"
+      and got["url"] == NEW_URL and got["superseded"] == ["ccc"], f"got {got!r}")
+
+got, clock, _ = wait_over([([run("completed", "cancelled")], 0)])
+check("wait: a cancel with the head unmoved reports cancelled",
+      isinstance(got, dict) and got["conclusion"] == "cancelled" and got["sha"] == "ccc"
+      and got["superseded"] == [], f"got {got!r}")
+
+got, clock, _ = wait_over([([run("completed", "success")], 0, "ddd"),
+                           ([run("completed", "failure", NEW_URL)], 10)])
+check("wait: a completed run on a superseded head is passed over, whatever its conclusion",
+      isinstance(got, dict) and got["conclusion"] == "failure" and got["sha"] == "ddd"
+      and got["superseded"] == ["ccc"], f"got {got!r}")
+
+# The head moves at t=290. A register deadline measured from the start of the wait would stop at the
+# poll at t=500, a poll early.
+got, clock, poll_times = wait_over([([run("in_progress")], 10), ([run("in_progress")], 290, "ddd"),
+                                    ([], 500), ([], 290 + ap.REGISTER_TIMEOUT_S)])
+check("wait: the deadlines restart when the head moves, and the timeout names the new head and the one left",
+      isinstance(got, RuntimeError) and "ddd" in str(got) and "registered" in str(got)
+      and "the commits it left: ccc" in str(got)
+      and len(poll_times) == 4, f"got {got!r}, polls at {poll_times!r}")
+
+# A force-push brings the head back to ccc. Until that push's run registers, ccc's newest listed run
+# is the one the push to ddd cancelled, and a wait that took it would return cancelled.
+BACK_URL = "https://github.com/o/r/actions/runs/7"
+got, clock, _ = wait_over([([run("in_progress")], 10, "ddd"), ([run("in_progress", url=NEW_URL)], 20, "ccc"),
+                           ([run("completed", "cancelled")], 30),
+                           ([run("completed", "success", BACK_URL)], 40)])
+check("wait: a head back on a commit it left passes over the run it left there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == BACK_URL
+      and got["superseded"] == ["ccc", "ddd"], f"got {got!r}")
+
+# Every run listed for ccc is left with it, not only the one held last: ccc lists run 5 and then run 7
+# before the head moves, and back on ccc the list answers run 5 again.
+got, clock, _ = wait_over([([run("in_progress")], 10), ([run("in_progress", url=BACK_URL)], 20, "ddd"),
+                           ([run("in_progress", url=NEW_URL)], 30, "ccc"),
+                           ([run("completed", "cancelled")], 40),
+                           ([run("completed", "success", BACK_URL, attempt=2)], 50)])
+check("wait: back on a commit it left, wait passes over every run it listed there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == BACK_URL,
+      f"got {got!r}")
+
+# `gh run rerun` keeps the run's id: back on ccc, the rerun of the run left there is a new review.
+got, clock, _ = wait_over([([run("in_progress")], 10, "ddd"), ([run("in_progress", url=NEW_URL)], 20, "ccc"),
+                           ([run("completed", "cancelled")], 30),
+                           ([run("completed", "success", attempt=2)], 40)])
+check("wait: a rerun of a run left on a commit is returned once the head is back there",
+      isinstance(got, dict) and got["conclusion"] == "success" and got["url"] == RUN_URL,
+      f"got {got!r}")
+
+# The head read fails in a pass whose run read saw the run completed: nothing confirms the head is
+# still ccc, so that pass returns nothing, and the next one does.
+got, clock, poll_times = wait_over([([run("completed", "success")], 10, failed(BLIP)),
+                                    ([run("completed", "success")], 20)])
+check("wait: a failed head read is ridden out, and a completed run waits for a head read to confirm it",
+      isinstance(got, dict) and got["sha"] == "ccc" and len(got["poll_errors"]) == 1
+      and BLIP in got["poll_errors"][0] and len(poll_times) == 2, f"got {got!r}, polls at {poll_times!r}")
+
+
+# The head SHA is read once before anything is tracked, so its failure there still ends the wait at once.
 def head_sha_fails(args):
-    if args == ["api", "repos/o/r/pulls/7", "--jq", ".head.sha"]:
+    if args == HEAD_ARGV:
         return failed(BLIP)
     raise AssertionError(f"unexpected gh call {args!r}")
 

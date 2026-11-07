@@ -36,7 +36,7 @@ OLD, NEW = "a" * 40, "b" * 40
 
 def review(sha, conclusion="success"):
     """A result in the shape wait returns."""
-    return {"status": "completed", "conclusion": conclusion, "sha": sha, "url": "https://run", "poll_errors": []}
+    return {"status": "completed", "conclusion": conclusion, "sha": sha, "url": "https://run", "poll_errors": [], "superseded": []}
 
 
 def thread(tid, commit):
