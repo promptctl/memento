@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import sys
+import traceback
 
 TAIL_CHUNK = 256 * 1024
 # The values `claude --permission-mode` accepts. `default` is absent from `claude --help` and still
@@ -59,14 +60,17 @@ def _transcripts(config_dir, session_id):
                                   glob.escape(session_id) + ".jsonl"))
 
 
-def session_transcript(config_dir, session_id):
-    """The one transcript recorded for this session id, whichever project slug holds it."""
-    found = _transcripts(config_dir, session_id)
+def _the_one(found, config_dir, session_id):
     if len(found) != 1:
         raise Unrecorded(f"{len(found)} transcripts for session {session_id} under "
                          f"{os.path.join(config_dir, 'projects')}, where exactly one must exist"
                          + (": " + ", ".join(sorted(found)) if found else ""))
     return found[0]
+
+
+def session_transcript(config_dir, session_id):
+    """The one transcript recorded for this session id, whichever project slug holds it."""
+    return _the_one(_transcripts(config_dir, session_id), config_dir, session_id)
 
 
 def _known(path, field, value, known):
@@ -120,7 +124,7 @@ def took_prompt(config_dir, session_id, needle):
         return False
     return any(record.get("type") == "user" and not record.get("isMeta")
                and needle in _prompt_text(record)
-               for record in records_newest_first(session_transcript(config_dir, session_id)))
+               for record in records_newest_first(_the_one(found, config_dir, session_id)))
 
 
 def relaunch_flags(settings):
@@ -152,4 +156,9 @@ if __name__ == "__main__":
         sys.exit(command[0](*arguments))
     except (Unrecorded, OSError) as error:
         print(error, file=sys.stderr)
+        sys.exit(2)
+    # Python exits 1 on an uncaught exception, which `prompted` would read as not yet, so a reader
+    # that crashes on a record it cannot read says so with 2 and the traceback.
+    except Exception:
+        traceback.print_exc()
         sys.exit(2)

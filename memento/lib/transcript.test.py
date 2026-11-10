@@ -228,6 +228,11 @@ root = config([handoff(NEEDLE)], [handoff(NEEDLE)])
 done = script("prompted", root, SESSION, NEEDLE)
 check("and 2 with the reason when it cannot tell",
       done.returncode == 2 and "2 transcripts" in done.stderr, done)
+# Python's own exit on an uncaught exception is 1, the status that means not yet.
+root = config([{"type": "user", "message": "a message that is a string"}])
+done = script("prompted", root, SESSION, NEEDLE)
+check("a reader that crashes on a record says so with 2 and the traceback, never 1",
+      done.returncode == 2 and "Traceback" in done.stderr, done)
 for args in ((root, SESSION), ("flags", root), ("prompted", root, SESSION), ("bogus", root, SESSION)):
     done = script(*args)
     check(f"the script refuses a malformed call with exit 2: {args[0] if args[0] != root else '(none)'}",

@@ -26,6 +26,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1178,13 +1179,21 @@ done = run(panes=None, iterm=True)
 check("an iTerm2 relaunch starts in the recorded permission mode and effort",
       "[dry-run] transport=iTerm2 " in done.stdout
       and flags(done) == "--permission-mode bypassPermissions --effort high"
-      and re.search(rf"would relaunch: env CLAUDE_CONFIG_DIR=\S+ claude --session-id {UUID} "
+      and re.search(rf"would relaunch: \(export CLAUDE_CONFIG_DIR=\S+; claude --session-id {UUID} "
                     r"--permission-mode bypassPermissions --effort high ", done.stdout),
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The iTerm2 line is typed into the session's own shell, so a `claude` that shell defines as
+# an alias is the claude it runs.
+line = done.stdout.partition("would relaunch: ")[2].partition("\n")[0]
+aliased = subprocess.run(["bash", "-c", 'shopt -s expand_aliases; alias claude="echo ALIASED"\n' + line],
+                         capture_output=True, text=True)
+check("an iTerm2 relaunch runs the shell's own claude alias",
+      aliased.returncode == 0 and re.match(rf"ALIASED --session-id {UUID} ", aliased.stdout),
+      f"line={line!r} ran={aliased!r}")
 # A session with no CLAUDE_CONFIG_DIR relaunches with none, whatever the new window carries.
 done = run(panes=None, config_unset=True)
 check("a session with no config dir relaunches with it unset, not set to ~/.claude",
-      re.search(rf"would launch: env -u CLAUDE_CONFIG_DIR \S+ --session-id {UUID} ", done.stdout),
+      re.search(rf"would launch: \(unset CLAUDE_CONFIG_DIR; \S+ --session-id {UUID} ", done.stdout),
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # Every way the session cannot say what to relaunch with is a refusal through _refuse,
@@ -1210,21 +1219,23 @@ for what, setup, reason in REFUSALS:
 # The relaunch line is parsed by a shell (tmux's default-shell, or the terminal's). An
 # unquoted `--model opus[1m]` is a glob there, which zsh aborts on when nothing matches,
 # and a quote in the handoff's path unbalances the line. The dry run prints the line the
-# worker runs; it is checked through zsh and through bash's failglob and must yield the
-# exact argv.
+# worker runs; it is run through zsh and through bash's failglob with claude swapped for
+# a printer of the config dir and argv, and must yield the exact argv.
 quoted_dir = tempfile.mkdtemp(prefix="o'neil [1m] ")
 done = run(panes=None, handoff_dir=quoted_dir, launcher_flags=("--model", "opus[1m]"))
 line = done.stdout.partition("would launch: ")[2].partition(" in a fresh detached")[0]
+bin_end = line.find(" --session-id")
+printing = line[:bin_end].rpartition("; ")[0] + '; printf "%s\\n" "$CLAUDE_CONFIG_DIR"' + line[bin_end:]
 shells = [["bash", "-O", "failglob", "-c"]] + ([["zsh", "-f", "-c"]] if shutil.which("zsh") else [])
 for shell in shells:
-    parsed = subprocess.run(shell + ['cat() { printf "%s\\n" "$@"; }; printf "%s\\n" ' + line],
+    parsed = subprocess.run(shell + ['cat() { printf "%s\\n" "$@"; }; ' + printing],
                             capture_output=True, text=True)
     argv = parsed.stdout.split("\n")
     check(f"the relaunch line reaches {shell[0]} as the exact argv, glob-shaped model and quoted path included",
-          picked(done) == DETACHED and parsed.returncode == 0
-          and argv[0] == "env" and argv[1].startswith("CLAUDE_CONFIG_DIR=") and argv[3] == "--session-id"
-          and argv[5:11] == ["--permission-mode", "bypassPermissions", "--effort", "high", "--model", "opus[1m]"]
-          and argv[11].startswith(quoted_dir + "/"),
+          picked(done) == DETACHED and parsed.returncode == 0 and bin_end > 0
+          and argv[0] != "" and argv[1] == "--session-id"
+          and argv[3:9] == ["--permission-mode", "bypassPermissions", "--effort", "high", "--model", "opus[1m]"]
+          and argv[9].startswith(quoted_dir + "/"),
           f"line={line!r} parsed={parsed!r} out={done.stdout!r}")
 shutil.rmtree(quoted_dir)
 
@@ -1491,7 +1502,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
 
     Returns (retired, done): whether the victim was signalled, and the worker's
     result, where `done.tmux_log` lists every tmux argv the worker issued and
-    `done.verdict` is what it told the launcher. identity="match" passes the victim's
+    `done.verdict` is what it sent the launcher on fd 3, read to EOF. identity="match" passes the victim's
     real identity, and identity="reused" swaps the command out, as happens when the OS
     reissues the pid. The launcher it waits on has already exited, unless
     `hold_launcher`, when it lives until the case has seen the victim survive it.
@@ -1513,12 +1524,10 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     config = os.path.join(workdir, "config")
     msgfile = os.path.join(workdir, "msg")
     goalfile = os.path.join(workdir, "goal")
-    verdict = os.path.join(workdir, "verdict")
     with open(msgfile, "w") as handle:
         handle.write(f"handoff\n\nThis handoff verbatim on disk: {msgfile}")
     with open(goalfile, "w") as handle:
         handle.write(goal)
-    open(verdict, "w").close()
     successor_id = "0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f"
     relaunch = (f"env CLAUDE_CONFIG_DIR={shlex.quote(config)} {shlex.quote(SUCCESSOR_BIN)} "
                 f'--session-id {successor_id} "$(cat {shlex.quote(msgfile)})"')
@@ -1534,19 +1543,31 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     }
     if fail_on is not None:
         env["FIXTURE_TMUX_FAIL"] = fail_on
+    verdict_read, verdict_write = os.pipe()
     try:
+        # The pipe is moved onto fd 3, where the launcher's substitution puts it. Each move is
+        # its own exec: `exec cmd 3>&10 10>&-` leaves bash's saved copy of fd 10 open in cmd.
         worker = subprocess.Popen(
-            [LAUNCHER, "--detached-worker", "fixture-session", workdir, relaunch, config, successor_id,
-             msgfile, goalfile, verdict, str(proc.pid), ident, str(launcher.pid), launcher_ident],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            ["/bin/bash", "-c", f'exec 3>&{verdict_write}; exec {verdict_write}>&-; exec "$@"', "bash",
+             LAUNCHER, "--detached-worker", "fixture-session", workdir, relaunch, config, successor_id,
+             msgfile, goalfile, str(proc.pid), ident, str(launcher.pid), launcher_ident],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, pass_fds=(verdict_write,))
+        os.close(verdict_write)
+        # The verdict is whatever came before EOF. A process still holding the pipe after the
+        # worker is done (a tmux server it started) would keep the launcher waiting, so a
+        # read that outlasts the worker by 5s fails the case.
+        verdict_box = {}
+        reader = threading.Thread(target=lambda: verdict_box.update(text=os.fdopen(verdict_read).read()), daemon=True)
+        reader.start()
         survived_launcher = None
         if hold_launcher:
-            wait_for(lambda: open(verdict).read().startswith("taken"), 40)
+            reader.join(40)
             time.sleep(1.5)
             survived_launcher = proc.poll() is None
             launcher.kill()
             launcher.wait()
         out, err = worker.communicate(timeout=180)
+        reader.join(5)
         done = subprocess.CompletedProcess(worker.args, worker.returncode, out, err)
         try:
             proc.wait(timeout=5)
@@ -1554,7 +1575,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         except subprocess.TimeoutExpired:
             retired = False
         done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
-        done.verdict = open(verdict).read()
+        done.verdict = verdict_box.get("text", "(the pipe was still held open after the worker exited)")
         done.survived_launcher = survived_launcher
         return retired, done
     finally:
