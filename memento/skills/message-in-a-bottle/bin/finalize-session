@@ -200,8 +200,9 @@ _relaunch_target() { # <transport name>
     || _refuse "$1: claude process $CLAUDE_PID is not an interactive session (\$CLAUDE_CODE_ENTRYPOINT is '${CLAUDE_CODE_ENTRYPOINT:-}', not cli)"
   [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
     || _refuse "$1: \$CLAUDE_CODE_SESSION_ID is unset, so no transcript can say what this session runs in"
-  # The reader names on stderr what the transcript lacks; the refusal follows it.
-  FLAGS=$(python3 "$SELFDIR/../../../lib/transcript.py" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$CLAUDE_CODE_SESSION_ID") \
+  # The reader names on stderr what the transcript lacks; the refusal follows it. -I keeps the user's
+  # PYTHONPATH and site-packages out of the read, since the reader needs only the standard library.
+  FLAGS=$(python3 -I "$SELFDIR/../../../lib/transcript.py" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$CLAUDE_CODE_SESSION_ID") \
     || _refuse "$1: cannot read the permission mode to relaunch with from session $CLAUDE_CODE_SESSION_ID's transcript"
   CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
     || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
@@ -302,7 +303,7 @@ _mktemp_or_exit() {
 
 # Appends the requested model and effort to FLAGS, so the relaunched claude starts on them. They come after the
 # flags the transcript records, so a requested --effort overrides the recorded one: claude takes the last of a
-# repeated flag (checked against claude: a valid --model first and a bogus one last fails, the reverse starts).
+# repeated flag (checked on 2.1.299: `claude --effort low --effort bogus` warns that bogus is unknown, so bogus is the one read).
 _requested_flags() {
   local extra=""
   [[ -n "$MODEL" ]] && extra+="$(printf '%q %q ' --model "$MODEL")"
