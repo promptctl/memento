@@ -87,9 +87,9 @@ def recorded_settings(config_dir, session_id):
             break
     if mode is None:
         raise Unrecorded(f"no record in {path} carries permissionMode")
-    effort = None if answered is None or "effort" not in answered \
-        else _known(path, "effort", answered["effort"], EFFORTS)
-    return Settings(_known(path, "permissionMode", mode["permissionMode"], PERMISSION_MODES), effort)
+    effort = (answered or {}).get("effort")
+    return Settings(_known(path, "permissionMode", mode["permissionMode"], PERMISSION_MODES),
+                    None if effort is None else _known(path, "effort", effort, EFFORTS))
 
 
 def relaunch_flags(settings):

@@ -137,6 +137,10 @@ root = config([prompt("plan"), answer(None, model="claude-haiku-4-5-20251001")])
 check("a model with no effort level records none, and the settings say so",
       recorded_settings(root, SESSION) == Settings("plan", None), refusal(root))
 
+root = config([prompt("plan"), {**answer(None), "effort": None}])
+check("an effort recorded as null is no effort, not an unknown level",
+      recorded_settings(root, SESSION) == Settings("plan", None), refusal(root))
+
 # A `<synthetic>` record is not an answer from the session's model, so it does not erase the effort.
 root = config([prompt("plan"), answer("high"), answer(None, model="<synthetic>")])
 check("a synthetic record newer than a real answer leaves the real answer's effort",

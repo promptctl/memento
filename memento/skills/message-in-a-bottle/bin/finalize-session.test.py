@@ -362,7 +362,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
         log_mktemp_fails=False, cwd_gone=False, ps_fails=False,
-        self_dir_gone=False, claude_bin=CLAUDE_BIN, claude_pid=None,
+        self_dir_gone=False, via_link=False, claude_bin=CLAUDE_BIN, claude_pid=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False):
@@ -393,10 +393,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # deletes on its first call. The symlink is what disappears, not the script file,
     # so the launcher keeps running as it would in the field.
     selfdir = None
-    if self_dir_gone:
+    if self_dir_gone or via_link:
         selfdir = os.path.join(workdir, "selfdir")
         os.mkdir(selfdir)
         os.symlink(LAUNCHER, os.path.join(selfdir, "finalize-session"))
+    if self_dir_gone:
         path.insert(0, DATE_RMDIR_DIR)
     # Built from scratch, so nothing of the session running the suite (its $CLAUDE_PID,
     # its session id, its config directory) reaches the case.
@@ -457,7 +458,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     try:
         # The cwd-removing hop sits between the chain and the launcher. The ancestry
         # is unchanged; only the launcher's own cwd is gone.
-        launcher = os.path.join(selfdir, "finalize-session") if self_dir_gone else LAUNCHER
+        launcher = LAUNCHER if selfdir is None else os.path.join(selfdir, "finalize-session")
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
         argv = [NEST_BIN, str(depth)] + entry + list(launcher_flags) + [message]
         # A process wrapped around the whole chain, running as the executable `outer`
@@ -980,6 +981,11 @@ check("a session that records no effort relaunches with no --effort",
 done = run(panes=None, launcher_flags=("--model", "opus[1m]", "--effort", "max"))
 check("a requested model and effort land after the recorded flags",
       flags(done) == "--permission-mode bypassPermissions --effort high --model opus\\[1m\\] --effort max",
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# A launcher reached through a symlink finds the reader beside its real path.
+done = run(panes=None, via_link=True)
+check("a launcher run through a symlink reads the transcript",
+      picked(done) == DETACHED and flags(done) == "--permission-mode bypassPermissions --effort high",
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The pane transport clears the session in place, so it reads no transcript.
 done = run(transcripts=(), session_id=None)

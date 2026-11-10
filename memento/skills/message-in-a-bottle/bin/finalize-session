@@ -452,6 +452,9 @@ case "$MODE" in
     fi
     # Split into two assignments: in one assignment only the last command's status counts, so a failed `cd`
     # would go unnoticed and leave SELF malformed.
+    # Resolved through symlinks, since the reader is found relative to the launcher's real directory.
+    SELF_RAW=$(readlink -f -- "$SELF_RAW") \
+      || _refuse "cannot resolve own directory from \$0=$0"
     SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
       || _refuse "cannot resolve own directory from \$0=$0"
     SELF="$SELFDIR/$(basename "$SELF_RAW")"
