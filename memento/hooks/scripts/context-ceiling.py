@@ -22,6 +22,7 @@ from ceiling_log import hook_payload, log, reason_of  # noqa: E402
 # read from the layers again rather than passed in, so one reader serves every caller. A bar that
 # cannot be updated does not stop the gate.
 from candybar import published  # noqa: E402
+from transcript import records_newest_first  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
 # Matched by basename rather than absolute path, because an agent may reach the launcher by name or
@@ -29,7 +30,6 @@ LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "fi
 LAUNCHER_NAME = os.path.basename(LAUNCHER)
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
-TAIL_CHUNK = 256 * 1024
 # The rendered report the launcher prints when a reset is scheduled, matched in a tool result to
 # credit a close-out. Only the rendered line matches: the digits and absolute log path a run fills
 # in are required, while the prose and source text are not.
@@ -70,27 +70,6 @@ def resolve_ceiling(hook):
     Nothing is cached or written, so a change to the layers takes effect at the next stop. The
     project is anchored at the session's own directory rather than the shell's current one."""
     return in_force(session_directory(hook["session_id"]), anchored(hook["cwd"]))
-
-def records_newest_first(transcript_path):
-    """Yield this session's transcript records newest first, reading the file backward in chunks
-    only as far as the caller consumes. Sidechain records (subagent conversations) are skipped. An
-    unparseable line is skipped rather than raised, since a transcript may end in a partial append."""
-    with open(transcript_path, "rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        end, straddling_head = handle.tell(), b""
-        while end > 0:
-            start = max(0, end - TAIL_CHUNK)
-            handle.seek(start)
-            lines = (handle.read(end - start) + straddling_head).split(b"\n")
-            straddling_head = b"" if start == 0 else lines.pop(0)
-            for line in reversed(lines):
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not record.get("isSidechain"):
-                    yield record
-            end = start
 
 def context_tokens(transcript_path):
     for record in records_newest_first(transcript_path):

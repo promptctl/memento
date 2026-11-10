@@ -58,118 +58,49 @@ _clear_box() {
   sleep 0.3
 }
 
-# Prints the process table the ancestry walk reads, one row per process: `pid ppid etime uid exe argv...`,
-# where exe is the executable's name as the kernel records it (ps's ucomm). macOS sets it at exec; Linux
-# lets a process rename itself, as tmux does.
+# Prints the process table the ancestry walk reads, one row per process: `pid ppid etime exe`, where exe
+# is the executable's name as the kernel records it (ps's ucomm), read for every owner. macOS sets it
+# at exec, from the file executed, so a symlink is recorded under its target's name; Linux lets a
+# process rename itself, as tmux does. exe is last because it may hold spaces: Linux tmux names its
+# server `tmux: server`.
 #
-# `ps` joins argv with spaces, so `--name 'review worker'` reads back as two words and a path with a space
-# loses its argv0. So `ps` supplies the tree, the owner and the executable name, and each pid's argv is
-# read whole from the kernel: KERN_PROCARGS2 on macOS, /proc/<pid>/cmdline on Linux. exe and each argv
-# element are printed as one token with no whitespace: every byte outside [A-Za-z0-9_./:=@%+,-] becomes
-# \xHH, and an empty element becomes \c. `printf %b` decodes \xHH, and a literal backslash is itself
-# encoded, so decoding cannot misread one.
-#
-# A pid whose argv cannot be read gets a row with no argv. The kernel withholds the argv of another user's
-# process, root's included, which /bin/ps reads only by being privileged; a zombie and a pid that exited
-# after ps listed it have none either. ps reads the owner and exe of every process, so the walk can still
-# tell a root-owned row from another user's, and a tmux server from anything else. A perl that cannot
-# read even its own argv fails the table read, since every row would otherwise read as withheld.
-#
-# The two reads are not atomic. A pid that exits and is reissued between them carries the newcomer's argv
-# under the old row's ppid and elapsed time, which the walk's age check cannot see, and nothing later
-# catches it: the identity a relaunch captures comes from that same live pid. Only sequential pid
-# allocation bounds it, since a reissue within milliseconds needs the pid space to wrap. The window is as
-# wide as ps's own per-pid argv read.
-#
-# perl is found on PATH like ps. macOS ships it but has deprecated it, and a missing or failing perl fails
-# the table read, which the launcher refuses.
+# No argv is read: what a session was started with is read from its transcript, never its command line.
 _process_table() {
-  # -C0 and an empty PERL5OPT keep the user's PERL_UNICODE and PERL5OPT out: decoded as characters, an
-  # argv byte above 0x7f would be encoded as a code point that `printf %b` cannot read back.
-  ps -eo pid=,ppid=,etime=,uid=,ucomm= | PERL5OPT= perl -C0 -e '
-    use strict; use warnings;
-    my $linux = -e "/proc/self/cmdline";
-    my $buf = "\0" x 1048576;  # kern.argmax on macOS
-    sub argv_of {
-      my ($pid) = @_;
-      my $raw;
-      if ($linux) {
-        open(my $fh, "<", "/proc/$pid/cmdline") or return ();
-        local $/;
-        $raw = <$fh>;
-        close $fh;
-        return () unless defined $raw && length $raw;
-        $raw =~ s/\0\z//;
-        return split(/\0/, $raw, -1);
-      }
-      # sysctl({CTL_KERN, KERN_PROCARGS2, pid}): argc, the exec path NUL-padded to a multiple of 8 bytes,
-      # argv, then the environment. The padding is skipped by its length, not as a run of NULs, since an
-      # empty argv0 is one more NUL and skipping it would read the first environment string as argv.
-      my $len = pack("Q", length $buf);
-      return () unless syscall(202, pack("i3", 1, 49, $pid), 3, $buf, $len, 0, 0) == 0;
-      $raw = substr($buf, 0, unpack("Q", $len));
-      my $argc = unpack("i", $raw);
-      return () unless $raw =~ /\A.{4}([^\0]*)\0/s;
-      my $start = 4 + ((length($1) + 8) & ~7);
-      return () unless substr($raw, 0, $start) =~ /\A.{4}[^\0]*\0+\z/s;
-      my @argv = split(/\0/, substr($raw, $start), -1);
-      return () unless $argc > 0 && @argv >= $argc;
-      return @argv[0 .. $argc - 1];
-    }
-    sub token {
-      my ($arg) = @_;
-      return "\\c" if $arg eq "";
-      $arg =~ s/([^A-Za-z0-9_.\/:=@%+,-])/sprintf("\\x%02x", ord $1)/ge;
-      return $arg;
-    }
-    # The parent, not perl itself: a sandbox may let a process read only its own argv.
-    my @probe = argv_of(getppid());
-    @probe or die "perl cannot read its parent argv from the kernel, so no row would carry one\n";
-    while (my $row = <STDIN>) {
-      # exe is last because it may hold spaces: Linux tmux names its server `tmux: server`.
-      my ($pid, $ppid, $etime, $uid, $exe) = $row =~ /^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.*?)\s*$/
-        or die "unreadable ps row: $row";
-      print join(" ", $pid, $ppid, $etime, $uid, map { token($_) } $exe, argv_of($pid)), "\n";
-    }'
+  ps -eo pid=,ppid=,etime=,ucomm=
 }
 
 # Decides, from one snapshot of the tmux panes and one of the process table, what this session's ancestry
 # lets a handoff reach: _ancestry <pane rows> <_process_table rows>. Pure: it reads only its arguments, $$, and
-# $CLAUDE_PID. It prints five lines: the kind, the pane id, the own claude's pid, its argv tokens, and the
-# reason, which comes last because it is never empty, so the empty fields before it survive `$(...)`.
+# $CLAUDE_PID, which the launcher has required. It prints three lines: the kind, the pane id, and the reason,
+# which comes last because it is never empty, so the empty pane before it survives `$(...)`.
 #   pane      a live pane shows this session; the pane id names it.
 #   paneless  the walk reached init with no pane and no other claude, so this session owns its terminal.
 #   confined  something above this session may show another one: another claude (a daemon host, or an
 #             outer session this claude was started inside), a tmux server that lists no pane of this
 #             session, or ancestry the walk could not establish.
 #             Only a fresh detached window is safe.
-#   refused   the walk ended, however, without passing this session's claude, or the claude a relaunch
-#             needs does not run as a claude binary; the reason says which, and how the walk ended.
+#   refused   the walk ended, however, without passing $CLAUDE_PID; the reason says how it ended.
 #
-# [LAW:single-enforcer] This is the one walk. The own claude, the hosted decision, and the pane are all
-# read in it, hop by hop, under the same rules:
+# [LAW:single-enforcer] This is the one walk. The hosted decision and the pane are both read in it, hop
+# by hop, under the same rules:
 #   - A row that is missing, or whose elapsed time is unreadable or younger than its child's, ends the walk
 #     as confined. A parent is never younger than its child, so a younger one holds a reissued pid, and
 #     nothing above it is this session's ancestry. The clock has one-second resolution, so a pid reissued
 #     within the same second as its child's start can still pass.
-#   - The own claude is $CLAUDE_PID, which Claude Code sets for every tool call. It is authoritative and
-#     identified by the walk passing it, not by its argv0, so a claude run under node keeps its pane. Only
-#     when it is unset is the first claude the walk meets the own claude.
+#   - The own claude is $CLAUDE_PID, which Claude Code sets for every tool call, and the walk passes it by
+#     pid, whatever its executable is named.
 #   - Nothing is handed off unless the walk passed the own claude. Any ending reached first is refused:
 #     a pane, another claude, or init shows $CLAUDE_PID is outside this process's tree, or that no claude
 #     sits below that pane, and an unsound row or the hop bound leaves $CLAUDE_PID unproven, so
 #     relaunching it could signal a session that never asked.
-#   - Any other claude above the own one ends the walk as confined, whatever its flags, since the tree's
-#     shape is what shows hosting. A claude is checked before its pane, since a pane's process is usually
-#     the claude it shows.
-#   - A row with no argv ends the walk as confined unless root owns it, since it could be another user's
-#     claude. Root's are walked past, since root's `login` and `sshd` sit above every terminal session and
-#     the kernel withholds their argv; a claude run as root above this session is the one host this misses.
+#   - Any other claude ends the walk: above the own one it hosts this session, so the walk is confined,
+#     and below it the walk is refused. A claude is checked before its pane, since a pane's process is
+#     usually the claude it shows.
 #   - The walk examines this process and 15 ancestors. At that bound it ends as confined.
 # A wrong confinement costs a relaunch, and a wrong pane costs a /clear in someone else's session, so every
 # doubt resolves to confined.
 _ancestry() {
-  printf '%s\n%s\n' "$1" "$2" | awk -v self=$$ -v claude_pid="${CLAUDE_PID:-}" -v maxhops=16 '
+  printf '%s\n%s\n' "$1" "$2" | awk -v self=$$ -v own="$CLAUDE_PID" -v maxhops=16 '
     # ps renders elapsed time as [[dd-]hh:]mm:ss; fold it left into seconds so
     # any of the three widths compares against any other.
     function ageof(raw,   days, parts, fields, i, seconds) {
@@ -183,18 +114,18 @@ _ancestry() {
       for (i = 1; i <= fields; i++) seconds = seconds * 60 + parts[i] + 0
       return days * 86400 + seconds
     }
-    # The one place argv0 is matched against the claude binary, so the versioned install path
-    # (`.../claude/versions/<n>`) matches too. Only argv0 counts: a shell or a host can carry the path as an
-    # argument. argv0 is one field whole, since no token holds whitespace (a space in a path is \x20).
+    # A claude by the executable it runs as: `claude`, nix'\''s `.claude-wrapped`, the native installer'\''s
+    # versioned binary (`.../claude/versions/2.1.299` runs as `2.1.299`), or `node` for an npm install,
+    # which only argv would tell apart from any other node. So every node ancestor of the session (an
+    # editor'\''s node host, an orchestrator) confines it to a detached window, and a launcher started
+    # through a node wrapper is refused: both are accepted losses, in the safe direction.
     function isclaude(pid) {
-      return argv0[pid] == "claude" || argv0[pid] ~ /\/claude$/ || argv0[pid] ~ /\/claude\/versions\//
+      return exe[pid] ~ /^(claude|\.claude-wrapped|node|[0-9]+\.[0-9]+\.[0-9]+)$/
     }
-    # A tmux process by either name it goes by. The executable the kernel records is read for every owner,
-    # so a tmux server whose argv is withheld is still one; argv0 catches a tmux run through a wrapper that
-    # execs a differently named binary as `tmux`. Linux may name the server `tmux: server` in either. A
-    # false match only confines.
+    # A tmux process by its executable: `tmux`, nix'\''s `.tmux-wrapped`, or Linux'\''s `tmux: server`.
+    # A false match only confines.
     function istmux(pid) {
-      return exe[pid] ~ /^tmux(:|$)/ || argv0[pid] ~ /(^|\/)tmux(:|$)/
+      return exe[pid] ~ /^\.?tmux(-wrapped)?(:|$)/
     }
     # Why the row for pid cannot stand as the parent of a process aged `younger`, or "" when it can.
     function unsound(pid, younger) {
@@ -205,37 +136,28 @@ _ancestry() {
         return "process " pid " is younger than its child, so its pid was reissued"
       return ""
     }
-    # Every ending passes through here, so the two rules a handoff needs are each kept once. Nothing is
-    # handed off unless the walk passed the own claude, whatever ended it. And a pane handoff only clears
-    # the pane, but a relaunch rebuilds the own claude from its command line, which must then be a claude
-    # binary'\''s.
+    # Every ending passes through here, so the rule a handoff needs is kept once: nothing is handed off
+    # unless the walk passed the own claude, whatever ended it.
     function answer(kind, pane, reason) {
       if (!passed) {
-        reason = (own == "" ? "the ancestry walk passed no claude" : "the ancestry walk never passed $CLAUDE_PID " own) \
+        reason = "the ancestry walk never passed $CLAUDE_PID " own \
                  ", so nothing it reached is this session'\''s to hand off: " reason
         kind = "refused"; pane = ""
-      } else if (kind != "pane" && !isclaude(own)) {
-        reason = "claude process " own " does not run as a claude binary, so no relaunch can be built from its command line; " reason
-        kind = "refused"
       }
-      printf "%s\n%s\n%s\n%s\n%s\n", kind, pane, own, (own == "" ? "" : command[own]), reason
+      printf "%s\n%s\n%s\n", kind, pane, reason
       exit 0
     }
     # tmux labels its own rows with a literal "pane", so one pass tells the two snapshots apart. A row
     # counts only if it positively reports the pane alive: tmux renders an unknown format field as empty,
     # so a tmux without #{pane_dead} matches no pane.
     $1 == "pane" { if (NF == 4 && $4 == "0") pane[$3] = $2; next }
-    NF >= 5 {
+    NF >= 4 {
       parent[$1] = $2
       elapsed[$1] = $3
-      owner[$1] = $4
-      exe[$1] = $5
-      argv0[$1] = $6
-      command[$1] = $6
-      for (i = 7; i <= NF; i++) command[$1] = command[$1] " " $i
+      exe[$1] = $4
+      for (i = 5; i <= NF; i++) exe[$1] = exe[$1] " " $i
     }
     END {
-      own = claude_pid
       passed = 0
       pid = self
       younger = -1
@@ -245,15 +167,9 @@ _ancestry() {
         # Compared as strings: awk compares two numeric-looking strings as numbers, so `0300` would
         # match pid 300.
         if (pid "" == own "") passed = 1
-        else if (isclaude(pid)) {
-          # With no own claude yet, this one is it. Otherwise it is another claude: above the own one it
-          # hosts this session, and below it $CLAUDE_PID was never passed.
-          if (own != "") answer("confined", "", passed ? "hosted by another claude (process " pid ")" \
-                                                       : "it met claude process " pid " first")
-          own = pid; passed = 1
-        }
-        if (command[pid] == "" && owner[pid] != 0)
-          answer("confined", "", "the argv of process " pid " (uid " owner[pid] ") cannot be read, so it could be another claude")
+        else if (isclaude(pid))
+          answer("confined", "", passed ? "hosted by another claude (process " pid ")" \
+                                        : "it met claude process " pid " first")
         if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
         # A pane process sits directly below its tmux server, so reaching the server means tmux listed
         # no live pane of this session: whatever terminal shows it, that terminal does not belong to this session.
@@ -267,39 +183,31 @@ _ancestry() {
     }'
 }
 
-# Sets CLAUDE_PID, CLAUDE_IDENT and FLAGS from the own claude, or refuses in the named transport's voice. A
-# claude that is not an interactive session (headless, a subcommand, a daemon host) is refused, since
-# relaunching it would sever its client or kill every session it hosts. Flags the scan cannot place are
-# refused, never guessed.
+# Sets CLAUDE_IDENT and FLAGS for the own claude, or refuses in the named transport's voice. A claude that is
+# not an interactive session (headless, a subcommand, a daemon host) is refused, since relaunching it would
+# sever its client or kill every session it hosts. Claude Code sets $CLAUDE_CODE_ENTRYPOINT to `cli` only
+# for an interactive session: a `claude -p` started with `cli` inherited reports `sdk-cli` (2.1.299).
+#
+# FLAGS is the permission mode and effort the session's transcript records last, as the reader in
+# lib/transcript.py renders them. The relaunch keeps nothing else of the old session.
 #
 # The identity is captured at the same instant as the pid and passed on as data. The worker compares against
 # it before signaling, since by then the pid may belong to another process. A pid that cannot be identified
 # is never signaled, so this is a hard stop.
-_relaunch_target() { # <transport name> <own claude pid> <its argv tokens>
-  local rc=0 tok dec
-  local -a enc argv=()
-  CLAUDE_PID=$2
-  # _process_table's tokens, one per argv element, decoded once here. The empty element is decoded by
-  # name: given output that \c leaves empty, bash 3.2's `printf -v` assigns whatever its previous call
-  # printed, so `--model ''` would decode as `--model --model`.
-  IFS=' ' read -r -a enc <<<"$3" || true
-  for tok in ${enc[@]+"${enc[@]}"}; do
-    case "$tok" in
-      '\c') dec="" ;;
-      *) printf -v dec '%b' "$tok" ;;
-    esac
-    argv+=("$dec")
-  done
-  [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] claude argv:$(printf ' %q' ${argv[@]+"${argv[@]}"})"
-  FLAGS=$(_claude_flags ${argv[@]+"${argv[@]}"}) || rc=$?
-  [ "$rc" -ne 2 ] \
-    || _refuse "$1: cannot locate the claude process to relaunch; claude process $CLAUDE_PID is not an interactive session"
-  [ "$rc" -eq 0 ] || _refuse "$1: cannot read the flags of claude process $CLAUDE_PID"
+_relaunch_target() { # <transport name>
+  [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == cli ]] \
+    || _refuse "$1: claude process $CLAUDE_PID is not an interactive session (\$CLAUDE_CODE_ENTRYPOINT is '${CLAUDE_CODE_ENTRYPOINT:-}', not cli)"
+  [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
+    || _refuse "$1: \$CLAUDE_CODE_SESSION_ID is unset, so no transcript can say what this session runs in"
+  # The reader names on stderr what the transcript lacks; the refusal follows it. -I keeps the user's
+  # PYTHONPATH and site-packages out of the read, since the reader needs only the standard library.
+  FLAGS=$(python3 -I "$SELFDIR/../../../lib/transcript.py" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$CLAUDE_CODE_SESSION_ID") \
+    || _refuse "$1: cannot read the permission mode to relaunch with from session $CLAUDE_CODE_SESSION_ID's transcript"
   CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
     || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
 }
 
-# Returns what a pid holds, as its start time and command line. Those survive the pid being reissued.
+# Returns what a pid holds, as its start time and executable name. Those survive the pid being reissued.
 # Empty output means the pid holds nothing, and that is a failure to identify.
 #
 # A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
@@ -308,7 +216,7 @@ _relaunch_target() { # <transport name> <own claude pid> <its argv tokens>
 _process_identity() {
   local pid="${1:-}" raw
   [ -n "$pid" ] || return 1
-  raw=$(ps -o lstart=,command= -p "$pid" 2>/dev/null) || return 1
+  raw=$(ps -o lstart=,ucomm= -p "$pid" 2>/dev/null) || return 1
   [ -n "$raw" ] || return 1
   printf '%s' "$raw"
 }
@@ -343,87 +251,7 @@ _retire() { # <pid> <identity captured at launch>
   fi
 }
 
-# Reduces claude's flags to a whitelist of those that carry over to a fresh session: permission mode,
-# model, and the skip-permissions toggles. Each dropped flag is dropped with its values. The scan stops
-# at the first positional argument, which is the prompt.
-#
-# The list cannot be complete: hidden flags appear in no `claude --help`, and the daemon copies a parent
-# session's own flags into the argv of the session it forks. A long flag not on the list is skipped when
-# the token after it is a flag or there is none, since then it has no value whatever its arity. Followed
-# by anything else it fails with exit 1 and is named on stderr, since the scan cannot tell whether that
-# token is its value or the prompt. An unlisted short flag always fails, since a cluster such as `-cp`
-# can hide `-p`. Adding the flag to the table with its arity fixes either.
-#
-# `--print`/`-p`, subcommands such as `claude mcp serve`, and the daemon and its hosts (`claude daemon
-# run`, `--bg-pty-host`, `--bg-spare`) mean the process is not a session, so the function returns 2. Only
-# the flag region is read, so a prompt that contains those words is never misread.
-_claude_flags() { # <argv elements>
-  local out="" tok next i n
-  local -a toks=(${@+"$@"}) keep=()
-  n=${#toks[@]}
-  i=1  # skip argv0
-  while [ "$i" -lt "$n" ]; do
-    tok="${toks[$i]}"
-    next="${toks[$((i+1))]:-}"
-    case "$tok" in
-      --dangerously-skip-permissions|--allow-dangerously-skip-permissions|--verbose)
-        keep+=("$tok"); i=$((i+1)) ;;
-      --model|--permission-mode)
-        if [ $((i+1)) -lt "$n" ]; then keep+=("$tok" "$next"); i=$((i+2))
-        else i=$((i+1)); fi ;;
-      --model=*|--permission-mode=*)
-        keep+=("$tok"); i=$((i+1)) ;;
-      -p|--print|--bg-pty-host|--bg-spare)
-        return 2 ;;
-      # boolean (`claude --help`, 2.1.283; `--reply-on-resume` is hidden from it)
-      --reply-on-resume|-c|--continue|--fork-session|--ide|--chrome|--no-chrome|--bare|--brief|--restricted|--safe-mode|--tmux|--bg|--background|--ax-screen-reader|--disable-slash-commands|--exclude-dynamic-system-prompt-sections|--forward-subagent-text|--include-hook-events|--include-partial-messages|--no-session-persistence|--replay-user-messages|--strict-mcp-config|--mcp-debug|-v|--version|-h|--help|--*=*)
-        i=$((i+1)) ;;
-      # one value (`--proactivity` is hidden from `claude --help`)
-      --session-id|--sdk-url|--input-format|--output-format|--settings|--setting-sources|--agent|--agents|--effort|-n|--name|--append-system-prompt|--append-system-prompt-file|--system-prompt|--system-prompt-file|--system-prompt-snapshot|--autocompact|--client-data-url|--debug-file|--environment|--max-turns|--max-budget-usd|--output-dir|--fallback-model|--json-schema|--permission-prompts|--remote-control-session-name-prefix|--proactivity)
-        i=$((i+2)) ;;
-      # as many values as follow, up to the next flag — which is also how an
-      # optional value (`--debug [filter]`, `-w [name]`) reads
-      -r|--resume|-d|--debug|-w|--worktree|--cloud|--from-pr|--prompt-suggestions|--remote-control|--teleport|--add-dir|--allowed-tools|--allowedTools|--disallowed-tools|--disallowedTools|--tools|--mcp-config|--betas|--file|--plugin-dir|--plugin-url)
-        i=$((i+1))
-        while [ "$i" -lt "$n" ] && [ "${toks[$i]#-}" = "${toks[$i]}" ]; do i=$((i+1)); done ;;
-      --)
-        break ;;
-      --*)
-        # A long flag the table does not list has no value when the next token is a flag or there is
-        # none, so it is dropped like any listed flag. [LAW:no-silent-failure] Followed by anything else
-        # it is refused, never guessed.
-        if [ $((i+1)) -lt "$n" ] && [ "${next#-}" = "$next" ]; then
-          echo "unknown claude flag '$tok': cannot tell whether '$next' is its value or the prompt; add it to _claude_flags with its arity" >&2
-          return 1
-        fi
-        i=$((i+1)) ;;
-      -*)
-        # [LAW:no-silent-failure] An unlisted short flag may be a cluster (`-cp` is `-c -p`), which can
-        # hide `-p`, so it is refused wherever it stands.
-        echo "unknown claude flag '$tok': a short flag may cluster -p; add it to _claude_flags with its arity" >&2
-        return 1 ;;
-      daemon|bg-pty-host|bg-spare)
-        # A host's subcommand is followed by its own token (`daemon run`,
-        # `bg-pty-host --bg-pty-host`, `bg-spare --bg-spare`); a prompt that
-        # merely starts with the word is still a session's prompt.
-        case "$tok $next" in
-          "daemon run"|"bg-pty-host --bg-pty-host"|"bg-spare --bg-spare") return 2 ;;
-        esac
-        [ "$tok" = daemon ] && return 2
-        break ;;
-      mcp|update|doctor|config|plugin|install|auth|login|logout|setup-token|agents|remote-control|migrate-installer)
-        return 2 ;;
-      *)
-        break ;;  # first positional = the prompt; never propagate it or anything after
-    esac
-  done
-  # Each token is shell-quoted, since a shell parses the relaunch line. Unquoted, `--model opus[1m]` is a
-  # zsh glob that matches nothing, which aborts the line.
-  [ "${#keep[@]}" -gt 0 ] && printf -v out '%q ' "${keep[@]}"
-  printf '%s' "${out% }"
-}
-
-# The command line every relaunch runs: claude, the kept flags, and the handoff read from its file. Each
+# The command line every relaunch runs: claude, the recorded and requested flags, and the handoff read from its file. Each
 # piece is shell-quoted, so a path containing a quote cannot break the line.
 _relaunch_line() {
   local bin msg
@@ -473,9 +301,8 @@ _mktemp_or_exit() {
 }
 
 # Appends the requested model and effort to FLAGS, so the relaunched claude starts on them. They come after the
-# flags kept from the old process, so a --model the old session carried is overridden by the request: claude
-# takes the last of a repeated --model (checked against claude: a valid --model first and a bogus one last
-# fails, the reverse starts).
+# flags the transcript records, so a requested --effort overrides the recorded one: claude takes the last of a
+# repeated flag (checked on 2.1.299: `claude --effort low --effort bogus` warns that bogus is unknown, so bogus is the one read).
 _requested_flags() {
   local extra=""
   [[ -n "$MODEL" ]] && extra+="$(printf '%q %q ' --model "$MODEL")"
@@ -624,6 +451,9 @@ case "$MODE" in
     fi
     # Split into two assignments: in one assignment only the last command's status counts, so a failed `cd`
     # would go unnoticed and leave SELF malformed.
+    # Resolved through symlinks, since the reader is found relative to the launcher's real directory.
+    SELF_RAW=$(readlink -f -- "$SELF_RAW") \
+      || _refuse "cannot resolve own directory from \$0=$0"
     SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
       || _refuse "cannot resolve own directory from \$0=$0"
     SELF="$SELFDIR/$(basename "$SELF_RAW")"
@@ -635,12 +465,14 @@ case "$MODE" in
     # decides every transport question from those two readings. No tmux binary, or no server, means no
     # panes. The environment's $TMUX_PANE is never read: it is inherited, so a daemon passes its spawner's
     # down, and a pane the walk did not reach is not this session's whatever the environment says.
+    [[ -n "${CLAUDE_PID:-}" ]] \
+      || _refuse "\$CLAUDE_PID is unset, so the ancestry walk cannot tell this session's claude from any other"
     PROCS=$(_process_table) \
       || _refuse "cannot read the process table, so no transport can be shown to be this session's"
     PANES=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || PANES=""
     # Captured before it is read, since a substitution inside a redirection escapes the ERR trap.
     WALK=$(_ancestry "$PANES" "$PROCS")
-    { IFS= read -r KIND; IFS= read -r PANE; IFS= read -r OWN_PID; IFS= read -r OWN_CMD; IFS= read -r REASON; } \
+    { IFS= read -r KIND; IFS= read -r PANE; IFS= read -r REASON; } \
       <<<"$WALK"
     [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] ancestry: $KIND, $REASON"
     [[ "$KIND" != refused ]] || _refuse "$REASON"
@@ -665,7 +497,7 @@ case "$MODE" in
     elif [[ "$KIND" == paneless && "${TERM_PROGRAM:-}" == "iTerm.app" && -n "${ITERM_SESSION_ID:-}" ]] \
          && osascript -e 'tell application "iTerm2" to get version' >/dev/null 2>&1; then
       UUID="${ITERM_SESSION_ID#*:}"
-      _relaunch_target "iTerm2 transport" "$OWN_PID" "$OWN_CMD"
+      _relaunch_target "iTerm2 transport"
       _requested_flags
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
@@ -682,9 +514,9 @@ case "$MODE" in
 
     elif command -v tmux >/dev/null 2>&1; then
       # No owned pane and no reachable iTerm2 session, as with a session hosted by `claude daemon run`.
-      # `new-session -d` starts a tmux server if none is running. The relaunch process is the walk's own
-      # claude, as for the iTerm2 transport.
-      _relaunch_target "detached transport" "$OWN_PID" "$OWN_CMD"
+      # `new-session -d` starts a tmux server if none is running. The process retired is $CLAUDE_PID, as for
+      # the iTerm2 transport.
+      _relaunch_target "detached transport"
       _requested_flags
       # A fresh detached window starts a login shell that may rebuild PATH, so the absolute path is resolved
       # here and passed down as data. An unresolvable `claude` is a refusal, not a fallback to a bare name.
