@@ -327,6 +327,18 @@ STRANGER = subprocess.Popen(["sleep", "600"],
 SESSION_ID = "1b2c3d4e-0000-4000-8000-000000000000"
 
 
+def report_at(home):
+    """Where memento's PreToolUse hook writes this session's report under `home`."""
+    return os.path.join(home, ".claude", "memento", "reports", SESSION_ID)
+
+
+def plant_report(home, text):
+    """Leave the report the hook writes before every finalize-session call."""
+    os.makedirs(os.path.dirname(report_at(home)))
+    with open(report_at(home), "w") as handle:
+        handle.write(text)
+
+
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
@@ -348,11 +360,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
-    report_path = os.path.join(workdir, ".claude", "memento", "reports", SESSION_ID)
+    report_path = report_at(workdir)
     if report is not None:
-        os.makedirs(os.path.dirname(report_path))
-        with open(report_path, "w") as handle:
-            handle.write(report)
+        plant_report(workdir, report)
     # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
     # not include REAL_DIRS, since that is where a packaged tmux would be found.
     # The ps fixture sits first on every case's PATH; a case changes only the
@@ -521,10 +531,11 @@ def argv_case(*args, path_prefix=""):
     with open(rootfile, "w") as handle:
         handle.write(str(os.getpid()))
     under_claude = [NEST_AS_CLAUDE, "-c", 'export CLAUDE_PID=$$; "$@"; exit $?', "wrap"]
+    plant_report(workdir, "default\n\n")
     try:
         done = subprocess.run(
             [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
-            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
+            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir, "CLAUDE_CODE_SESSION_ID": SESSION_ID,
                  "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
                  "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
@@ -800,6 +811,12 @@ check("a run without $CLAUDE_PID is refused before any transport is chosen",
 # A tmux server the walk climbs through lists no live pane of this session (another
 # socket, or a tmux that cannot report it), so whatever terminal shows this session is
 # not its own to type into: confined, never paneless. A packager's wrapped tmux is one too.
+# A claude installed by npm runs as node, so a node above this session is a claude that
+# may host it: the walk confines rather than reaching init as paneless.
+done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_bin=NODE_CLAUDE)
+check("a node above this session confines it as hosted by another claude",
+      ancestry(done).startswith("confined, hosted by another claude") and picked(done) == DETACHED,
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 for server, how in ((TMUX_SERVER_BIN, "tmux"), (WRAPPED_TMUX_BIN, "a wrapped tmux")):
     done = run(depth=2, claude_at=[1], panes=None, rehost_at=2, host_bin=server)
     check(f"{how} above this session with no pane of it confines the session",
@@ -948,9 +965,11 @@ for report, why in ((None, "no report of this session's permission mode at"),
           done.returncode == NO_TRANSPORT_RC and why in done.stderr
           and "NOT delivered" in done.stderr and relaunch_flags(done) is None,
           f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# The pane transport relaunches nothing, so it needs no report and leaves one alone.
-done = run(report=None)
-check("the pane transport needs no report", picked(done) == "%99", f"rc={done.returncode} err={done.stderr!r}")
+# The pane transport relaunches nothing, but it consumes the report too, so no report
+# outlives its handoff whichever transport ran.
+done = run()
+check("the pane transport consumes the report", picked(done) == "%99" and not done.report_left,
+      f"rc={done.returncode} left={done.report_left} err={done.stderr!r}")
 
 # Claude Code says whether a session is interactive. A headless one (`claude -p`, an
 # SDK bridge) has no input box a fresh window could stand in for, and relaunching it

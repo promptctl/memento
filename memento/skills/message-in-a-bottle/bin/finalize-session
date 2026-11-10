@@ -113,10 +113,12 @@ _ancestry() {
       for (i = 1; i <= fields; i++) seconds = seconds * 60 + parts[i] + 0
       return days * 86400 + seconds
     }
-    # A claude by its executable: `claude`, a packager'\''s wrapped form, or the native installer'\''s binary,
-    # which is named for its version (`.../claude/versions/2.1.299`).
+    # A claude by its executable: `claude`, a packager'\''s wrapped form, the native installer'\''s binary,
+    # which is named for its version (`.../claude/versions/2.1.299`), or node, which an npm install runs
+    # as: Claude Code retitles itself `claude` only in its argv, which is never read. Above the own claude
+    # a match confines, so a node that is no claude costs only the iTerm2 transport.
     function isclaude(pid) {
-      return exe[pid] ~ /^\.?claude(-wrapped)?$/ || exe[pid] ~ /^[0-9]+\.[0-9]+\.[0-9]+$/
+      return exe[pid] ~ /^(\.?claude(-wrapped)?|node)$/ || exe[pid] ~ /^[0-9]+\.[0-9]+\.[0-9]+$/
     }
     # A tmux by its executable, wrapped forms (`.tmux-wrapped`) and a Linux server retitled
     # `tmux: server` included.
@@ -189,7 +191,6 @@ _relaunch_target() { # <transport name> <own claude pid>
   CLAUDE_PID=$2
   [[ "${CLAUDE_CODE_ENTRYPOINT:-}" == cli ]] \
     || _refuse "$1: claude process $CLAUDE_PID is not an interactive session (\$CLAUDE_CODE_ENTRYPOINT is '${CLAUDE_CODE_ENTRYPOINT:-}', not 'cli'), so it cannot be relaunched"
-  _session_report "$1"
   _relaunch_flags
   CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
     || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
@@ -200,25 +201,25 @@ _relaunch_target() { # <transport name> <own claude pid>
 # refuses. [LAW:one-source-of-truth] Claude Code hands the hook these live values, so a mode switched
 # mid-session carries over; the old process's argv is never read for them.
 #
-# The report is consumed: it is removed before anything is started, so no later run can act on it. It
-# lives under $HOME, not $TMPDIR: Claude Code's sandbox gives a Bash call its own $TMPDIR, which the hook
+# Every run consumes the report, whichever transport it picks, so none outlives the handoff it was written
+# for and no later run can act on it; only a relaunch uses what it says. It lives under $HOME, not $TMPDIR: Claude Code's sandbox gives a Bash call its own $TMPDIR, which the hook
 # never sees.
-_session_report() { # <transport name>
+_session_report() {
   local report mode effort
   [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
-    || _refuse "$1: \$CLAUDE_CODE_SESSION_ID is unset, so this session's report cannot be found"
+    || _refuse "\$CLAUDE_CODE_SESSION_ID is unset, so this session's report cannot be found"
   report="$HOME/.claude/memento/reports/$CLAUDE_CODE_SESSION_ID"
   [[ -f "$report" ]] \
-    || _refuse "$1: no report of this session's permission mode at $report; memento's PreToolUse hook writes it before a Bash call that runs finalize-session"
+    || _refuse "no report of this session's permission mode at $report; memento's PreToolUse hook writes it before a Bash call that runs finalize-session"
   { IFS= read -r mode || true; IFS= read -r effort || true; } < "$report"
-  rm -- "$report" || _refuse "$1: cannot remove the consumed report $report"
+  rm -- "$report" || _refuse "cannot remove the consumed report $report"
   # [LAW:parse-dont-validate] The modes Claude Code reports; anything else is not a mode to relaunch in.
   case "$mode" in
     default|plan|acceptEdits|auto|dontAsk|bypassPermissions) ;;
-    *) _refuse "$1: the report at $report names no permission mode Claude Code reports ('$mode')" ;;
+    *) _refuse "the report at $report names no permission mode Claude Code reports ('$mode')" ;;
   esac
   case "$effort" in
-    *[!A-Za-z0-9_-]*) _refuse "$1: the report at $report names an effort that is not one word ('$effort')" ;;
+    *[!A-Za-z0-9_-]*) _refuse "the report at $report names an effort that is not one word ('$effort')" ;;
   esac
   REPORTED_MODE=$mode
   REPORTED_EFFORT=$effort
@@ -483,6 +484,7 @@ case "$MODE" in
     # and no process is known to be the one to hand off.
     [[ -n "${CLAUDE_PID:-}" ]] \
       || _refuse "\$CLAUDE_PID is unset, so no process is known to be this session's claude"
+    _session_report
     PROCS=$(_process_table) \
       || _refuse "cannot read the process table, so no transport can be shown to be this session's"
     PANES=$(tmux list-panes -a -F 'pane #{pane_id} #{pane_pid} #{pane_dead}' 2>/dev/null) || PANES=""

@@ -6,6 +6,8 @@ if "finalize-session" in payload["tool_input"]["command"]:
     reports = os.path.join(os.path.expanduser("~"), ".claude", "memento", "reports")
     os.makedirs(reports, exist_ok=True)
     report = os.path.join(reports, payload["session_id"])
-    with open(report + ".partial", "w") as staged:
+    # Staged under this process's pid, so two hooks reporting for one session at once never share a staging file.
+    partial = f"{report}.{os.getpid()}"
+    with open(partial, "w") as staged:
         staged.write(f"{payload.get('permission_mode', '')}\n{(payload.get('effort') or {}).get('level', '')}\n")
-    os.replace(report + ".partial", report)
+    os.replace(partial, report)
