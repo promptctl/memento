@@ -14,6 +14,7 @@ Either prints why it cannot answer on stderr and exits 2.
 
 import collections
 import glob
+import inspect
 import json
 import os
 import sys
@@ -143,17 +144,23 @@ def _prompted(config_dir, session_id, needle):
     return 0 if took_prompt(config_dir, session_id, needle) else 1
 
 
-COMMANDS = {"flags": (_flags, "<config dir> <session id>"),
-            "prompted": (_prompted, "<config dir> <session id> <needle>")}
+COMMANDS = {"flags": _flags, "prompted": _prompted}
+
+
+def _parameters(command):
+    return list(inspect.signature(command).parameters)
+
 
 if __name__ == "__main__":
+    # [LAW:one-source-of-truth] Each command's signature is both its arity and its usage line.
     command, arguments = COMMANDS.get(sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
-    if command is None or len(arguments) != command[1].count("<"):
-        print("usage: " + " | ".join(f"transcript.py {name} {shape}"
-                                     for name, (_, shape) in COMMANDS.items()), file=sys.stderr)
+    if command is None or len(arguments) != len(_parameters(command)):
+        print("usage: " + " | ".join(
+            f"transcript.py {name} " + " ".join(f"<{p.replace('_', ' ')}>" for p in _parameters(fn))
+            for name, fn in COMMANDS.items()), file=sys.stderr)
         sys.exit(2)
     try:
-        sys.exit(command[0](*arguments))
+        sys.exit(command(*arguments))
     except (Unrecorded, OSError) as error:
         print(error, file=sys.stderr)
         sys.exit(2)

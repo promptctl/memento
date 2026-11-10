@@ -125,7 +125,20 @@ case "${1:-}" in
           </dev/null >"$state/pane" 2>&1 &
         echo $! > "$state/pid" ;;
       display-message)
-        if [ -e "$state/status" ]; then echo "1 $(cat "$state/status")"; else echo "0 "; fi ;;
+        # Expands the format as tmux does: a shell's status above 128 is a death by signal
+        # 128 less, which tmux reports as the signal with no status.
+        fmt="${!#}" dead=0 code="" sig=""
+        if [ -e "$state/status" ]; then
+          dead=1 code=$(cat "$state/status")
+          if [ "$code" -gt 128 ]; then sig=$((code - 128)) code=""; fi
+        fi
+        line="${fmt//\#\{pane_dead\}/$dead}"
+        line="${line//\#\{pane_dead_status\}/$code}"
+        line="${line//\#\{pane_dead_signal\}/$sig}"
+        case "$line" in
+          *'#{'*) echo "fixture tmux: cannot expand '$fmt'" >&2; exit 2 ;;
+        esac
+        printf '%s\n' "$line" ;;
       capture-pane)
         if [ -n "${FIXTURE_TMUX_PANE_TEXT+set}" ]; then
           printf '%s\n' "$FIXTURE_TMUX_PANE_TEXT"
@@ -269,6 +282,7 @@ SUCCESSOR = r"""#!/bin/bash
 #   other    records a prompt that is not the one it was given
 #   silent   records nothing
 #   dies     prints why on its terminal and exits 3 at boot
+#   killed   is killed by SIGTERM at boot
 # It then holds its pid, as a running claude does, until it is killed.
 set -uo pipefail
 id="" prompt=""
@@ -290,6 +304,7 @@ case "${FIXTURE_SUCCESSOR:-records}" in
   other) record "a prompt that is not this handoff" ;;
   silent) ;;
   dies) echo "error: unknown option '--bogus'"; exit 3 ;;
+  killed) kill -TERM $$ ;;
 esac
 echo "fixture successor $id is up"
 exec sleep 120
@@ -503,6 +518,8 @@ def settle_detached(done, workdir, tmux_state):
     wait_for(lambda: not worker_running(), 45)
     tmuxlog = os.path.join(workdir, "tmux.log")
     done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+    pane = os.path.join(tmux_state, "pane")
+    done.pane = open(pane).read() if os.path.exists(pane) else ""
     logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
     done.worker_log = open(logged).read() if logged and os.path.exists(logged) else ""
     try:
@@ -539,7 +556,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     successor answering as `successor` names (see SUCCESSOR) and the planted claude
     outliving the launcher, as a claude outlives its tool call. `done.retired` says
     whether the worker then retired it, `done.tmux_log` lists the tmux calls, and
-    `done.worker_log` is the worker's log when the launcher named it.
+    `done.worker_log` is the worker's log when the launcher named it, and `done.pane` what
+    the successor's pane showed. The successor has READY_TIMEOUT seconds to take the message.
     `server_config_dir` is the tmux server's own CLAUDE_CONFIG_DIR ("" for unset), and
     `config_unset` leaves the session's unset, so its config is $HOME/.claude under a
     HOME of the case's own. `kill_launcher_tree` kills the launcher and everything
@@ -593,7 +611,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["CLAUDE_CONFIG_DIR"] = config_dir
     if successor is not None:
         env.update(FIXTURE_SUCCESSOR=successor, FIXTURE_TMUX_STATE=tmux_state,
-                   FIXTURE_TMUX_LOG=os.path.join(workdir, "tmux.log"), NEST_LINGER="20")
+                   FIXTURE_TMUX_LOG=os.path.join(workdir, "tmux.log"), NEST_LINGER="20",
+                   MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
     if server_config_dir is not None:
         env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
     if iterm:
@@ -1415,6 +1434,10 @@ RESET_MARKER = next(
     if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "RESET_MARKER")
 
 
+# Long enough for the `late` successor's 3s, short enough that a refusal is quick.
+READY_TIMEOUT = 8
+
+
 def detail(done):
     return (f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} "
             f"tmux_log={done.tmux_log!r} worker_log={done.worker_log!r}")
@@ -1427,6 +1450,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     silent = pool.submit(run, panes=None, successor="silent")
     other = pool.submit(run, panes=None, successor="other")
     dies = pool.submit(run, panes=None, successor="dies")
+    killed = pool.submit(run, panes=None, successor="killed")
     # A tmux server started from another shell carries its own CLAUDE_CONFIG_DIR, or
     # none; the relaunch line states this session's either way.
     server_differs = pool.submit(run, panes=None, successor="records",
@@ -1448,11 +1472,13 @@ check("and the line is the one the ceiling credits as a close-out",
 check("and the worker retires the old process once the launcher has returned",
       done.retired and "terminated" in done.worker_log, detail(done))
 check("the successor's screen never shows the boot banner, and it still counts as taken",
-      "Claude Code v" not in done.tmux_log and done.retired, detail(done))
+      "fixture successor" in done.pane and "Claude Code v" not in done.pane and done.retired,
+      f"pane={done.pane!r} " + detail(done))
 
-for future, name, reason in ((silent, "records nothing", "was not taken within 30s"),
-                             (other, "records a different prompt", "was not taken within 30s"),
-                             (dies, "exits at boot", "claude exited with status 3")):
+for future, name, reason in ((silent, "records nothing", f"was not taken within {READY_TIMEOUT}s"),
+                             (other, "records a different prompt", f"was not taken within {READY_TIMEOUT}s"),
+                             (dies, "exits at boot", "claude exited with status 3 before"),
+                             (killed, "is killed at boot", "claude exited on signal 15 before")):
     done = future.result()
     check(f"a successor that {name} is refused to the asking session, saying why",
           done.returncode == REFUSED_RC and reason in done.stderr and "NOT delivered" in done.stderr

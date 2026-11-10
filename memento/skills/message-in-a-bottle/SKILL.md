@@ -5,7 +5,7 @@ description: Records a message for whichever agent picks the work up next, and h
 
 # finalize-session
 
-The close-out of a finished unit of work: it records instructions for whichever agent picks the work up next and resets this session into that agent. The launcher returns within seconds, and the reset lands a few seconds after that. A handoff hands off — there is no way to run this and keep working, so you know before you call it that your turn ends here. See *Turn-ending discipline* below.
+The close-out of a finished unit of work: it records instructions for whichever agent picks the work up next and resets this session into that agent. The launcher returns within seconds, and the reset lands a few seconds after that — except for a session no terminal owns, where the launcher returns once the new session has taken the message (up to 30s) and this session is retired the moment it returns. A handoff hands off — there is no way to run this and keep working, so you know before you call it that your turn ends here. See *Turn-ending discipline* below.
 
 ## This is mandatory — you run it, you do not decide it
 
@@ -43,7 +43,7 @@ So when a goal is in force, pass it: `--goal '<the exact condition>'` before you
 
 Running the launcher ends your turn. Say your one line to the user *before* you run it, not after. Once it has printed `handoff scheduled → …` or `handoff delivered → …`: no closing text, no parting summary, no "scheduled!" confirmation, no further tool calls, no end-of-turn insights. That line is the last line your turn produces.
 
-The thought to catch is *"I'll run it now and tidy up while the reset lands."* The reset is typed into this pane a few seconds after the launcher returns; anything you are mid-way through when it lands is lost, and a tool call in flight can fuse with the reset keystrokes.
+The thought to catch is *"I'll run it now and tidy up while the reset lands."* The reset is typed into this pane a few seconds after the launcher returns, and a session no terminal owns is retired as soon as it returns; anything you are mid-way through when it lands is lost, and a tool call in flight can fuse with the reset keystrokes.
 
 ## Invocation
 

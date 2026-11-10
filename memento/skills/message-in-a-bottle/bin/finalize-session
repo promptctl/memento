@@ -42,8 +42,8 @@ RESET_REGISTER_POLL_SECONDS=0.5
 # can be lost, but the file is not.
 HANDOFF_DIR="${MEMENTO_HANDOFF_DIR:-$HOME/.claude/memento/handoffs}"
 # How long a relaunched claude has to take the message (_await_prompt). The wait ends as soon as it has,
-# and a timeout is a failure, never a guess that it is up.
-CLAUDE_READY_TIMEOUT_SECONDS=30
+# and a timeout is a failure, never a guess that it is up. Overridable so tests reach the timeout quickly.
+CLAUDE_READY_TIMEOUT_SECONDS="${MEMENTO_READY_TIMEOUT_SECONDS:-30}"
 CLAUDE_READY_POLL_SECONDS=0.5
 
 # The framing wrapped around the agent's message. The launcher joins PREFIX, the message, and SUFFIX into
@@ -299,10 +299,11 @@ _await_prompt() {
     # remain-on-exit keeps a dead claude's pane, so its exit is seen at once and its last words stay
     # readable.
     if [[ -n "${3:-}" ]]; then
-      # tmux sets the status for an exit and the signal for a kill, never both.
-      pane=$(tmux display-message -p -t "$3" '#{pane_dead} #{pane_dead_status} #{pane_dead_signal}' 2>&1) \
+      # tmux sets the status for an exit and the signal for a kill, never both. The fields are split
+      # on `:`, since whitespace splitting would merge the empty one away.
+      pane=$(tmux display-message -p -t "$3" '#{pane_dead}:#{pane_dead_status}:#{pane_dead_signal}' 2>&1) \
         || { WHY_NOT="tmux cannot read session $3: $pane"; return 1; }
-      read -r dead status signal <<<"$pane"
+      IFS=: read -r dead status signal <<<"$pane"
       [[ "$dead" != 1 ]] \
         || { WHY_NOT="claude exited${status:+ with status $status}${signal:+ on signal $signal} before taking it"; return 1; }
     fi
