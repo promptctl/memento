@@ -186,8 +186,7 @@ _ancestry() {
 # Sets CLAUDE_IDENT and FLAGS for the own claude, or refuses in the named transport's voice. A claude that is
 # not an interactive session (headless, a subcommand, a daemon host) is refused, since relaunching it would
 # sever its client or kill every session it hosts. Claude Code sets $CLAUDE_CODE_ENTRYPOINT to `cli` only
-# for an interactive session, and keeps a value it inherits, so the refusal reports what the launching
-# environment said.
+# for an interactive session: a `claude -p` started with `cli` inherited reports `sdk-cli` (2.1.299).
 #
 # FLAGS is the permission mode and effort the session's transcript records last, as the reader in
 # lib/transcript.py renders them. The relaunch keeps nothing else of the old session.
