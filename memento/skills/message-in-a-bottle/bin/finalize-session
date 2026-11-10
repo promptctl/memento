@@ -201,13 +201,13 @@ _relaunch_target() { # <transport name> <own claude pid>
 # mid-session carries over; the old process's argv is never read for them.
 #
 # The report is consumed: it is removed before anything is started, so no later run can act on it. It
-# lives in $TMPDIR, which Claude Code gives the hook and this launcher alike, so the OS clears a report a
-# mention of the launcher left behind without running it.
+# lives under $HOME, not $TMPDIR: Claude Code's sandbox gives a Bash call its own $TMPDIR, which the hook
+# never sees.
 _session_report() { # <transport name>
   local report mode effort
   [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
     || _refuse "$1: \$CLAUDE_CODE_SESSION_ID is unset, so this session's report cannot be found"
-  report="${TMPDIR:-/tmp}/memento-report.$CLAUDE_CODE_SESSION_ID"
+  report="$HOME/.claude/memento/reports/$CLAUDE_CODE_SESSION_ID"
   [[ -f "$report" ]] \
     || _refuse "$1: no report of this session's permission mode at $report; memento's PreToolUse hook writes it before a Bash call that runs finalize-session"
   { IFS= read -r mode || true; IFS= read -r effort || true; } < "$report"

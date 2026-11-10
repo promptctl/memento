@@ -348,8 +348,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
-    report_path = os.path.join(workdir, f"memento-report.{SESSION_ID}")
+    report_path = os.path.join(workdir, ".claude", "memento", "reports", SESSION_ID)
     if report is not None:
+        os.makedirs(os.path.dirname(report_path))
         with open(report_path, "w") as handle:
             handle.write(report)
     # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
@@ -372,7 +373,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # its session id) leaks into a case.
     env = {
         "PATH": ":".join(path),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": workdir,
         "TMPDIR": workdir,
         "FINALIZE_DRY_RUN": dry_run,
         "NEST_PUBLISH_PID": pidfile,
@@ -848,10 +849,10 @@ def identity_names(done, name):
                for line in done.stdout.splitlines())
 
 
-# The shape of a daemon-hosted session: the process is `.../claude/versions/<ver>
-# --session-id ...`, its parent is the same binary with `--bg-pty-host`, and above
-# that is pid 1. Matching by basename climbs past both and reaches nothing; the
-# naming assertion stops a walk that climbs into an ambient claude from passing.
+# The shape of a daemon-hosted session: the process runs `.../claude/versions/<ver>`,
+# so its executable is named by the version, not `claude`. A walk that knew only
+# `claude` would climb past it; the naming assertion stops a walk that climbs into an
+# ambient claude from passing.
 done = run(panes=None, as_claude=NEST_AS_VERSIONED_CLAUDE)
 check("a claude running as the versioned binary path is found, not walked past",
       picked(done) == DETACHED and f"claude_pid={done.root_pid} " in done.stdout
@@ -864,13 +865,13 @@ check("a claude running as the versioned binary path is found, not walked past",
 # nest runs its command as a child.
 NAMED_CLAUDE = subprocess.Popen(
     [NEST_BIN, "0", "sleep", "600"],
-    env={**os.environ, "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
+    env={"PATH": ":".join([FIXTURES, REAL_DIRS]), "NEST_CLAUDE_AT": "0", "NEST_AS_CLAUDE": NEST_AS_CLAUDE},
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-# The rename happens during nest's startup, after Popen returns. Without waiting for
-# it, the launcher would read argv0 as /bin/bash and refuse for a timing reason.
+# The exec into the claude-named executable happens during nest's startup, after Popen
+# returns. Without waiting for it, the walk would see bash and refuse for a timing reason.
 for _ in range(100):
-    if subprocess.run(["ps", "-o", "command=", "-p", str(NAMED_CLAUDE.pid)],
-                      capture_output=True, text=True).stdout.startswith(NEST_AS_CLAUDE + " "):
+    if subprocess.run(["ps", "-o", "ucomm=", "-p", str(NAMED_CLAUDE.pid)],
+                      capture_output=True, text=True).stdout.strip() == "claude":
         break
     time.sleep(0.05)
 try:
