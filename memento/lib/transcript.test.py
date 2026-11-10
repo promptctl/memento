@@ -170,20 +170,73 @@ root = config([prompt("plan"), answer("high")], [prompt("plan"), answer("high")]
 check("the session id is matched literally, not as a pattern",
       refusal(root, session="*").startswith("0 transcripts"), refusal(root, session="*"))
 
+# --- whether a relaunch took its handoff --------------------------------------
+
+NEEDLE = "This handoff verbatim on disk: /handoffs/20261110T031731Z-1.md"
+
+
+def handoff(content, **fields):
+    return {"type": "user", "message": {"role": "user", "content": content}, **fields}
+
+
+took = transcript.took_prompt
+root = config([handoff("=== Below is a message ===\nnext\n\n" + NEEDLE)])
+check("a prompt holding the handoff's path is taken", took(root, SESSION, NEEDLE))
+root = config([handoff([{"type": "text", "text": "before"}, {"type": "text", "text": NEEDLE}])])
+check("so is one whose content is text blocks", took(root, SESSION, NEEDLE))
+root = config([handoff(NEEDLE, isMeta=True)])
+check("a meta record holding the path is not the prompt", not took(root, SESSION, NEEDLE))
+root = config([handoff(NEEDLE, isSidechain=True)])
+check("nor is a subagent's record", not took(root, SESSION, NEEDLE))
+root = config([handoff("some other prompt"), answer("high")])
+check("a session that took another prompt has not taken this one", not took(root, SESSION, NEEDLE))
+root = config([tool_result()])
+check("a tool result is no prompt", not took(root, SESSION, NEEDLE))
+root = config()
+check("a session that has written nothing yet has not taken it", not took(root, SESSION, NEEDLE))
+root = config([handoff(NEEDLE)], [handoff(NEEDLE)])
+try:
+    took(root, SESSION, NEEDLE)
+    check("two transcripts for the id are a reason, not an answer", False, "no raise")
+except Unrecorded as error:
+    check("two transcripts for the id are a reason, not an answer",
+          str(error).startswith("2 transcripts"), error)
+
 # --- the script form, as the launcher runs it ------------------------------------
 
 SCRIPT = os.path.join(LIB, "transcript.py")
+
+
+def script(*args):
+    return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+
+
 root = config([prompt("bypassPermissions"), answer("high")])
-done = subprocess.run([sys.executable, SCRIPT, root, SESSION], capture_output=True, text=True)
-check("the script prints the relaunch flags on one line and exits 0",
+done = script("flags", root, SESSION)
+check("flags prints the relaunch flags on one line and exits 0",
       done.returncode == 0 and done.stdout == "--permission-mode bypassPermissions --effort high\n"
       and done.stderr == "", done)
-done = subprocess.run([sys.executable, SCRIPT, root, "absent"], capture_output=True, text=True)
-check("the script refuses on stderr with exit 2 and prints nothing on stdout",
+done = script("flags", root, "absent")
+check("flags refuses on stderr with exit 2 and prints nothing on stdout",
       done.returncode == 2 and done.stdout == "" and "0 transcripts" in done.stderr, done)
-done = subprocess.run([sys.executable, SCRIPT, root], capture_output=True, text=True)
-check("the script refuses the wrong number of arguments with exit 2",
-      done.returncode == 2 and "usage:" in done.stderr, done)
+root = config([handoff(NEEDLE)])
+done = script("prompted", root, SESSION, NEEDLE)
+check("prompted exits 0 when the prompt was taken", done.returncode == 0 and done.stderr == "", done)
+done = script("prompted", root, SESSION, "another handoff")
+check("and 1 when it was not, saying nothing", done.returncode == 1 and done.stderr == "", done)
+root = config([handoff(NEEDLE)], [handoff(NEEDLE)])
+done = script("prompted", root, SESSION, NEEDLE)
+check("and 2 with the reason when it cannot tell",
+      done.returncode == 2 and "2 transcripts" in done.stderr, done)
+# Python's own exit on an uncaught exception is 1, the status that means not yet.
+root = config([{"type": "user", "message": "a message that is a string"}])
+done = script("prompted", root, SESSION, NEEDLE)
+check("a reader that crashes on a record says so with 2 and the traceback, never 1",
+      done.returncode == 2 and "Traceback" in done.stderr, done)
+for args in ((root, SESSION), ("flags", root), ("prompted", root, SESSION), ("bogus", root, SESSION)):
+    done = script(*args)
+    check(f"the script refuses a malformed call with exit 2: {args[0] if args[0] != root else '(none)'}",
+          done.returncode == 2 and "usage:" in done.stderr, done)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

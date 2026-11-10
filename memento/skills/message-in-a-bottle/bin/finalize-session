@@ -1,28 +1,35 @@
 #!/usr/bin/env bash
-# finalize-session: schedules a delayed self-handoff into the current session. The launcher returns
-# immediately, and a detached worker delivers the handoff after a fixed delay.
+# finalize-session: hands the current session off to a fresh one holding the message.
 #
 # Transports, most reliable first:
-#   tmux      - clears the pane with /clear, verifies it by reading the pane back, then pastes the message.
-#   iTerm2    - kills the running claude and relaunches it with the message as its initial prompt, sent
-#               with `write text` to the exact session.
+#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, verifies it by
+#               reading the pane back, then pastes the message. The launcher returns at once.
+#   iTerm2    - schedules a worker that, after the delay, kills the running claude and relaunches it with
+#               the message as its initial prompt, sent with `write text` to the exact session. The
+#               launcher returns at once.
 #   detached  - for a session that no pane or iTerm2 session owns, such as one hosted by `claude daemon
-#               run`. Starts a new detached tmux window running claude with the message as its initial
-#               prompt, and retires the old process once the new one is ready.
+#               run`. A worker starts a new detached tmux window running claude with the message as its
+#               initial prompt, and the launcher returns only once that claude has taken the message, or
+#               refuses. The worker retires the old process once the launcher has returned.
 #
-# Every session can continue an autonomy chain. A launcher that cannot schedule the handoff refuses through
-# _refuse (reason on stderr, exit 2); exit 0 means the worker is scheduled, and the worker's own failures go
-# to its log.
+# A relaunched claude is started under a session id the launcher chooses, and it has taken the message
+# when that id's transcript records a prompt holding the handoff file's path (lib/transcript.py). Nothing
+# about readiness is read off a screen, whose rows a long message scrolls past.
+#
+# Every session can continue an autonomy chain. A launcher that cannot hand off refuses through _refuse
+# (reason on stderr, exit 2). Exit 0 means the worker is scheduled (tmux, iTerm2), whose later failures go
+# to its log, or that the successor took the message (detached).
 #
 # Modes:
 #   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
-#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude_pid> <claude_ident> <msgfile> <goalfile> <flags>
-#   detached worker:  finalize-session --detached-worker <session> <cwd> <msgfile> <goalfile> <flags> <old_claude_pid> <claude_bin> <old_claude_ident>
+#   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
+#   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> 3><verdict pipe>
 
 set -euo pipefail
 
-# HANDOFF_DELAY_SECONDS is the wait before firing. RESET_REGISTER_* bound the poll that waits for the
+# HANDOFF_DELAY_SECONDS is the wait before the tmux and iTerm2 workers act on the asking session's own
+# pane or claude, so the asking turn has ended first. RESET_REGISTER_* bound the poll that waits for the
 # reset to appear in the pane (tmux).
 HANDOFF_DELAY_SECONDS=10
 # The reset is typed while the agent is usually still mid-turn, and Claude runs queued input only when
@@ -34,10 +41,9 @@ RESET_REGISTER_POLL_SECONDS=0.5
 # The handoff file is the authoritative copy. Pasted and relaunched copies are derived from it, and they
 # can be lost, but the file is not.
 HANDOFF_DIR="${MEMENTO_HANDOFF_DIR:-$HOME/.claude/memento/handoffs}"
-# How long to wait for a relaunched claude to show its input box before queueing a /goal into it (iTerm2
-# only). The worker polls and proceeds as soon as the session is ready, and fails on timeout rather than
-# typing into a box that is not ready.
-CLAUDE_READY_TIMEOUT_SECONDS=30
+# How long a relaunched claude has to take the message (_await_prompt). The wait ends as soon as it has,
+# and a timeout is a failure, never a guess that it is up. Overridable so tests reach the timeout quickly.
+CLAUDE_READY_TIMEOUT_SECONDS="${MEMENTO_READY_TIMEOUT_SECONDS:-30}"
 CLAUDE_READY_POLL_SECONDS=0.5
 
 # The framing wrapped around the agent's message. The launcher joins PREFIX, the message, and SUFFIX into
@@ -201,7 +207,7 @@ _relaunch_target() { # <transport name>
     || _refuse "$1: \$CLAUDE_CODE_SESSION_ID is unset, so no transcript can say what this session runs in"
   # The reader names on stderr what the transcript lacks; the refusal follows it. -I keeps the user's
   # PYTHONPATH and site-packages out of the read, since the reader needs only the standard library.
-  FLAGS=$(python3 -I "$SELFDIR/../../../lib/transcript.py" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$CLAUDE_CODE_SESSION_ID") \
+  FLAGS=$(python3 -I "$READER" flags "$CONFIG_DIR" "$CLAUDE_CODE_SESSION_ID") \
     || _refuse "$1: cannot read the permission mode to relaunch with from session $CLAUDE_CODE_SESSION_ID's transcript"
   CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
     || _refuse "$1: cannot read the identity of claude process $CLAUDE_PID"
@@ -227,7 +233,7 @@ _process_identity() {
 #
 # The reading is left in IDENT_NOW, so the caller reports the value its check used.
 _still_captured_process() { # <pid> <identity captured at launch>
-  IDENT_NOW=$(_process_identity "$1") || IDENT_NOW=""
+  IDENT_NOW=$(_process_identity "$1") || { IDENT_NOW=""; return 1; }
   [[ "$IDENT_NOW" == "$2" ]]
 }
 
@@ -251,34 +257,60 @@ _retire() { # <pid> <identity captured at launch>
   fi
 }
 
-# The command line every relaunch runs: claude, the recorded and requested flags, and the handoff read from its file. Each
-# piece is shell-quoted, so a path containing a quote cannot break the line.
+# The command line every relaunch runs: _relaunch_line <claude> <successor id>. It states this session's
+# config dir, set or unset, since a tmux server or a login shell may carry another one, and the successor's
+# transcript must be where _await_prompt reads. Setting it to ~/.claude when it is unset is not the same:
+# it moves where claude reads .claude.json. Then claude under the chosen session id, the recorded and
+# requested flags, and the handoff read from its file. Each piece is shell-quoted, so a path containing a
+# quote cannot break the line. The variable is set in a subshell rather than through env(1), which would
+# look claude up on PATH and skip an alias or function the iTerm2 session's shell defines for it.
 _relaunch_line() {
-  local bin msg
+  local env bin msg
+  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    printf -v env 'export CLAUDE_CONFIG_DIR=%q' "$CLAUDE_CONFIG_DIR"
+  else
+    env='unset CLAUDE_CONFIG_DIR'
+  fi
   printf -v bin '%q' "$1"
   printf -v msg '%q' "$MSGFILE"
-  printf '%s' "$bin ${FLAGS:+$FLAGS }\"\$(cat $msg)\""
+  printf '%s' "($env; $bin --session-id $2 ${FLAGS:+$FLAGS }\"\$(cat $msg)\")"
 }
 
-# Prints the visible contents of the iTerm2 session with the given UUID, the analog of tmux's
-# `capture-pane -p`. The readiness probe polls it for the relaunched claude's banner before a /goal is
-# queued. The old claude's alternate screen is torn down on exit, so a banner match can only come from the relaunch.
-_iterm_session_contents() {
-  local uuid="$1"
-  # osascript errors go to the worker log. A healthy read writes nothing to stderr.
-  osascript <<OSA 2>>/dev/stderr
-tell application "iTerm2"
-  repeat with w in windows
-    repeat with t in tabs of w
-      repeat with s in sessions of t
-        if (unique id of s) is "${uuid}" then
-          return contents of s
-        end if
-      end repeat
-    end repeat
-  end repeat
-end tell
-OSA
+# A fresh session id for a successor, lowercase as claude writes its own. uuidgen prints uppercase and is
+# not on every Linux; python3 is already required by the reader.
+_successor_id() {
+  python3 -I -c 'import uuid; print(uuid.uuid4())'
+}
+
+# Waits until a relaunched claude has taken the message: _await_prompt <config dir> <session id> [<tmux
+# session>]. Returns 0 once the session's transcript records a prompt holding the handoff file's path,
+# which every handoff message ends with, so it is this message and not another. Returns 1 with WHY_NOT
+# set when the reader cannot tell, when the tmux session's claude has exited, or at the timeout.
+_await_prompt() {
+  local deadline=$(( $(date +%s) + CLAUDE_READY_TIMEOUT_SECONDS )) status pane dead signal
+  while :; do
+    status=0
+    WHY_NOT=$(python3 -I "$READER" prompted "$1" "$2" "$MSGFILE" 2>&1) || status=$?
+    case "$status" in
+      0) return 0 ;;
+      1) ;;
+      *) WHY_NOT="the transcript reader cannot tell whether it did: $WHY_NOT"; return 1 ;;
+    esac
+    # remain-on-exit keeps a dead claude's pane, so its exit is seen at once and its last words stay
+    # readable.
+    if [[ -n "${3:-}" ]]; then
+      # tmux sets the status for an exit and the signal for a kill, never both. The fields are split
+      # on `:`, since whitespace splitting would merge the empty one away.
+      pane=$(tmux display-message -p -t "$3" '#{pane_dead}:#{pane_dead_status}:#{pane_dead_signal}' 2>&1) \
+        || { WHY_NOT="tmux cannot read session $3: $pane"; return 1; }
+      IFS=: read -r dead status signal <<<"$pane"
+      [[ "$dead" != 1 ]] \
+        || { WHY_NOT="claude exited${status:+ with status $status}${signal:+ on signal $signal} before taking it"; return 1; }
+    fi
+    [[ $(date +%s) -lt $deadline ]] \
+      || { WHY_NOT="it was not taken within ${CLAUDE_READY_TIMEOUT_SECONDS}s"; return 1; }
+    sleep "$CLAUDE_READY_POLL_SECONDS"
+  done
 }
 
 # Refuses the run with a reason: _refuse <reason>. Exits 2, and names the handoff's path if one was recorded.
@@ -350,6 +382,24 @@ exit: 0 it did what you asked · 2 it could not — argv, setup, or transport
 USAGE
 }
 
+# Resolves own path for both ./script and PATH-lookup invocations, once for every mode: the launcher
+# re-invokes itself as a worker, and every mode reads the transcript reader beside it.
+if [[ "$0" == */* ]]; then
+  SELF_RAW="$0"
+else
+  SELF_RAW=$(command -v -- "$0") \
+    || _refuse "cannot resolve own path from \$0=$0"
+fi
+# Split into two assignments: in one assignment only the last command's status counts, so a failed `cd`
+# would go unnoticed and leave SELF malformed.
+# Resolved through symlinks, since the reader is found relative to the launcher's real directory.
+SELF_RAW=$(readlink -f -- "$SELF_RAW") \
+  || _refuse "cannot resolve own directory from \$0=$0"
+SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
+  || _refuse "cannot resolve own directory from \$0=$0"
+SELF="$SELFDIR/$(basename "$SELF_RAW")"
+READER="$SELFDIR/../../../lib/transcript.py"
+
 # Selects the mode once, from the first argument.
 case "${1:-}" in
   --worker)          MODE=tmux-worker; shift ;;
@@ -401,6 +451,9 @@ case "$MODE" in
 
     # The message defaults to /next when no arguments are given.
     AGENT_MESSAGE="${*:-/next}"
+    # [LAW:one-source-of-truth] Where this session's transcript is, and so where a successor started with
+    # this session's environment writes its own. The flags read and every readiness wait use this value.
+    CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
     # The message is passed between processes as a file, so no shell quoting is involved. The file is kept
     # after delivery, since it is the handoff itself.
@@ -441,22 +494,6 @@ case "$MODE" in
     [[ -n "$EFFORT" ]] && SETTING_COMMANDS+=("/effort $EFFORT")
 
     # A handoff always resets the session. The next session starts blank and holds only the message.
-
-    # Resolve own path for both ./script and PATH-lookup invocations.
-    if [[ "$0" == */* ]]; then
-      SELF_RAW="$0"
-    else
-      SELF_RAW=$(command -v -- "$0") \
-        || _refuse "cannot resolve own path from \$0=$0"
-    fi
-    # Split into two assignments: in one assignment only the last command's status counts, so a failed `cd`
-    # would go unnoticed and leave SELF malformed.
-    # Resolved through symlinks, since the reader is found relative to the launcher's real directory.
-    SELF_RAW=$(readlink -f -- "$SELF_RAW") \
-      || _refuse "cannot resolve own directory from \$0=$0"
-    SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
-      || _refuse "cannot resolve own directory from \$0=$0"
-    SELF="$SELFDIR/$(basename "$SELF_RAW")"
 
     # Transport detection runs once, here. Each worker receives the result as a typed value and does not
     # re-detect.
@@ -499,16 +536,19 @@ case "$MODE" in
       UUID="${ITERM_SESSION_ID#*:}"
       _relaunch_target "iTerm2 transport"
       _requested_flags
+      SUCCESSOR_ID=$(_successor_id) \
+        || _refuse "iTerm2 transport: cannot mint a session id for the relaunch"
+      RELAUNCH=$(_relaunch_line claude "$SUCCESSOR_ID")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=iTerm2 uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
-        echo "[dry-run] would relaunch: $(_relaunch_line claude)"
+        echo "[dry-run] would relaunch: $RELAUNCH"
         echo "[dry-run] old-process identity: $CLAUDE_IDENT"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$CLAUDE_IDENT" "$MSGFILE" "$GOALFILE" "$FLAGS" \
-        </dev/null >>"$LOGFILE" 2>&1 &
+      nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$CLAUDE_IDENT" "$MSGFILE" "$GOALFILE" "$RELAUNCH" \
+        "$CONFIG_DIR" "$SUCCESSOR_ID" </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → iTerm2 (kill+relaunch, fresh) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
@@ -525,18 +565,43 @@ case "$MODE" in
       CWD=$(pwd -P)
       # tmux session names cannot contain ':' or '.'. The pid and epoch seconds are digits only.
       SESSION="finalize-$$-$(date +%s)"
+      SUCCESSOR_ID=$(_successor_id) \
+        || _refuse "detached transport: cannot mint a session id for the relaunch"
+      RELAUNCH=$(_relaunch_line "$CLAUDE_BIN" "$SUCCESSOR_ID")
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=detached session=$SESSION cwd=$CWD claude_pid=$CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
-        echo "[dry-run] would launch: $(_relaunch_line "$CLAUDE_BIN") in a fresh detached tmux window"
+        echo "[dry-run] would launch: $RELAUNCH in a fresh detached tmux window"
         echo "[dry-run] old-process identity: $CLAUDE_IDENT"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$MSGFILE" "$GOALFILE" "$FLAGS" "$CLAUDE_PID" "$CLAUDE_BIN" "$CLAUDE_IDENT" \
-        </dev/null >>"$LOGFILE" 2>&1 &
+      LAUNCHER_IDENT=$(_process_identity $$) \
+        || _refuse "detached transport: cannot read this launcher's own identity, which the worker waits on"
+      # The worker reads the goal and writes to the log after this launcher exits, so they are its own.
       trap - EXIT
-      echo "handoff scheduled → fresh detached tmux window '$SESSION' in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
+      # [LAW:single-enforcer] The worker is the successor's one owner, from its spawn to the old process's
+      # retirement; this launcher only reports the verdict it sends. Claude Code kills a stopped Bash
+      # call's process tree by parentage, and nohup guards only against hangup, so the worker is
+      # double-forked: the substitution's subshell exits at once and leaves it outside the tree, alive
+      # whatever happens to this call.
+      # [LAW:no-ambient-temporal-coupling] The verdict comes over the substitution's pipe, on the worker's
+      # fd 3, and the substitution ends at that pipe's EOF, which comes when the worker closes it after its
+      # verdict or dies without one. No clock and no liveness poll here: the worker's deadline is the one
+      # bound on the wait.
+      VERDICT=$(nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$RELAUNCH" "$CONFIG_DIR" "$SUCCESSOR_ID" \
+        "$MSGFILE" "$GOALFILE" "$CLAUDE_PID" "$CLAUDE_IDENT" "$$" "$LAUNCHER_IDENT" \
+        3>&1 </dev/null >>"$LOGFILE" 2>&1 &)
+      # An empty verdict is a worker that died without one, which the case below names.
+      { IFS= read -r OUTCOME || OUTCOME=""; DETAIL=$(cat); } <<<"$VERDICT"
+      case "${OUTCOME:-}" in
+        taken)
+          echo "handoff delivered → session $SUCCESSOR_ID in detached tmux window '$SESSION'; this session is retired once this call returns (log: $LOGFILE)" ;;
+        refused)
+          _refuse "detached transport: $DETAIL" ;;
+        *)
+          _refuse "detached transport: the worker exited without a verdict, so whether the successor in detached tmux window '$SESSION' took the message is unknown; its log is $LOGFILE" ;;
+      esac
 
     else
       # Nothing can deliver the handoff: no owned pane, no reachable iTerm2 session, and no tmux binary. The
@@ -625,8 +690,8 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   iterm-worker)
-    if [[ $# -lt 5 ]]; then
-      echo "internal error: iterm-worker expects at least 5 args" >&2
+    if [[ $# -ne 8 ]]; then
+      echo "internal error: iterm-worker expects exactly 8 args" >&2
       exit 2
     fi
     UUID="$1"
@@ -634,12 +699,14 @@ Nothing on this machine to deliver the close-out into."
     CLAUDE_IDENT="$3"
     MSGFILE="$4"
     GOALFILE="$5"
-    FLAGS="${6:-}"
+    RELAUNCH="$6"
+    CONFIG_DIR="$7"
+    SUCCESSOR_ID="$8"
 
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
-    log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID flags=[$FLAGS]"
+    log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID relaunch=[$RELAUNCH]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
     # Stop the running claude so the shell regains the session.
@@ -650,7 +717,6 @@ Nothing on this machine to deliver the close-out into."
 
     # The shell reads the message from MSGFILE, so no message text enters argv or AppleScript. Only \ and "
     # are escaped for AppleScript.
-    RELAUNCH=$(_relaunch_line claude)
     AS=${RELAUNCH//\\/\\\\}
     AS=${AS//\"/\\\"}
 
@@ -672,28 +738,12 @@ OSA
       log "relaunch command sent to iTerm2 session $UUID"
       # Re-queues the carried goal, which the relaunch wiped. It is sent only when the goal file is non-empty.
       if [[ -s "$GOALFILE" ]]; then
-        # Polls until the relaunched claude shows its banner, then proceeds. On timeout the goal is logged as
-        # not delivered, never as re-established. 'Claude Code v[0-9]' is the fresh-boot banner.
-        log "waiting for relaunched claude to become ready (up to ${CLAUDE_READY_TIMEOUT_SECONDS}s)"
-        READY=""
-        DEADLINE=$(( $(date +%s) + CLAUDE_READY_TIMEOUT_SECONDS ))
-        while [[ $(date +%s) -le $DEADLINE ]]; do
-          # Captures the output first and greps a herestring. Piping osascript into `grep -q` can SIGPIPE
-          # osascript, and under pipefail that reports a match as a failure.
-          SNAP=$(_iterm_session_contents "$UUID")
-          if grep -qE 'Claude Code v[0-9]' <<<"$SNAP"; then
-            READY=1
-            break
-          fi
-          sleep "$CLAUDE_READY_POLL_SECONDS"
-        done
-
-        if [[ -z "$READY" ]]; then
-          log "ERROR: relaunched claude in session $UUID did not become ready within ${CLAUDE_READY_TIMEOUT_SECONDS}s; carried goal NOT delivered. Deliver it manually once the session is up: /goal $(cat "$GOALFILE")"
+        log "waiting for relaunched claude $SUCCESSOR_ID to take the message (up to ${CLAUDE_READY_TIMEOUT_SECONDS}s)"
+        if ! _await_prompt "$CONFIG_DIR" "$SUCCESSOR_ID"; then
+          log "ERROR: relaunched claude in session $UUID did not take the message: $WHY_NOT; carried goal NOT delivered. Deliver it manually once the session is up: /goal $(cat "$GOALFILE")"
         else
-          # Waits a second for the input box to settle, then queues the goal.
-          sleep 1
-          log "claude ready; re-establishing carried goal"
+          # The message is taken and its turn is running; the goal is queued behind it.
+          log "claude took the message; re-establishing carried goal"
           GOALCMD="/goal $(cat "$GOALFILE")"
           GAS=${GOALCMD//\\/\\\\}
           GAS=${GAS//\"/\\\"}
@@ -727,69 +777,85 @@ OSA2
     ;;
 
   detached-worker)
-    if [[ $# -ne 8 ]]; then
-      echo "internal error: detached-worker expects exactly 8 args" >&2
+    if [[ $# -ne 11 ]]; then
+      echo "internal error: detached-worker expects exactly 11 args" >&2
       exit 2
     fi
+    { true >&3; } 2>/dev/null \
+      || { echo "internal error: detached-worker expects the launcher's verdict pipe on fd 3" >&2; exit 2; }
     SESSION="$1"
     CWD="$2"
-    MSGFILE="$3"
-    GOALFILE="$4"
-    FLAGS="$5"
-    OLD_CLAUDE_PID="$6"
-    CLAUDE_BIN="$7"
-    OLD_CLAUDE_IDENT="$8"
+    RELAUNCH="$3"
+    CONFIG_DIR="$4"
+    SUCCESSOR_ID="$5"
+    MSGFILE="$6"
+    GOALFILE="$7"
+    OLD_CLAUDE_PID="$8"
+    OLD_CLAUDE_IDENT="$9"
+    LAUNCHER_PID="${10}"
+    LAUNCHER_IDENT="${11}"
 
     GOALBUF="finalize-goal-$$"
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+    # The verdict the launcher reports: an outcome line, `taken` or `refused`, then the reason. Closing
+    # fd 3 is the launcher's EOF. A launcher that is gone fails the write with EPIPE, ignored here so it
+    # cannot kill the worker: the worker still decides, and the log says no one heard.
+    _verdict() {
+      ( trap '' PIPE; printf '%s\n' "$@" >&3 ) 2>/dev/null \
+        || log "the launcher is gone, so no one heard the verdict: $1"
+      exec 3>&-
+    }
 
-    log "waking; detached session=$SESSION cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
-    sleep "$HANDOFF_DELAY_SECONDS"
+    log "waking; detached session=$SESSION successor=$SUCCESSOR_ID cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID relaunch=[$RELAUNCH]"
 
-    # The new window's shell reads the message from the file, so the message never reaches argv or tmux quoting.
-    # Only the paths and flags are escaped, by _relaunch_line. CLAUDE_BIN is the absolute path resolved by the launcher.
-    RELAUNCH=$(_relaunch_line "$CLAUDE_BIN")
-    if ! tmux new-session -d -s "$SESSION" -c "$CWD" "$RELAUNCH" 2>>/dev/stderr; then
+    # The new window's shell reads the message from the file, so the message never reaches argv or tmux
+    # quoting. remain-on-exit is set in the same tmux command, so a claude that exits at boot leaves its
+    # pane, and the reason, readable.
+    # 3>&- keeps the launcher's pipe out of the tmux server this may start, which would hold it open.
+    if ! tmux new-session -d -s "$SESSION" -c "$CWD" "$RELAUNCH" \; set-option -t "$SESSION" remain-on-exit on 2>>/dev/stderr 3>&-; then
       log "ERROR: could not create detached tmux session $SESSION; nothing delivered"
+      _verdict refused "could not create detached tmux session $SESSION, so nothing was started; this session is still the only agent."
       exit 1
     fi
-    log "detached session $SESSION created; waiting for claude to become ready"
+    log "detached session $SESSION created; waiting for claude to take the message"
 
-    # Polls for the fresh boot's banner, as the iTerm2 worker does, so the goal is never queued before the input box is up.
-    READY=""
-    DEADLINE=$(( $(date +%s) + CLAUDE_READY_TIMEOUT_SECONDS ))
-    while [[ $(date +%s) -le $DEADLINE ]]; do
-      if tmux has-session -t "$SESSION" 2>/dev/null \
-         && tmux capture-pane -t "$SESSION" -p 2>/dev/null | grep -qE 'Claude Code v[0-9]'; then
-        READY=1
-        break
-      fi
-      sleep "$CLAUDE_READY_POLL_SECONDS"
-    done
-
-    if [[ -z "$READY" ]]; then
-      log "ERROR: detached session $SESSION did not become ready within ${CLAUDE_READY_TIMEOUT_SECONDS}s"
+    if ! _await_prompt "$CONFIG_DIR" "$SUCCESSOR_ID" "$SESSION"; then
+      log "ERROR: $WHY_NOT"
       if [[ -s "$GOALFILE" ]]; then
         log "carried goal NOT delivered: /goal $(cat "$GOALFILE")"
       fi
-      # A timeout does not mean nothing started: the message is already in the new session's argv, and a late
-      # boot would leave two live agents. So the new session is torn down, and the old process is left running.
-      # The `|| true` covers a session that is already gone, which is the state this line is meant to reach.
+      # The pane is read before the teardown destroys it. Its trailing blank rows are dropped.
+      SCREEN=$(tmux capture-pane -p -t "$SESSION" 2>&1) || SCREEN="(the pane could not be read: $SCREEN)"
+      SCREEN=$(awk 'NF { last = NR } { row[NR] = $0 } END { for (i = 1; i <= last; i++) print row[i] }' <<<"$SCREEN")
+      # A failed wait does not mean nothing started: the message is in the new session's argv, and a late
+      # boot would leave two live agents. So the new session is torn down before the verdict is written,
+      # and the old process is left running. The `|| true` covers a session that is already gone, which is
+      # the state this line is meant to reach.
       tmux kill-session -t "$SESSION" 2>/dev/null || true
       log "detached session $SESSION torn down; the old process remains the only live agent"
+      _verdict refused "the successor in detached tmux window '$SESSION' did not take the handoff: $WHY_NOT. Its window is torn down, and this session is still the only agent. Its last screen:" "$SCREEN"
       exit 1
     fi
 
-    log "claude ready in $SESSION"
+    log "claude took the message in $SESSION (session $SUCCESSOR_ID)"
+    _verdict taken
 
-    # The successor is up and has the message, so the old process is retired now, TERM first and KILL if it
-    # lingers. Retirement runs before the optional goal delivery, so a failure there cannot leave the old
-    # process running.
+    # [LAW:no-ambient-temporal-coupling] The old process is retired once the launcher, which runs inside
+    # its Bash call, has returned: retiring while the call runs would have claude tear down that call.
+    # Waiting on the launcher, not a delay, keeps the overlap to the old session's next model call.
+    while _still_captured_process "$LAUNCHER_PID" "$LAUNCHER_IDENT"; do
+      sleep 0.2
+    done
+    # Retirement runs before the optional steps, so a failure there cannot leave the old process running.
     _retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"
 
+    # A successor that later exits normally leaves no dead window behind. Losing this costs a dead window,
+    # not a handoff, so it is logged, not fatal.
+    tmux set-option -t "$SESSION" remain-on-exit off 2>>/dev/stderr \
+      || log "WARNING: could not unset remain-on-exit on $SESSION; its window will linger after claude exits"
+
     if [[ -s "$GOALFILE" ]]; then
-      sleep 1
       log "re-establishing carried goal"
       _clear_box "$SESSION"
       { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" -

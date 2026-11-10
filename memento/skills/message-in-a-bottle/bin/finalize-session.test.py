@@ -18,10 +18,15 @@ Run: python3 finalize-session.test.py
 import concurrent.futures
 import json
 import os
+import shlex
+import ast
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -70,26 +75,81 @@ case "${1:-}" in
       printf '%s\n' "$line"
     done <<< "$FIXTURE_PANES"
     ;;
-  new-session|has-session|capture-pane|load-buffer|paste-buffer|send-keys|kill-session)
-    # The detached WORKER's half of the fixture. It needs almost no state: the
-    # worker only ever asks whether the new session is up and whether its banner
-    # is drawn, so a session that is always up plus one value for what its pane
-    # shows is the whole model.
-    # $FIXTURE_TMUX_FAIL names one subcommand to fail instead, which is how a
-    # goal delivery that dies mid-way - or a session that cannot be created at all
-    # - is staged. $FIXTURE_TMUX_PANE_TEXT is what capture-pane shows: a session
-    # that never finishes booting is that same always-up session with a different
-    # value in this one field, not a second mode.
-    # Every subcommand appends its whole argv to $FIXTURE_TMUX_LOG, which is how a
-    # case can see that a teardown the worker owes actually happened - a log line
+  new-session|display-message|capture-pane|set-option|load-buffer|paste-buffer|send-keys|kill-session)
+    # The detached WORKER's half of the fixture: one session, its state in
+    # $FIXTURE_TMUX_STATE. new-session really runs the command line it is given,
+    # through sh as tmux's default-shell does, so the relaunch line the worker built
+    # (its env prefix, its quoting, its `$(cat msg)`) is what runs. The pane is that
+    # command's output; the pane is dead once the command has exited, and its exit
+    # status is kept, as remain-on-exit keeps it.
+    # $FIXTURE_TMUX_SERVER_CONFIG_DIR stands for a tmux server's own environment: the
+    # command starts with CLAUDE_CONFIG_DIR set to it, or unset when it is empty, and
+    # only the relaunch line's own prefix can undo that.
+    # $FIXTURE_TMUX_FAIL names one subcommand to fail instead, which is how a goal
+    # delivery that dies mid-way, or a session that cannot be created at all, is
+    # staged. Every subcommand appends its whole argv to $FIXTURE_TMUX_LOG, which is
+    # how a case can see that a teardown the worker owes actually happened: a log line
     # from the worker only says it meant to.
+    # The tmux WORKER resets a pane that already exists and runs nothing in it, so its
+    # cases state what that pane shows: $FIXTURE_TMUX_PANE_TEXT, when set, is what
+    # capture-pane prints.
     sub="$1"
     if [ "${FIXTURE_TMUX_FAIL:-}" = "$sub" ]; then
       echo "fixture tmux: failing '$sub' on request" >&2
       exit 1
     fi
     printf '%s\n' "$*" >> "${FIXTURE_TMUX_LOG:-/dev/null}"
-    [ "$sub" = capture-pane ] && printf '%s\n' "${FIXTURE_TMUX_PANE_TEXT:-Claude Code v1.2.3}"
+    state="${FIXTURE_TMUX_STATE:-}"
+    case "$sub" in
+      new-session)
+        cwd="" cmd=""
+        shift
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -c) cwd="$2"; shift 2 ;;
+            -s|-t) shift 2 ;;
+            -d) shift ;;
+            \;) break ;;
+            *) cmd="$1"; shift ;;
+          esac
+        done
+        mkdir -p "$state"
+        if [ -n "${FIXTURE_TMUX_SERVER_CONFIG_DIR+set}" ]; then
+          if [ -n "$FIXTURE_TMUX_SERVER_CONFIG_DIR" ]; then
+            export CLAUDE_CONFIG_DIR="$FIXTURE_TMUX_SERVER_CONFIG_DIR"
+          else
+            unset CLAUDE_CONFIG_DIR
+          fi
+        fi
+        (cd "$cwd" && exec /bin/sh -c '/bin/sh -c "$1"; echo $? > "$2"' sh "$cmd" "$state/status") \
+          </dev/null >"$state/pane" 2>&1 &
+        echo $! > "$state/pid" ;;
+      display-message)
+        # Expands the format as tmux does: a shell's status above 128 is a death by signal
+        # 128 less, which tmux reports as the signal with no status.
+        fmt="${!#}" dead=0 code="" sig=""
+        if [ -e "$state/status" ]; then
+          dead=1 code=$(cat "$state/status")
+          if [ "$code" -gt 128 ]; then sig=$((code - 128)) code=""; fi
+        fi
+        line="${fmt//\#\{pane_dead\}/$dead}"
+        line="${line//\#\{pane_dead_status\}/$code}"
+        line="${line//\#\{pane_dead_signal\}/$sig}"
+        case "$line" in
+          *'#{'*) echo "fixture tmux: cannot expand '$fmt'" >&2; exit 2 ;;
+        esac
+        printf '%s\n' "$line" ;;
+      capture-pane)
+        if [ -n "${FIXTURE_TMUX_PANE_TEXT+set}" ]; then
+          printf '%s\n' "$FIXTURE_TMUX_PANE_TEXT"
+        else
+          cat "$state/pane"
+        fi ;;
+      kill-session)
+        pid=$(cat "$state/pid" 2>/dev/null) || exit 1
+        pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null
+        rm -f "$state/pid" ;;
+    esac
     exit 0
     ;;
   *) echo "fixture tmux: unexpected subcommand ${1:-}" >&2; exit 2 ;;
@@ -136,7 +196,12 @@ if [ "$depth" -gt 0 ]; then
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
-  exit $?
+  status=$?
+  # $NEST_LINGER keeps the planted claude alive after the launcher returns, as a claude
+  # outlives its tool call, so a worker has a live old process to retire.
+  [ -n "${NEST_LINGER:-}" ] && [ "${CLAUDE_PID:-}" = "$$" ] \
+    && sleep "$NEST_LINGER" </dev/null >/dev/null 2>&1
+  exit $status
 fi
 # $NEST_SLEEP holds the bottom of the chain still long enough that ps reports a
 # non-zero elapsed time for it. Without that the whole chain is born inside one
@@ -207,6 +272,44 @@ def install(directory, name, body):
     return path
 
 
+SUCCESSOR = r"""#!/bin/bash
+# The successor a relaunch starts: takes --session-id and the prompt (its last
+# argument), and does what $FIXTURE_SUCCESSOR says, which is every way a successor
+# can answer:
+#   records  writes the prompt as a user record into its own transcript under the
+#            config dir its environment says, as claude does when it takes one
+#   late     the same, after FIXTURE_SUCCESSOR_DELAY seconds
+#   other    records a prompt that is not the one it was given
+#   silent   records nothing
+#   dies     prints why on its terminal and exits 3 at boot
+#   killed   is killed by SIGTERM at boot
+# It then holds its pid, as a running claude does, until it is killed.
+set -uo pipefail
+id="" prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id) id="$2"; shift 2 ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+record() {
+  mkdir -p "$config/projects/-fixture"
+  /usr/bin/python3 -I -c 'import json, sys; print(json.dumps({"type": "user", "message": {"role": "user", "content": sys.argv[1]}}))' \
+    "$1" >> "$config/projects/-fixture/$id.jsonl"
+}
+case "${FIXTURE_SUCCESSOR:-records}" in
+  records) record "$prompt" ;;
+  late) sleep "${FIXTURE_SUCCESSOR_DELAY:-3}"; record "$prompt" ;;
+  other) record "a prompt that is not this handoff" ;;
+  silent) ;;
+  dies) echo "error: unknown option '--bogus'"; exit 3 ;;
+  killed) kill -TERM $$ ;;
+esac
+echo "fixture successor $id is up"
+exec sleep 120
+"""
+
 FIXTURES = tempfile.mkdtemp(prefix="finalize-fixtures.")
 install(FIXTURES, "tmux", TMUX)
 install(FIXTURES, "claude", CLAUDE)
@@ -219,6 +322,10 @@ install(PS_DIR, "ps", PS)
 ITERM_BIN = os.path.join(FIXTURES, "iterm")
 os.mkdir(ITERM_BIN)
 install(ITERM_BIN, "osascript", "#!/bin/bash\necho 3.6.0\n")
+# The successor's claude, named claude so `command -v claude` in a launcher finds it.
+SUCCESSOR_DIR = os.path.join(FIXTURES, "successor")
+os.mkdir(SUCCESSOR_DIR)
+SUCCESSOR_BIN = install(SUCCESSOR_DIR, "claude", SUCCESSOR)
 
 
 def exe(name):
@@ -241,6 +348,8 @@ TMUX_SERVER_BIN, WRAPPED_TMUX_BIN = exe("tmux"), exe(".tmux-wrapped")
 NOT_CLAUDE_BIN, ZSH_BIN = exe("2.1"), exe("zsh")
 
 SESSION_ID = "6a1f9e2c-3b7d-4e8a-9c0f-5d2b1a7e3c94"
+# A session id as the launcher mints one for a successor: a lowercase UUID4.
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 
 
 def prompt(mode):
@@ -271,21 +380,21 @@ def write_transcripts(config_dir, transcripts):
         with open(os.path.join(project, SESSION_ID + ".jsonl"), "w") as handle:
             handle.writelines(json.dumps(record) + "\n" for record in records)
 
-# A `date` that removes a directory on its first call, then behaves normally.
+# A `readlink` that removes a directory on its first call, then behaves normally.
 # This makes the launcher's own directory disappear mid-run at a fixed point: the
-# launcher stamps the handoff filename with `date` before it resolves its own path,
-# so the removal lands between those two steps. It models a script whose directory
-# is unlinked under a running session.
-DATE_RMDIR = r"""#!/bin/bash
+# launcher resolves its own path through symlinks with `readlink -f` first, so the
+# removal lands just before the path it reads. It models a script whose directory is
+# unlinked under a running session.
+RMDIR_READLINK = r"""#!/bin/bash
 set -uo pipefail
 if [ -n "${FIXTURE_RM_DIR:-}" ] && [ -e "$FIXTURE_RM_DIR" ]; then
   rm -rf -- "$FIXTURE_RM_DIR"
 fi
-exec /bin/date "$@"
-"""
-DATE_RMDIR_DIR = os.path.join(FIXTURES, "datermdir")
-os.mkdir(DATE_RMDIR_DIR)
-install(DATE_RMDIR_DIR, "date", DATE_RMDIR)
+exec %s "$@"
+""" % shutil.which("readlink")
+RMDIR_READLINK_DIR = os.path.join(FIXTURES, "rmdirreadlink")
+os.mkdir(RMDIR_READLINK_DIR)
+install(RMDIR_READLINK_DIR, "readlink", RMDIR_READLINK)
 # A mktemp that refuses, so the launcher sees a tmpdir with no room in it. The
 # environment cannot produce this portably: macOS `mktemp -t` ignores $TMPDIR, so
 # only a refusing mktemp fails on every platform.
@@ -358,6 +467,70 @@ STRANGER = subprocess.Popen(["sleep", "600"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def descendants(root):
+    """Every live process below `root`, found by walking parent pids, which is how Claude Code finds
+    the tree of a Bash call it stops."""
+    rows = subprocess.run(["/bin/ps", "-eo", "pid=,ppid="], capture_output=True, text=True).stdout
+    children = {}
+    for row in rows.split("\n"):
+        if row.strip():
+            pid, ppid = row.split()
+            children.setdefault(int(ppid), []).append(int(pid))
+    found, frontier = [], [root]
+    while frontier:
+        below = children.get(frontier.pop(), [])
+        found += below
+        frontier += below
+    return found
+
+
+def wait_for(condition, seconds):
+    deadline = time.time() + seconds
+    while not condition() and time.time() < deadline:
+        time.sleep(0.1)
+    return condition()
+
+
+def run_killing_launcher_tree(argv, env, tmux_state):
+    """Run the chain, and once the successor exists, kill everything below the planted claude: the
+    launcher's Bash call, stopped mid-wait. The planted claude itself is the old session, and lives."""
+    chain = subprocess.Popen(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    wait_for(lambda: os.path.exists(os.path.join(tmux_state, "pid")), 30)
+    for pid in descendants(chain.pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    out, err = chain.communicate(timeout=120)
+    return subprocess.CompletedProcess(argv, chain.returncode, out, err)
+
+
+def settle_detached(done, workdir, tmux_state):
+    """After a real detached run: whether the planted claude was retired (it ends on the worker's
+    TERM, or KILL, instead of outliving its linger), the tmux calls, and the worker's log, read once
+    the worker has exited. The successor is then killed, so no case leaves one behind."""
+    done.retired = done.returncode in (-signal.SIGTERM, -signal.SIGKILL)
+
+    def worker_running():
+        rows = subprocess.run(["/bin/ps", "-eo", "args="], capture_output=True, text=True).stdout
+        return any("--detached-worker" in row and workdir in row for row in rows.split("\n"))
+
+    wait_for(lambda: not worker_running(), 45)
+    tmuxlog = os.path.join(workdir, "tmux.log")
+    done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+    pane = os.path.join(tmux_state, "pane")
+    done.pane = open(pane).read() if os.path.exists(pane) else ""
+    logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
+    done.worker_log = open(logged).read() if logged and os.path.exists(logged) else ""
+    try:
+        with open(os.path.join(tmux_state, "pid")) as handle:
+            successor = handle.read().strip()
+        subprocess.run(["pkill", "-KILL", "-P", successor], capture_output=True)
+        subprocess.run(["kill", "-KILL", successor], capture_output=True)
+    except FileNotFoundError:
+        pass
+
+
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
@@ -365,7 +538,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         self_dir_gone=False, via_link=False, claude_bin=CLAUDE_BIN, claude_pid=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
-        transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False):
+        transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
+        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -377,11 +551,24 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     makes it $CLAUDE_PID. `transcripts` are written under the case's own config
     directory, and `session_id` and `entrypoint` are the session's environment;
     None leaves either unset. `iterm` runs the session in a reachable iTerm2.
+
+    `successor` runs the detached transport for real (dry run off), with the fixture
+    successor answering as `successor` names (see SUCCESSOR) and the planted claude
+    outliving the launcher, as a claude outlives its tool call. `done.retired` says
+    whether the worker then retired it, `done.tmux_log` lists the tmux calls, and
+    `done.worker_log` is the worker's log when the launcher named it, and `done.pane` what
+    the successor's pane showed. The successor has READY_TIMEOUT seconds to take the message.
+    `server_config_dir` is the tmux server's own CLAUDE_CONFIG_DIR ("" for unset), and
+    `config_unset` leaves the session's unset, so its config is $HOME/.claude under a
+    HOME of the case's own. `kill_launcher_tree` kills the launcher and everything
+    below it once the successor exists, as Claude Code kills a stopped Bash call.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
-    config_dir = os.path.join(workdir, "config")
+    home = os.path.join(workdir, "home") if config_unset else os.environ.get("HOME", workdir)
+    config_dir = os.path.join(home, ".claude") if config_unset else os.path.join(workdir, "config")
     write_transcripts(config_dir, transcripts)
+    tmux_state = os.path.join(workdir, "tmux")
     # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
     # not include REAL_DIRS, since that is where a packaged tmux would be found.
     # The ps fixture sits first on every case's PATH; a case changes only the
@@ -398,15 +585,16 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         os.mkdir(selfdir)
         os.symlink(LAUNCHER, os.path.join(selfdir, "finalize-session"))
     if self_dir_gone:
-        path.insert(0, DATE_RMDIR_DIR)
+        path.insert(0, RMDIR_READLINK_DIR)
+    if successor is not None:
+        path.insert(0, SUCCESSOR_DIR)
     # Built from scratch, so nothing of the session running the suite (its $CLAUDE_PID,
     # its session id, its config directory) reaches the case.
     env = {
         "PATH": ":".join(path),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": home,
         "TMPDIR": workdir,
-        "FINALIZE_DRY_RUN": dry_run,
-        "CLAUDE_CONFIG_DIR": config_dir,
+        "FINALIZE_DRY_RUN": "" if successor is not None else dry_run,
         "NEST_PUBLISH_PID": pidfile,
         "FIXTURE_ROOT_PID": pidfile,
         "FIXTURE_RUNNER_PID": str(os.getpid()),
@@ -419,6 +607,14 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         "NEST_CLAUDE_BIN": claude_bin,
         "NEST_HOST_BIN": host_bin,
     }
+    if not config_unset:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    if successor is not None:
+        env.update(FIXTURE_SUCCESSOR=successor, FIXTURE_TMUX_STATE=tmux_state,
+                   FIXTURE_TMUX_LOG=os.path.join(workdir, "tmux.log"), NEST_LINGER="20",
+                   MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
+    if server_config_dir is not None:
+        env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
     if iterm:
         env["PATH"] = ITERM_BIN + ":" + env["PATH"]
         env["TERM_PROGRAM"] = "iTerm.app"
@@ -466,8 +662,13 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         if outer is not None:
             script = ("export CLAUDE_PID=$$; " if outer_is_own else "") + '"$@"; exit $?'
             argv = [outer, "-c", script, "outer"] + argv
-        done = subprocess.run(argv,
-                              text=True, capture_output=True, env=env, timeout=120)
+        if kill_launcher_tree:
+            done = run_killing_launcher_tree(argv, env, tmux_state)
+        else:
+            done = subprocess.run(argv,
+                                  text=True, capture_output=True, env=env, timeout=120)
+        if successor is not None:
+            settle_detached(done, workdir, tmux_state)
         # The chain's top pid, read before the workdir is removed. It is both the pane
         # fixtures' ROOTPID and the planted claude, so assertions can name the exact
         # process the launcher picked.
@@ -997,7 +1198,21 @@ done = run(panes=None, iterm=True)
 check("an iTerm2 relaunch starts in the recorded permission mode and effort",
       "[dry-run] transport=iTerm2 " in done.stdout
       and flags(done) == "--permission-mode bypassPermissions --effort high"
-      and "would relaunch: claude --permission-mode bypassPermissions --effort high " in done.stdout,
+      and re.search(rf"would relaunch: \(export CLAUDE_CONFIG_DIR=\S+; claude --session-id {UUID} "
+                    r"--permission-mode bypassPermissions --effort high ", done.stdout),
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+# The iTerm2 line is typed into the session's own shell, so a `claude` that shell defines as
+# an alias is the claude it runs.
+line = done.stdout.partition("would relaunch: ")[2].partition("\n")[0]
+aliased = subprocess.run(["bash", "-c", 'shopt -s expand_aliases; alias claude="echo ALIASED"\n' + line],
+                         capture_output=True, text=True)
+check("an iTerm2 relaunch runs the shell's own claude alias",
+      aliased.returncode == 0 and re.match(rf"ALIASED --session-id {UUID} ", aliased.stdout),
+      f"line={line!r} ran={aliased!r}")
+# A session with no CLAUDE_CONFIG_DIR relaunches with none, whatever the new window carries.
+done = run(panes=None, config_unset=True)
+check("a session with no config dir relaunches with it unset, not set to ~/.claude",
+      re.search(rf"would launch: \(unset CLAUDE_CONFIG_DIR; \S+ --session-id {UUID} ", done.stdout),
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 
 # Every way the session cannot say what to relaunch with is a refusal through _refuse,
@@ -1023,20 +1238,23 @@ for what, setup, reason in REFUSALS:
 # The relaunch line is parsed by a shell (tmux's default-shell, or the terminal's). An
 # unquoted `--model opus[1m]` is a glob there, which zsh aborts on when nothing matches,
 # and a quote in the handoff's path unbalances the line. The dry run prints the line the
-# worker runs; it is checked through zsh and through bash's failglob and must yield the
-# exact argv.
+# worker runs; it is run through zsh and through bash's failglob with claude swapped for
+# a printer of the config dir and argv, and must yield the exact argv.
 quoted_dir = tempfile.mkdtemp(prefix="o'neil [1m] ")
 done = run(panes=None, handoff_dir=quoted_dir, launcher_flags=("--model", "opus[1m]"))
 line = done.stdout.partition("would launch: ")[2].partition(" in a fresh detached")[0]
+bin_end = line.find(" --session-id")
+printing = line[:bin_end].rpartition("; ")[0] + '; printf "%s\\n" "$CLAUDE_CONFIG_DIR"' + line[bin_end:]
 shells = [["bash", "-O", "failglob", "-c"]] + ([["zsh", "-f", "-c"]] if shutil.which("zsh") else [])
 for shell in shells:
-    parsed = subprocess.run(shell + ['cat() { printf "%s\\n" "$@"; }; printf "%s\\n" ' + line],
+    parsed = subprocess.run(shell + ['cat() { printf "%s\\n" "$@"; }; ' + printing],
                             capture_output=True, text=True)
     argv = parsed.stdout.split("\n")
     check(f"the relaunch line reaches {shell[0]} as the exact argv, glob-shaped model and quoted path included",
-          picked(done) == DETACHED and parsed.returncode == 0
-          and argv[1:7] == ["--permission-mode", "bypassPermissions", "--effort", "high", "--model", "opus[1m]"]
-          and argv[7].startswith(quoted_dir + "/"),
+          picked(done) == DETACHED and parsed.returncode == 0 and bin_end > 0
+          and argv[0] != "" and argv[1] == "--session-id"
+          and argv[3:9] == ["--permission-mode", "bypassPermissions", "--effort", "high", "--model", "opus[1m]"]
+          and argv[9].startswith(quoted_dir + "/"),
           f"line={line!r} parsed={parsed!r} out={done.stdout!r}")
 shutil.rmtree(quoted_dir)
 
@@ -1200,12 +1418,93 @@ done = run(depth=2, panes=f"%42 {STRANGER.pid} 0", tmux_pane="%42")
 check("a live $TMUX_PANE the walk did not reach is never taken, even with no other pane",
       picked(done) == DETACHED, picked(done))
 
-# --- the detached worker: what it retires, and in what order ----------------
-# The launcher cases above run in dry-run, so the detached transport's promise (after
-# the handoff, exactly one live agent) is not covered there. These cases run the real
-# worker against the fixture tmux and a real victim process, and each is decided by
-# whether a process is alive or dead when it finishes.
+# --- the detached transport, run for real -------------------------------------
+# The launcher cases above run in dry run, so the detached transport's promise is not
+# covered there: the successor took the message or the asking session hears it did
+# not, and afterwards exactly one agent is live. These cases run the real launcher and
+# worker against the fixture tmux, which runs the relaunch line the launcher built,
+# and a fixture successor, and each is decided by what the launcher reported and
+# whether the old process is alive or dead at the end.
 
+# The ceiling credits a close-out by matching the launcher's success line in a tool
+# result. Read from the hook's source, since importing the hook runs it.
+CEILING = os.path.join(HERE, "..", "..", "..", "hooks", "scripts", "context-ceiling.py")
+RESET_MARKER = next(
+    re.compile(node.value.args[0].value) for node in ast.parse(open(CEILING).read()).body
+    if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "RESET_MARKER")
+
+
+# Long enough for the `late` successor's 3s, short enough that a refusal is quick.
+READY_TIMEOUT = 8
+
+
+def detail(done):
+    return (f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} "
+            f"tmux_log={done.tmux_log!r} worker_log={done.worker_log!r}")
+
+
+# Each case waits out a successor's answer and, when it is refused, the old process's
+# linger, so they run concurrently. Each owns its workdir, successor and old process.
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    taken = pool.submit(run, panes=None, successor="records")
+    silent = pool.submit(run, panes=None, successor="silent")
+    other = pool.submit(run, panes=None, successor="other")
+    dies = pool.submit(run, panes=None, successor="dies")
+    killed = pool.submit(run, panes=None, successor="killed")
+    # A tmux server started from another shell carries its own CLAUDE_CONFIG_DIR, or
+    # none; the relaunch line states this session's either way.
+    server_differs = pool.submit(run, panes=None, successor="records",
+                                 server_config_dir="/nonexistent/server-config")
+    unset_here = pool.submit(run, panes=None, successor="records", config_unset=True,
+                             server_config_dir="/nonexistent/server-config")
+    # Esc on an attached session, or a short Bash timeout, stops the launcher's call
+    # mid-wait. The worker, outside that call's tree, still decides.
+    stopped_then_taken = pool.submit(run, panes=None, successor="late", kill_launcher_tree=True)
+    stopped_never_taken = pool.submit(run, panes=None, successor="silent", kill_launcher_tree=True)
+
+done = taken.result()
+check("a successor that takes the message is reported delivered, naming its session id",
+      done.returncode != REFUSED_RC
+      and re.search(rf"handoff delivered → session {UUID} in detached tmux window 'finalize-", done.stdout),
+      detail(done))
+check("and the line is the one the ceiling credits as a close-out",
+      RESET_MARKER.search(done.stdout), f"{RESET_MARKER.pattern!r} vs {done.stdout!r}")
+check("and the worker retires the old process once the launcher has returned",
+      done.retired and "terminated" in done.worker_log, detail(done))
+check("the successor's screen never shows the boot banner, and it still counts as taken",
+      "fixture successor" in done.pane and "Claude Code v" not in done.pane and done.retired,
+      f"pane={done.pane!r} " + detail(done))
+
+for future, name, reason in ((silent, "records nothing", f"was not taken within {READY_TIMEOUT}s"),
+                             (other, "records a different prompt", f"was not taken within {READY_TIMEOUT}s"),
+                             (dies, "exits at boot", "claude exited with status 3 before"),
+                             (killed, "is killed at boot", "claude exited on signal 15 before")):
+    done = future.result()
+    check(f"a successor that {name} is refused to the asking session, saying why",
+          done.returncode == REFUSED_RC and reason in done.stderr and "NOT delivered" in done.stderr
+          and "handoff delivered" not in done.stdout, detail(done))
+    check(f"and it is torn down while the old process lives on ({name})",
+          "kill-session" in done.tmux_log and not done.retired, detail(done))
+done = silent.result()
+check("the refusal carries the successor's last screen", "fixture successor" in done.stderr, detail(done))
+done = dies.result()
+check("a successor that exits at boot is refused with its last words, by its exit rather than the timeout",
+      "unknown option '--bogus'" in done.stderr, detail(done))
+
+for future, name in ((server_differs, "set"), (unset_here, "unset")):
+    done = future.result()
+    check(f"a tmux server's own CLAUDE_CONFIG_DIR cannot move the successor's transcript ({name} here)",
+          "handoff delivered" in done.stdout and done.retired, detail(done))
+
+done = stopped_then_taken.result()
+check("a launcher stopped mid-wait still has its successor's fate decided: taken, the old process retires",
+      done.retired, detail(done))
+done = stopped_never_taken.result()
+check("and never taken, the successor is torn down and the old process lives on",
+      "kill-session" in done.tmux_log and not done.retired, detail(done))
+
+
+# --- the detached worker alone: what it retires, and in what order -------------
 
 # A victim that ignores SIGTERM, so retirement has to escalate to KILL. The default
 # `sleep 600` dies on the first signal and never reaches the KILL branch.
@@ -1216,22 +1515,26 @@ check("a live $TMUX_PANE the walk did not reach is never taken, even with no oth
 IGNORES_TERM = ["/bin/bash", "-c", 'trap "" TERM; while :; do sleep 1; done']
 
 
-def worker_case(identity, goal="", fail_on=None, pane_text=None, victim=("sleep", "600")):
+def identity_of(pid):
+    # `$(...)` strips trailing newlines and nothing else; matching that exactly
+    # matters, because the whole check is a string comparison against it.
+    return subprocess.run(["ps", "-o", "lstart=,ucomm=", "-p", str(pid)],
+                          text=True, capture_output=True).stdout.rstrip("\n")
+
+
+def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), successor="records",
+                hold_launcher=False):
     """Run one detached worker over a real process standing in for the old claude.
 
     Returns (retired, done): whether the victim was signalled, and the worker's
-    result, where `done.tmux_log` lists every tmux argv the worker issued. The
-    identity is read with the same `ps` fields the launcher captures; identity="match"
-    passes that reading, and identity="reused" swaps the command out, as happens when
-    the OS reissues the pid. `pane_text` sets what the new session's pane shows.
+    result, where `done.tmux_log` lists every tmux argv the worker issued and
+    `done.verdict` is what it sent the launcher on fd 3, read to EOF. identity="match" passes the victim's
+    real identity, and identity="reused" swaps the command out, as happens when the OS
+    reissues the pid. The launcher it waits on has already exited, unless
+    `hold_launcher`, when it lives until the case has seen the victim survive it.
     """
-    proc = subprocess.Popen(list(victim),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    read = subprocess.run(["ps", "-o", "lstart=,ucomm=", "-p", str(proc.pid)],
-                          text=True, capture_output=True)
-    # `$(...)` strips trailing newlines and nothing else; matching that exactly
-    # matters, because the whole check is a string comparison against it.
-    real = read.stdout.rstrip("\n")
+    proc = subprocess.Popen(list(victim), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    real = identity_of(proc.pid)
     if identity == "match":
         ident = real
     else:
@@ -1239,122 +1542,141 @@ def worker_case(identity, goal="", fail_on=None, pane_text=None, victim=("sleep"
         # A substitution that matches nothing would leave the real identity under the name
         # "reused", and the case would pass while testing the opposite.
         assert ident != real, f"reused-identity fixture altered nothing: {real!r}"
+    launcher = subprocess.Popen(["sleep", "600" if hold_launcher else "0"])
+    launcher_ident = identity_of(launcher.pid)
+    if not hold_launcher:
+        launcher.wait()
     workdir = tempfile.mkdtemp(prefix="finalize-worker.")
+    config = os.path.join(workdir, "config")
     msgfile = os.path.join(workdir, "msg")
     goalfile = os.path.join(workdir, "goal")
     with open(msgfile, "w") as handle:
-        handle.write("handoff")
+        handle.write(f"handoff\n\nThis handoff verbatim on disk: {msgfile}")
     with open(goalfile, "w") as handle:
         handle.write(goal)
+    successor_id = "0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f"
+    relaunch = (f"env CLAUDE_CONFIG_DIR={shlex.quote(config)} {shlex.quote(SUCCESSOR_BIN)} "
+                f'--session-id {successor_id} "$(cat {shlex.quote(msgfile)})"')
+    tmux_state = os.path.join(workdir, "tmux")
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
         "HOME": os.environ.get("HOME", workdir),
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
+        "FIXTURE_TMUX_STATE": tmux_state,
+        "FIXTURE_SUCCESSOR": successor,
     }
     if fail_on is not None:
         env["FIXTURE_TMUX_FAIL"] = fail_on
-    if pane_text is not None:
-        env["FIXTURE_TMUX_PANE_TEXT"] = pane_text
+    verdict_read, verdict_write = os.pipe()
     try:
-        done = subprocess.run(
-            [LAUNCHER, "--detached-worker", "fixture-session", workdir, msgfile,
-             goalfile, "", str(proc.pid), "/bin/true", ident],
-            text=True, capture_output=True, env=env, timeout=180)
+        # The pipe is moved onto fd 3, where the launcher's substitution puts it. Each move is
+        # its own exec: `exec cmd 3>&10 10>&-` leaves bash's saved copy of fd 10 open in cmd.
+        worker = subprocess.Popen(
+            ["/bin/bash", "-c", f'exec 3>&{verdict_write}; exec {verdict_write}>&-; exec "$@"', "bash",
+             LAUNCHER, "--detached-worker", "fixture-session", workdir, relaunch, config, successor_id,
+             msgfile, goalfile, str(proc.pid), ident, str(launcher.pid), launcher_ident],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, pass_fds=(verdict_write,))
+        os.close(verdict_write)
+        # The verdict is whatever came before EOF. A process still holding the pipe after the
+        # worker is done (a tmux server it started) would keep the launcher waiting, so a
+        # read that outlasts the worker by 5s fails the case.
+        verdict_box = {}
+        reader = threading.Thread(target=lambda: verdict_box.update(text=os.fdopen(verdict_read).read()), daemon=True)
+        reader.start()
+        survived_launcher = None
+        if hold_launcher:
+            reader.join(40)
+            time.sleep(1.5)
+            survived_launcher = proc.poll() is None
+            launcher.kill()
+            launcher.wait()
+        out, err = worker.communicate(timeout=180)
+        reader.join(5)
+        done = subprocess.CompletedProcess(worker.args, worker.returncode, out, err)
         try:
             proc.wait(timeout=5)
             retired = True
         except subprocess.TimeoutExpired:
             retired = False
         done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+        done.verdict = verdict_box.get("text", "(the pipe was still held open after the worker exited)")
+        done.survived_launcher = survived_launcher
         return retired, done
     finally:
         proc.kill()
         proc.wait()
+        launcher.kill()
+        launcher.wait()
+        try:
+            with open(os.path.join(tmux_state, "pid")) as handle:
+                successor_pid = handle.read().strip()
+            subprocess.run(["pkill", "-KILL", "-P", successor_pid], capture_output=True)
+            subprocess.run(["kill", "-KILL", successor_pid], capture_output=True)
+        except FileNotFoundError:
+            pass
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-# Each worker sleeps out the full handoff delay, so the cases run concurrently. Each
-# owns its victim process and workdir.
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     same_pid = pool.submit(worker_case, "match")
     reused_pid = pool.submit(worker_case, "reused")
     # The goal delivery is staged to fail at its first tmux call, which under the
     # worker's `set -euo pipefail` aborts the script on the spot.
-    goal_fails = pool.submit(worker_case, "match", goal="ship the thing",
-                             fail_on="load-buffer")
-    # The spawn that never happens and the spawn that never comes up are the worker's
-    # two "successor is not there" arms. Both leave the old process running.
+    goal_fails = pool.submit(worker_case, "match", goal="ship the thing", fail_on="load-buffer")
     spawn_fails = pool.submit(worker_case, "match", fail_on="new-session")
-    # A pane that shows something other than the boot banner for the whole readiness
-    # window, as in a slow or wedged boot. It waits out the full ready timeout on top of
-    # the handoff delay, so it is the longest case.
-    never_ready = pool.submit(worker_case, "match", goal="ship the thing",
-                              pane_text="waiting for the shell to start")
     # A victim that ignores TERM, which is the only way to reach the KILL escalation.
-    # Every other case here dies on the first signal.
     survives_term = pool.submit(worker_case, "match", victim=IGNORES_TERM)
+    launcher_held = pool.submit(worker_case, "match", hold_launcher=True)
+
+
+def worker_detail(done):
+    return f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} verdict={done.verdict!r}"
+
 
 retired, done = same_pid.result()
-check("the worker retires the old process it was given",
-      retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+check("the worker retires the old process it was given, and tells the launcher it was taken",
+      retired and done.verdict == "taken\n", worker_detail(done))
 
-# The window between capturing the pid and signalling it spans the handoff delay and
-# the readiness wait, which is ample time for the OS to reissue the pid. `kill -0`
-# cannot detect that, since it reports only that something is alive.
+# The window between capturing the pid and signalling it spans the successor's boot,
+# which is time enough for the OS to reissue the pid. `kill -0` cannot detect that,
+# since it reports only that something is alive.
 retired, done = reused_pid.result()
 check("a pid reissued to another process during the wait is not signalled",
-      not retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+      not retired, worker_detail(done))
 check("and the worker says why it left that pid alone",
-      "not the process captured at launch" in done.stdout, f"out={done.stdout!r}")
+      "not the process captured at launch" in done.stdout, worker_detail(done))
 
 # Ordering, not a guard, protects the single-live-agent guarantee: the goal delivery
 # below retirement is optional and fallible, and `set -e` aborts on its failure.
 # Retirement runs first, so the abort has nothing left to suppress.
 retired, done = goal_fails.result()
-check("a failed goal delivery cannot leave the old process alive",
-      retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+check("a failed goal delivery cannot leave the old process alive", retired, worker_detail(done))
 
 # A successor that cannot be spawned at all. The old process is the only agent, so it
-# must still run when the worker gives up, and the worker must report the failure
-# rather than exit 0.
+# must still run, and the launcher is told so.
 retired, done = spawn_fails.result()
 check("a session that cannot be created leaves the old process running",
-      not retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-check("and the failed spawn is reported as a failure, not a quiet no-op",
-      done.returncode == 1 and "could not create detached tmux session" in done.stdout,
-      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-# Nothing was created, so nothing is torn down. This keeps the teardown assertion below
-# honest: a worker that killed the session on every failure path would pass that one
-# while being wrong here.
+      not retired, worker_detail(done))
+check("and the failed spawn is a refused verdict, not a quiet no-op",
+      done.returncode == 1 and done.verdict.startswith("refused\ncould not create detached tmux session"),
+      worker_detail(done))
+# Nothing was created, so nothing is torn down.
 check("a spawn that never happened tears nothing down",
       "kill-session" not in done.tmux_log, f"tmux_log={done.tmux_log!r}")
 
-# A readiness timeout does not mean the successor got nothing: the handoff rides in the
-# `tmux new-session` argv, and the successor is usually still booting. If that boot
-# finishes after the deadline, two live agents would exist, so the worker tears the new
-# session down. Only the tmux log shows this, since the worker's own log line says the
-# same either way.
-retired, done = never_ready.result()
-check("a successor that never becomes ready is torn down, not left racing the old process",
-      "kill-session -t fixture-session" in done.tmux_log,
-      f"rc={done.returncode} out={done.stdout!r} tmux_log={done.tmux_log!r}")
-check("and the old process survives the timeout - a spawn that never came up kills nobody",
-      not retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-check("and the timeout is reported as a failure, with the undelivered goal named",
-      done.returncode == 1 and "did not become ready" in done.stdout
-      and "carried goal NOT delivered" in done.stdout,
-      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
-
-# Retirement escalates when TERM is refused. Every other victim dies on the first
-# signal, so without this case the KILL branch would never run.
 retired, done = survives_term.result()
 check("a process that refuses TERM is still retired, by escalation to KILL",
-      retired, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+      retired, worker_detail(done))
 check("and the escalation says so, rather than the pid quietly disappearing",
-      "survived TERM; sending KILL" in done.stdout,
-      f"rc={done.returncode} out={done.stdout!r}")
+      "survived TERM; sending KILL" in done.stdout, worker_detail(done))
+
+# The old process's claude would tear down the launcher's Bash call when it dies, so
+# the worker retires it only once the launcher has returned.
+retired, done = launcher_held.result()
+check("the worker does not retire the old process while the launcher is still running",
+      done.survived_launcher is True and retired, worker_detail(done))
 
 
 # ---------------------------------------------------------------------------
