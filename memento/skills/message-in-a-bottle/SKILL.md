@@ -5,7 +5,7 @@ description: Records a message for whichever agent picks the work up next, and h
 
 # finalize-session
 
-The close-out of a finished unit of work: it records instructions for whichever agent picks the work up next and resets this session into that agent. The launcher returns immediately; the reset lands a few seconds later. A handoff hands off — there is no way to run this and keep working, so you know before you call it that your turn ends here. See *Turn-ending discipline* below.
+The close-out of a finished unit of work: it records instructions for whichever agent picks the work up next and resets this session into that agent. The launcher returns within seconds, and the reset lands a few seconds after that. A handoff hands off — there is no way to run this and keep working, so you know before you call it that your turn ends here. See *Turn-ending discipline* below.
 
 ## This is mandatory — you run it, you do not decide it
 
@@ -41,7 +41,7 @@ So when a goal is in force, pass it: `--goal '<the exact condition>'` before you
 
 ## Turn-ending discipline — the call is the ending
 
-Running the launcher ends your turn. Say your one line to the user *before* you run it, not after. Once it has printed `handoff scheduled → …`: no closing text, no parting summary, no "scheduled!" confirmation, no further tool calls, no end-of-turn insights. That line is the last line your turn produces.
+Running the launcher ends your turn. Say your one line to the user *before* you run it, not after. Once it has printed `handoff scheduled → …` or `handoff delivered → …`: no closing text, no parting summary, no "scheduled!" confirmation, no further tool calls, no end-of-turn insights. That line is the last line your turn produces.
 
 The thought to catch is *"I'll run it now and tidy up while the reset lands."* The reset is typed into this pane a few seconds after the launcher returns; anything you are mid-way through when it lands is lost, and a tool call in flight can fuse with the reset keystrokes.
 
@@ -59,11 +59,11 @@ ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<
 
 The flags above are the whole set, and each one has two dashes. **A single-line argument whose first word is any other two-dash token is named on stderr and refused with exit 2, having recorded nothing** — that is what catches a typo like `--gaol` instead of shipping it to the next agent as the handoff text. To send such a message anyway, **put it after `--`.** A single-dash token is message text (`-h`, `- shipped the parser`): no flag here is one dash, so nothing is being near-missed. So is any argument carrying a newline, however it opens — no flag spans a line, and this close-out's handoff is routinely a multi-line recap.
 
-On success the launcher exits 0 and prints `handoff scheduled → <target> in Ns (log: <tempfile>)` — the log captures worker progress and any transport errors. The handoff is also on disk under `~/.claude/memento/handoffs` before any transport runs.
+On success the launcher exits 0 and prints `handoff scheduled → <target> in Ns (log: <tempfile>)`, or for the detached transport `handoff delivered → session <id> in detached tmux window '<name>'; … (log: <tempfile>)` — the log captures worker progress and any transport errors. The detached transport waits up to 30s for the new session to take the message before it answers, so don't give its Bash call a timeout under 60s: a shorter one moves the call to the background, and the close-out isn't credited. The handoff is also on disk under `~/.claude/memento/handoffs` before any transport runs.
 
 The transport is chosen by capability, most reliable first: **tmux** (send `/clear` into the pane, verified by reading it back, then paste the message) → **iTerm2** (kill the running claude and relaunch it fresh with the message as its initial prompt, delivered in the background with no focus steal) → **detached** (spawn a brand-new detached tmux window and launch claude in it fresh, with the message as its initial prompt — the transport for a session that owns neither a pane nor an iTerm2 session, most commonly a Claude Code background session hosted by `claude daemon run --bg-pty-host`). You do not choose the transport; the launcher detects it. Every transport starts the next session blank. The two relaunching transports start it in the permission mode and effort this session's transcript records last, then add a requested `--model` or `--effort`. To preview the decision without scheduling anything, prefix `FINALIZE_DRY_RUN=1`.
 
-Every session gets the same close-out capability — background and foreground alike, no subclass excluded. A session that owns no terminal of its own is not treated as a lesser case; it gets a fresh one. When the launcher cannot schedule the handoff it refuses: it prints the reason to stderr and exits 2, naming the file the handoff is preserved in if it was already written. Read the exit code, not the prose — a nonzero exit means the close-out did not happen, so say so plainly rather than reporting the session finalized. Exit 0 means scheduled, not delivered; a delivery that fails after that is recorded in the log.
+Every session gets the same close-out capability — background and foreground alike, no subclass excluded. A session that owns no terminal of its own is not treated as a lesser case; it gets a fresh one. When the launcher cannot schedule the handoff it refuses: it prints the reason to stderr and exits 2, naming the file the handoff is preserved in if it was already written. Read the exit code, not the prose — a nonzero exit means the close-out did not happen, so say so plainly rather than reporting the session finalized. For tmux and iTerm2, exit 0 means scheduled, not delivered, and a delivery that fails after that is recorded in the log. For the detached transport, exit 0 means the new session has taken the message, and this session is retired once the call returns.
 
 ## Examples
 

@@ -2,9 +2,14 @@
 """Reads a Claude Code session's transcript, `<config dir>/projects/<slug>/<session id>.jsonl`.
 
 The context ceiling reads its token usage here, and finalize-session reads the permission mode and
-effort it relaunches with. Run as a script, `transcript.py <config dir> <session id>` prints the
-relaunch flags those settings make on one line and exits 0, or prints why it cannot on stderr and
-exits 2.
+effort it relaunches with, and whether a relaunch took its handoff. Run as a script:
+
+  transcript.py flags <config dir> <session id>
+      prints the relaunch flags the recorded settings make on one line and exits 0.
+  transcript.py prompted <config dir> <session id> <needle>
+      exits 0 when the session took a prompt containing the needle, 1 when it has not yet.
+
+Either prints why it cannot answer on stderr and exits 2.
 """
 
 import collections
@@ -49,10 +54,14 @@ def records_newest_first(transcript_path):
             end = start
 
 
+def _transcripts(config_dir, session_id):
+    return glob.glob(os.path.join(glob.escape(config_dir), "projects", "*",
+                                  glob.escape(session_id) + ".jsonl"))
+
+
 def session_transcript(config_dir, session_id):
     """The one transcript recorded for this session id, whichever project slug holds it."""
-    found = glob.glob(os.path.join(glob.escape(config_dir), "projects", "*",
-                                   glob.escape(session_id) + ".jsonl"))
+    found = _transcripts(config_dir, session_id)
     if len(found) != 1:
         raise Unrecorded(f"{len(found)} transcripts for session {session_id} under "
                          f"{os.path.join(config_dir, 'projects')}, where exactly one must exist"
@@ -92,6 +101,28 @@ def recorded_settings(config_dir, session_id):
                     None if effort is None else _known(path, "effort", effort, EFFORTS))
 
 
+def _prompt_text(record):
+    """The text a user prompt record carries: its content string, or its text blocks joined."""
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.get("text", "") for block in content or ()
+                     if isinstance(block, dict) and block.get("type") == "text")
+
+
+def took_prompt(config_dir, session_id, needle):
+    """Whether the session has taken a prompt containing the needle: a user record that is not meta
+    (a caveat, a skill body) and whose text holds it. A session that has written nothing yet has no
+    transcript, and that is not yet, since claude creates the file at its first write. Two
+    transcripts for the id raise Unrecorded, as for the settings."""
+    found = _transcripts(config_dir, session_id)
+    if not found:
+        return False
+    return any(record.get("type") == "user" and not record.get("isMeta")
+               and needle in _prompt_text(record)
+               for record in records_newest_first(session_transcript(config_dir, session_id)))
+
+
 def relaunch_flags(settings):
     """The claude flags that start a session in these settings. Every token is a word from a closed
     set, so the line needs no quoting, and an absent effort is an absent pair of tokens."""
@@ -99,13 +130,26 @@ def relaunch_flags(settings):
                     + ([] if settings.effort is None else ["--effort", settings.effort]))
 
 
+def _flags(config_dir, session_id):
+    print(relaunch_flags(recorded_settings(config_dir, session_id)))
+    return 0
+
+
+def _prompted(config_dir, session_id, needle):
+    return 0 if took_prompt(config_dir, session_id, needle) else 1
+
+
+COMMANDS = {"flags": (_flags, "<config dir> <session id>"),
+            "prompted": (_prompted, "<config dir> <session id> <needle>")}
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("usage: transcript.py <config dir> <session id>", file=sys.stderr)
+    command, arguments = COMMANDS.get(sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
+    if command is None or len(arguments) != command[1].count("<"):
+        print("usage: " + " | ".join(f"transcript.py {name} {shape}"
+                                     for name, (_, shape) in COMMANDS.items()), file=sys.stderr)
         sys.exit(2)
     try:
-        settings = recorded_settings(sys.argv[1], sys.argv[2])
+        sys.exit(command[0](*arguments))
     except (Unrecorded, OSError) as error:
         print(error, file=sys.stderr)
         sys.exit(2)
-    print(relaunch_flags(settings))

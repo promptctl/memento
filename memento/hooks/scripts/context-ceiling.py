@@ -30,10 +30,12 @@ LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "fi
 LAUNCHER_NAME = os.path.basename(LAUNCHER)
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
-# The rendered report the launcher prints when a reset is scheduled, matched in a tool result to
-# credit a close-out. Only the rendered line matches: the digits and absolute log path a run fills
-# in are required, while the prose and source text are not.
-RESET_MARKER = re.compile(r"handoff scheduled → .* in \d+s \(log: /")
+# The rendered report the launcher prints when a handoff is scheduled (tmux, iTerm2) or delivered
+# (detached), matched in a tool result to credit a close-out. Only the rendered line matches: the
+# absolute log path a run fills in is required, while the prose and source text, which name the log
+# by its variable, are not. finalize-session.test.py matches every success line the launcher prints
+# against this.
+RESET_MARKER = re.compile(r"handoff (?:scheduled|delivered) → .* \(log: /")
 # What a block past the ceiling says depends on how far past it the session is. Up to the limit the
 # agent finishes its current unit; from the limit on it closes out where it stands.
 Band = collections.namedtuple("Band", "label reason spent")
