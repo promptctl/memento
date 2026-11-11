@@ -11,6 +11,7 @@
     "workflow",
     "lit",
     "handoff",
+    "journal",
     "pr-review",
     "agent-native",
     "context-ceiling",
