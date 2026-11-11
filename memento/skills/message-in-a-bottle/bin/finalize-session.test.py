@@ -890,6 +890,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             done = subprocess.run(argv,
                                   text=True, capture_output=True, env=env, timeout=120)
         done.home = home
+        done.config_dir = config_dir
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
         else:
@@ -902,6 +903,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             worker_re = f"[-]-(iterm-)?worker .*{env['MEMENTO_HANDOFF_DIR'].replace('.', '[.]')}"
             if re.search(r"handoff scheduled → (tmux|iTerm2) ", done.stdout):
                 wait_for(lambda: subprocess.run(["pgrep", "-f", worker_re], capture_output=True).returncode == 0, 10)
+            done.worker_argv = subprocess.run(["pgrep", "-lf", worker_re], capture_output=True, text=True).stdout
             subprocess.run(["pkill", "-KILL", "-f", worker_re], capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
@@ -1088,6 +1090,18 @@ for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with
     check(f"a tmux close-out {name} clears its own goal before its worker acts",
           done.returncode == 0 and typed == CLEARS,
           f"rc={done.returncode} err={done.stderr!r} tmux_log={done.tmux_log!r}")
+
+# The worker sees the reset as this session's claude leaving this session, in the registry under this
+# session's config dir, so the launcher hands it all three. With no session id a carried goal could never
+# be typed, so the close-out refuses rather than dropping it in a log the session never reads.
+done = run(dry_run="")
+check("a tmux close-out hands its worker the config dir, claude pid and session id it sees the reset by",
+      f" {done.config_dir} {done.root_pid} {SESSION_ID} " in done.worker_argv.rstrip("\n") + " ",
+      f"argv={done.worker_argv!r} config={done.config_dir} pid={done.root_pid}")
+done = run(session_id=None, launcher_flags=("--goal", "the tests pass"))
+check("a tmux close-out carrying a goal with no session id refuses, naming the variable",
+      done.returncode == REFUSED_RC and "$CLAUDE_CODE_SESSION_ID is unset" in done.stderr
+      and "carried goal would never be typed" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 
 # The worker types into the same pane, so a pane the clear cannot reach refuses the handoff.
 done = run(dry_run="", tmux_fail="send-keys")

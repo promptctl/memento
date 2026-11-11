@@ -120,7 +120,7 @@ except Unchanged as error:
     outcome = f"Unchanged: {error}"
 except Unregistered as error:
     outcome = str(error)
-check("a process with no entry has exited: the wait ends at once, and a claude given its pid is not its move",
+check("a process with no entry has exited, so the wait ends at once rather than taking an entry written later for its move",
       outcome.startswith("no registry entry"), outcome)
 root = registry('{"pid": 74101, "sessionId": "the-n')
 check("a failed read the next read recovers from is not named when the wait runs out",

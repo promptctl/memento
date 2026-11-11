@@ -66,7 +66,10 @@ def changed(config_dir, pid, before, timeout, interval, sleep=time.sleep):
     its entry every `interval` seconds for up to `timeout`.
 
     A torn read is not yet, and the last one's reason is kept for the Unchanged the wait ends in. Any
-    other Unregistered ends the wait: a process with no entry has exited, and its pid may be reissued."""
+    other Unregistered ends the wait: a process with no entry has exited, and its pid may be reissued. No
+    `before` is refused, since any session would read as a move."""
+    if not before:
+        raise Unchanged(f"no session was named for claude process {pid} to leave, so its move cannot be seen")
     start = time.monotonic()
     unread = ""
     while True:
@@ -84,8 +87,6 @@ def changed(config_dir, pid, before, timeout, interval, sleep=time.sleep):
 
 
 def _changed(config_dir, pid, before, timeout_seconds, poll_seconds):
-    if not before:
-        raise Unchanged(f"no session was named for claude process {pid} to leave, so its move cannot be seen")
     now, waited = changed(config_dir, pid, before, float(timeout_seconds), float(poll_seconds))
     print(f"claude process {pid} moved from session {before} to {now} after {waited:.1f}s")
     return 0

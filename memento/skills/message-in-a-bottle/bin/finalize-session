@@ -739,6 +739,10 @@ case "$MODE" in
     # shift before the worker wakes.
     elif [[ "$KIND" == pane ]]; then
       TARGET="$PANE"
+      # A carried goal is typed once the reset is seen, as this session's claude leaving the session
+      # $CLAUDE_CODE_SESSION_ID names, so with no id the goal would never be typed.
+      [[ -z "$GOAL" || -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
+        || _refuse "tmux transport: \$CLAUDE_CODE_SESSION_ID is unset, so the reset cannot be seen and the carried goal would never be typed"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
