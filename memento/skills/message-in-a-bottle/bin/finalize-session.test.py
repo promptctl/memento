@@ -16,6 +16,7 @@ Run: python3 finalize-session.test.py
 """
 
 import concurrent.futures
+import contextlib
 import json
 import os
 import shlex
@@ -109,9 +110,10 @@ case "${1:-}" in
     # `buffer: <its text>` after its argv, so a case sees what a paste typed.
     # The tmux WORKER resets a pane that already exists and runs nothing in it, so its
     # cases state what that pane shows: $FIXTURE_TMUX_PANE_TEXT, when set, is what
-    # capture-pane prints. A /clear pasted while $FIXTURE_TMUX_CLEAR_ENTRY names the pane
-    # claude's registry entry runs, as Claude Code runs it: the entry is rewritten to
-    # $FIXTURE_TMUX_CLEARED_TEXT.
+    # capture-pane prints. $FIXTURE_TMUX_ON_TYPE, when set, is what the pane's claude does
+    # with what it is typed, such as rewrite its registry entry as Claude Code does at a
+    # /clear, or exit: it runs through sh at each paste and each Enter, given `paste` or
+    # `submit` and the text of the last buffer loaded, as the log has it (one line).
     sub="$1"
     if [ "${FIXTURE_TMUX_FAIL:-}" = "$sub" ]; then
       echo "fixture tmux: failing '$sub' on request" >&2
@@ -162,9 +164,12 @@ case "${1:-}" in
         if [ "${!#}" = - ]; then
           text=$(cat)
           printf 'buffer: %s\n' "$text" >> "${FIXTURE_TMUX_LOG:-/dev/null}"
-          if [ "$text" = /clear ] && [ -n "${FIXTURE_TMUX_CLEAR_ENTRY:-}" ]; then
-            printf '%s' "$FIXTURE_TMUX_CLEARED_TEXT" > "$FIXTURE_TMUX_CLEAR_ENTRY"
-          fi
+        fi ;;
+      paste-buffer|send-keys)
+        step=paste
+        [ "$sub" = paste-buffer ] || step=submit
+        if [ -n "${FIXTURE_TMUX_ON_TYPE:-}" ] && { [ "$step" = paste ] || [ "${!#}" = Enter ]; }; then
+          sh -c "$FIXTURE_TMUX_ON_TYPE" sh "$step" "$(sed -n 's/^buffer: //p' "$FIXTURE_TMUX_LOG" | tail -n 1)"
         fi ;;
       capture-pane)
         if [ -n "${FIXTURE_TMUX_PANE_TEXT+set}" ]; then
@@ -1092,11 +1097,15 @@ for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with
           f"rc={done.returncode} err={done.stderr!r} tmux_log={done.tmux_log!r}")
 
 # The worker sees the reset as this session's claude leaving this session, in the registry under this
-# session's config dir, so the launcher hands it all three. With no session id a carried goal could never
-# be typed, so the close-out refuses rather than dropping it in a log the session never reads.
+# session's config dir, and tells that claude has exited by its identity, so the launcher hands it all
+# four. With no session id a carried goal could never be typed, so the close-out refuses rather than
+# dropping it in a log the session never reads.
 done = run(dry_run="")
-check("a tmux close-out hands its worker the config dir, claude pid and session id it sees the reset by",
-      f" {done.config_dir} {done.root_pid} {SESSION_ID} " in done.worker_argv.rstrip("\n") + " ",
+# The identity is the claude's start time and executable name, so it ends in the planted claude's name,
+# where the launcher's own would end in bash's.
+check("a tmux close-out hands its worker the config dir, claude pid, its identity and the session id",
+      re.search(rf" {re.escape(done.config_dir)} {done.root_pid} \S.* {re.escape(os.path.basename(CLAUDE_BIN))} "
+                rf"{SESSION_ID} ", done.worker_argv.rstrip("\n") + " "),
       f"argv={done.worker_argv!r} config={done.config_dir} pid={done.root_pid}")
 done = run(session_id=None, launcher_flags=("--goal", "the tests pass"))
 check("a tmux close-out carrying a goal with no session id refuses, naming the variable",
@@ -1838,11 +1847,15 @@ check("an identity read that succeeds but names nobody is a refusal, not an empt
       and "cannot read the identity of claude process" in done.stderr,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
 # The control: under the same wrapper, the ancestry hops and the whole-table walk still
-# resolve the pane. Without it, a wrapper that broke ps outright would produce the
+# resolve the pane, and the tmux transport refuses only for the identity, which its worker
+# tells an exited claude by. Without it, a wrapper that broke ps outright would produce the
 # refusal above for an unrelated reason.
-check("the identity-muting ps leaves the ancestry walk intact",
-      picked(run(depth=2, mute_identity=True)) == "%99",
-      "without this the mute wrapper, not the identity guard, could be doing the work")
+done = run(depth=2, mute_identity=True)
+check("the identity-muting ps leaves the ancestry walk intact: pane %99's transport refuses for the identity",
+      done.returncode == REFUSED_RC
+      and "tmux transport: cannot read the identity of claude process" in done.stderr
+      and "when it stops reading pane %99" in done.stderr,
+      f"without this the mute wrapper, not the identity guard, could be doing the work: rc={done.returncode} err={done.stderr!r}")
 
 done = run(panes="")
 check("a server with no panes falls to the detached transport", picked(done) == DETACHED, picked(done))
@@ -2456,16 +2469,64 @@ check("an iTerm2 worker whose old claude survives KILL sends no relaunch, and sa
 RESET_ENTRY = '{"sessionId": "the-reset-session"}'
 
 
-def tmux_worker_case(cleared=RESET_ENTRY, registered=True, timeout="2", settings=(), goal=""):
+def when(step, text, command):
+    """What the pane's claude does once `text` is pasted into its box (`step` paste) or submitted (submit)."""
+    return f'if [ "$1" = {step} ] && [ "$2" = {shlex.quote(text)} ]; then {command}; fi'
+
+
+def rewrites(entry_text):
+    """A /clear the pane's claude runs, as Claude Code runs it: its registry entry is rewritten to this."""
+    return lambda entry, pid: when("submit", "/clear", f"printf %s {shlex.quote(entry_text)} > {shlex.quote(entry)}")
+
+
+def dies(pid, signal_name):
+    """The pane's claude exits on a signal, and is gone before the next key is sent."""
+    return f"kill -{signal_name} {pid}; while kill -0 {pid} 2>/dev/null; do sleep 0.05; done"
+
+
+# A claude that quits at the /clear takes its registry entry with it; one that crashes leaves the entry.
+QUITS = lambda entry, pid: when("submit", "/clear", f"{dies(pid, 'TERM')}; rm -f {shlex.quote(entry)}")  # noqa: E731
+CRASHES = lambda entry, pid: when("submit", "/clear", dies(pid, "KILL"))  # noqa: E731
+
+# The stand-in for a claude in its terminal's foreground: a sleep that pty.fork makes the leader of a
+# session whose terminal it holds, as a pane's own claude is. The holder prints the pid once the sleep
+# has exec'd, which closes the holder's close-on-exec pipe, so the identity read is the sleep's own.
+FOREGROUND_HOLDER = r"""
+import os, pty
+r, w = os.pipe()
+pid, _ = pty.fork()
+if pid == 0:
+    os.execvp("sleep", ["sleep", "600"])
+os.close(w)
+os.read(r, 1)
+print(pid, flush=True)
+os.waitpid(pid, 0)
+"""
+
+
+def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="foreground", timeout="2",
+                     settings=(), goal="", fail=""):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). The pane shows the
     banner the old session drew at its start throughout, as a short session's pane does.
-    The pane's claude is registered in the old session when `registered`, and `cleared`
-    is its registry entry's text once the /clear runs, None for a /clear that never
-    does, so how the reset lands is a value, not a mode. `goal` is the carried goal, ""
-    for none.
+    The pane's claude is a real process: `claude` is "foreground" for one in its
+    terminal's foreground, "background" for one with no terminal, as a suspended claude
+    has lost its own to the shell, or "exited" for one gone before the worker wakes. It
+    is registered in the old session when `registered`. `on_type` is what that claude
+    does with what it is typed, given its entry's path and its pid, None for a /clear
+    that never runs, so how the reset lands is a value, not a mode. `goal` is the
+    carried goal, "" for none, and `fail` the tmux subcommand that fails, "" for none.
     """
+    if claude == "background":
+        # Its own session, so it holds no terminal, whatever terminal runs this suite.
+        reaper = subprocess.Popen(["sleep", "600"], start_new_session=True)
+        pid = reaper.pid
+    else:
+        reaper = subprocess.Popen([sys.executable, "-I", "-c", FOREGROUND_HOLDER], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, text=True)
+        pid = int(reaper.stdout.readline())
+    # Made once the stand-in runs, so a holder that fails, and raises above, leaves nothing on disk.
     workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     msgfile = os.path.join(workdir, "handoff.md")
     goalfile = os.path.join(workdir, "goal")
@@ -2475,7 +2536,7 @@ def tmux_worker_case(cleared=RESET_ENTRY, registered=True, timeout="2", settings
         handle.write(goal)
     config_dir = os.path.join(workdir, "config")
     os.makedirs(os.path.join(config_dir, "sessions"))
-    entry = os.path.join(config_dir, "sessions", "4242.json")
+    entry = os.path.join(config_dir, "sessions", f"{pid}.json")
     if registered:
         with open(entry, "w") as handle:
             handle.write('{"sessionId": "the-old-session"}')
@@ -2487,31 +2548,64 @@ def tmux_worker_case(cleared=RESET_ENTRY, registered=True, timeout="2", settings
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_PANE_TEXT": " ▐▛███▜▌   Claude Code v2.1.299",
         "MEMENTO_RESET_TIMEOUT_SECONDS": timeout,
+        "FIXTURE_TMUX_FAIL": fail,
     }
-    if cleared is not None:
-        env.update(FIXTURE_TMUX_CLEAR_ENTRY=entry, FIXTURE_TMUX_CLEARED_TEXT=cleared)
+    if on_type is not None:
+        env["FIXTURE_TMUX_ON_TYPE"] = on_type(entry, pid)
     try:
+        ident = identity_of(pid)
+        if claude == "exited":
+            os.kill(pid, signal.SIGKILL)
+            reaper.wait()
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, "4242", "the-old-session", *settings],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, str(pid), ident, "the-old-session",
+             *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
     finally:
+        # A stand-in whose reaper has exited is reaped, and its pid may be reissued, so it is not signaled.
+        if reaper.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        reaper.wait()
+        if reaper.stdout:
+            reaper.stdout.close()
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+def submitted(log, text):
+    """Whether the Enter after `text`'s paste reached the pane, so the box's text was submitted."""
+    marker = f"buffer: {text}\n"
+    at = log.rfind(marker)
+    return at >= 0 and "send-keys -t %1 Enter" in log[at + len(marker):].split("buffer: ", 1)[0]
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=15) as pool:
+    paste_fails = pool.submit(tmux_worker_case, goal="ship it", fail="paste-buffer")
     registered = pool.submit(tmux_worker_case)
-    never = pool.submit(tmux_worker_case, cleared=None)
+    never = pool.submit(tmux_worker_case, on_type=None)
     goal_registered = pool.submit(tmux_worker_case, goal="ship it")
-    goal_never = pool.submit(tmux_worker_case, cleared=None, goal="ship it")
-    goal_unregistered = pool.submit(tmux_worker_case, registered=False, cleared=None, goal="ship it")
-    goal_torn = pool.submit(tmux_worker_case, cleared='{"sessionId": "the-re', goal="ship it")
+    goal_never = pool.submit(tmux_worker_case, on_type=None, goal="ship it")
+    goal_unregistered = pool.submit(tmux_worker_case, registered=False, on_type=None, goal="ship it")
+    goal_torn = pool.submit(tmux_worker_case, on_type=rewrites('{"sessionId": "the-re'), goal="ship it")
     with_settings = pool.submit(tmux_worker_case, settings=("/model opus", "/effort high"))
+    gone_at_wake = pool.submit(tmux_worker_case, claude="exited", goal="ship it")
+    suspended = pool.submit(tmux_worker_case, claude="background", goal="ship it")
+    quits = pool.submit(tmux_worker_case, on_type=QUITS, settings=("/model opus",), goal="ship it")
+    crashes = pool.submit(tmux_worker_case, on_type=CRASHES)
+    quits_mid_paste = pool.submit(
+        tmux_worker_case, goal="ship it",
+        on_type=lambda entry, pid: rewrites(RESET_ENTRY)(entry, pid) + "; "
+        + when("paste", "the whole handoff", dies(pid, "TERM")))
+    quits_after_handoff = pool.submit(
+        tmux_worker_case, goal="ship it",
+        on_type=lambda entry, pid: rewrites(RESET_ENTRY)(entry, pid) + "; "
+        + when("submit", "the whole handoff", dies(pid, "TERM")))
 
 done, survived, log = registered.result()
 check("a reset the worker can see delivers the handoff",
-      "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
+      submitted(log, "the whole handoff"), f"out={done.stdout!r} log={log!r}")
 check("and is seen as the pane's claude moving to a new session",
       "moved from session the-old-session to the-reset-session" in done.stdout, f"out={done.stdout!r}")
 check("and the handoff file outlives the worker that delivered it",
@@ -2567,6 +2661,52 @@ done, _, log = registered.result()
 check("with nothing requested the worker types no setting",
       "buffer: /model" not in log and "buffer: /effort" not in log and "buffer: the whole handoff" in log,
       f"out={done.stdout!r} log={log!r}")
+
+# Once the pane's claude has exited, or been suspended, the pane is the shell's it ran from, which would run
+# each line typed into it as a command. The worker reads that off the process table before every step that
+# reaches the pane, so a claude killed with its registry entry left behind is seen gone too.
+NOT_SUBMITTED = "the handoff was NOT submitted; it is preserved at "
+done, survived, log = gone_at_wake.result()
+check("a claude that exits before the worker wakes has nothing typed into its pane",
+      done.returncode == 1 and log == "", f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+check("and the worker names the handoff file and the carried goal to deliver by hand",
+      "claude process" in done.stdout and "has exited" in done.stdout
+      and NOT_SUBMITTED in done.stdout and "carried goal NOT delivered: /goal ship it" in done.stdout
+      and survived, f"out={done.stdout!r}")
+done, survived, log = suspended.result()
+check("a claude alive but out of its terminal's foreground, as a suspended one is, has nothing typed into its pane",
+      done.returncode == 1 and log == "" and "out of its terminal's foreground" in done.stdout
+      and NOT_SUBMITTED in done.stdout and "carried goal NOT delivered: /goal ship it" in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+done, survived, log = quits.result()
+check("a claude that quits at the /clear has nothing typed after it: no setting, handoff or goal",
+      done.returncode == 1 and submitted(log, "/clear") and "buffer: /model" not in log
+      and "buffer: the whole handoff" not in log and "buffer: /goal" not in log
+      and "has exited" in done.stdout and NOT_SUBMITTED in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+done, survived, log = crashes.result()
+check("a claude that crashes at the /clear, leaving its registry entry, has no handoff typed after the wait",
+      done.returncode == 1 and "did not leave session the-old-session" in done.stderr
+      and "buffer: the whole handoff" not in log and "has exited" in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} log={log!r}")
+# A shell holds a paste in its line editor, and the Enter after it runs it, so that Enter goes through the
+# same check as the paste.
+done, survived, log = quits_mid_paste.result()
+check("a claude that exits once the handoff is pasted has no Enter sent after it, and the handoff named unsubmitted",
+      done.returncode == 1 and "buffer: the whole handoff" in log and not submitted(log, "the whole handoff")
+      and NOT_SUBMITTED in done.stdout and "carried goal NOT delivered: /goal ship it" in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+done, survived, log = quits_after_handoff.result()
+check("a claude that exits once the handoff is submitted has no goal typed, and the log says the handoff went in",
+      done.returncode == 1 and submitted(log, "the whole handoff") and "buffer: /goal" not in log
+      and "was submitted before then" in done.stdout and NOT_SUBMITTED not in done.stdout
+      and "carried goal NOT delivered: /goal ship it" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+done, survived, log = paste_fails.result()
+check("a worker whose tmux paste fails stops, saying the handoff was not submitted and where it is preserved",
+      done.returncode != 0 and "the worker stopped" in done.stdout and NOT_SUBMITTED in done.stdout
+      and "carried goal NOT delivered: /goal ship it" in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} log={log!r}")
 
 # The launcher's half: the payload lands in its durable home and names itself.
 handoff_home = tempfile.mkdtemp(prefix="finalize-home.")

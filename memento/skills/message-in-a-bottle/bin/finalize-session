@@ -2,8 +2,9 @@
 # finalize-session: hands the current session off to a fresh one holding the message.
 #
 # Transports, most reliable first:
-#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, verifies it by
-#               reading the pane back, then pastes the message. The launcher returns at once.
+#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, sees it as its
+#               claude leaving this session, then pastes the message, typing nothing once that claude
+#               stops reading the pane. The launcher returns at once.
 #   iTerm2    - schedules a worker that, after the delay, kills the running claude and relaunches it with
 #               the message as its initial prompt, sent with `write text` to the exact session. The
 #               launcher returns at once.
@@ -36,7 +37,7 @@
 #
 # Modes:
 #   launcher:         see --help
-#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <config dir> <claude pid> <session id> [<slash-command>...]
+#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <config dir> <claude pid> <claude identity> <session id> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <old session id> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
 #   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> <launcher pid> <launcher ident> [<slash-command>...]
@@ -77,19 +78,21 @@ HANDOFF_SUFFIX=$(cat <<'SUFFIX'
 SUFFIX
 )
 
-# Types its stdin into Claude Code's input box in a tmux target, and submits it: _tmux_type <target>.
+# Types its stdin into Claude Code's input box in a tmux target, and submits it: _tmux_type <gate> <target>.
 # Leftover text would fuse with the new input, so the box is emptied first with C-u (Escape does not
 # empty it). The text goes in as a bracketed paste, so a newline in it does not submit it, and Enter is a
 # key of its own, so it is not read as part of the paste. Every step is checked, since a caller that
 # handles the failure runs this where `set -e` does not reach, and the first failing step's status is
-# returned.
+# returned. Each step that reaches the pane runs through the gate, a command prefix (`command` for
+# none), so a caller can stop the keys between steps, as the tmux worker does once its claude stops
+# reading the pane.
 _tmux_type() {
-  tmux send-keys -t "$1" C-u || return
+  "$1" tmux send-keys -t "$2" C-u || return
   sleep 0.3
   tmux load-buffer -b "finalize-type-$$" - || return
-  tmux paste-buffer -d -b "finalize-type-$$" -t "$1" -p || return
+  "$1" tmux paste-buffer -d -b "finalize-type-$$" -t "$2" -p || return
   sleep 0.5
-  tmux send-keys -t "$1" Enter
+  "$1" tmux send-keys -t "$2" Enter
 }
 
 # Runs AppleScript statements against the iTerm2 session with a unique id, which they name `s`:
@@ -743,6 +746,9 @@ case "$MODE" in
       # $CLAUDE_CODE_SESSION_ID names, so with no id the goal would never be typed.
       [[ -z "$GOAL" || -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
         || _refuse "tmux transport: \$CLAUDE_CODE_SESSION_ID is unset, so the reset cannot be seen and the carried goal would never be typed"
+      # The worker types nothing once this claude stops reading the pane, which it tells by this identity.
+      CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
+        || _refuse "tmux transport: cannot read the identity of claude process $CLAUDE_PID, so the worker could not tell when it stops reading pane $TARGET"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
@@ -758,9 +764,9 @@ case "$MODE" in
       # holds the session is the session's state, not the --goal flag, and last, after every step that can
       # refuse, so a refused close-out keeps the goal that keeps it working. A failure refuses: the worker
       # types into this pane the same way.
-      printf '/goal clear' | _tmux_type "$TARGET" \
+      printf '/goal clear' | _tmux_type command "$TARGET" \
         || _refuse "tmux transport: cannot type /goal clear into pane $TARGET, which the handoff is typed into too"
-      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$CONFIG_DIR" "$CLAUDE_PID" "${CLAUDE_CODE_SESSION_ID:-}" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
+      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$CONFIG_DIR" "$CLAUDE_PID" "$CLAUDE_IDENT" "${CLAUDE_CODE_SESSION_ID:-}" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
@@ -867,8 +873,8 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   tmux-worker)
-    if [[ $# -lt 6 ]]; then
-      echo "internal error: worker expects at least 6 args" >&2
+    if [[ $# -lt 7 ]]; then
+      echo "internal error: worker expects at least 7 args" >&2
       exit 2
     fi
     TARGET="$1"
@@ -876,23 +882,53 @@ Nothing on this machine to deliver the close-out into."
     GOALFILE="$3"
     CONFIG_DIR="$4"
     CLAUDE_PID="$5"
-    SESSION_ID="$6"
-    shift 6
+    CLAUDE_IDENT="$6"
+    SESSION_ID="$7"
+    shift 7
 
-    trap 'rm -f "$GOALFILE"' EXIT
+    # [LAW:single-enforcer] Every way this worker stops short, a gate stop or a tmux step that fails under
+    # `set -e`, ends here, which says what was left undelivered.
+    HANDOFF="the handoff was NOT submitted; it is preserved at $MSGFILE"
+    trap 'status=$?
+      [[ $status -eq 0 ]] || log "the worker stopped (exit $status): $HANDOFF$([[ ! -s "$GOALFILE" ]] || printf "; carried goal NOT delivered: /goal %s" "$(cat "$GOALFILE")")"
+      rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+    _stop_typing() { # <why>
+      log "ERROR: $1, so nothing more is typed into $TARGET, where a shell would run it as commands"
+      exit 1
+    }
+
+    # [LAW:single-enforcer] Every key this worker sends goes through here, and none once the pane's claude
+    # stops reading it: a claude that has exited, or been suspended, leaves the pane to the shell it ran
+    # from, which runs each line typed into it as a command, backticks and all. That is the process table's
+    # to say, by the identity the launcher captured and ps's `+`, which marks a process in its terminal's
+    # foreground process group; a claude killed outright leaves its registry entry behind. The state is
+    # read before the identity is compared, since a pid that holds the captured claude now held it at the
+    # earlier read too. The send's stdin is redirected rather than piped in, since a pipe would run this in
+    # a subshell, whose exit ends only that subshell.
+    _send() { # <command> [<argument>...]
+      local state
+      read -r state < <(ps -o stat= -p "$CLAUDE_PID") || state=""
+      if ! _still_captured_process "$CLAUDE_PID" "$CLAUDE_IDENT"; then
+        _stop_typing "claude process $CLAUDE_PID has exited (its pid holds ${IDENT_NOW:-nothing} now)"
+      elif [[ "$state" != *+* ]]; then
+        _stop_typing "claude process $CLAUDE_PID is out of its terminal's foreground (state $state), as a suspended one is"
+      fi
+      "$@"
+    }
 
     log "waking; target=$TARGET claude_pid=$CLAUDE_PID session=$SESSION_ID"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    tmux send-keys -t "$TARGET" Escape
+    _send tmux send-keys -t "$TARGET" Escape
     sleep 1
 
     # [LAW:one-source-of-truth] The reset is seen as the pane's own claude leaving the session that asked for
     # the handoff, which the launcher names and the claude's registry entry follows. A banner on the screen
     # can be the old session's own, drawn at its start, and another pane's /clear is another process's.
     # The registry's stdout is its answer, and its stderr, the reason it has none, goes to this log.
-    printf /clear | _tmux_type "$TARGET"
+    _tmux_type _send "$TARGET" < <(printf /clear)
     RESET_SEEN=""
     OBSERVED="WARNING: not seen, as the registry says above"
     if MOVED=$(python3 -I "$REGISTRY" changed "$CONFIG_DIR" "$CLAUDE_PID" "$SESSION_ID" \
@@ -910,11 +946,12 @@ Nothing on this machine to deliver the close-out into."
     # handoff's first turn already runs on them.
     for SETTING in "$@"; do
       log "setting $SETTING"
-      printf '%s' "$SETTING" | _tmux_type "$TARGET"
+      _tmux_type _send "$TARGET" < <(printf '%s' "$SETTING")
       sleep 1
     done
 
-    _tmux_type "$TARGET" < "$MSGFILE"
+    _tmux_type _send "$TARGET" < "$MSGFILE"
+    HANDOFF="the handoff, preserved at $MSGFILE, was submitted before then"
 
     # The goal is typed once the handoff's turn is under way, where /goal is an immediate command: its Stop
     # hook holds from then on, and the turn is told at a later tool call. /clear wiped it.
@@ -927,7 +964,7 @@ Nothing on this machine to deliver the close-out into."
       else
         log "re-establishing carried goal"
         sleep 1
-        { printf '/goal '; cat "$GOALFILE"; } | _tmux_type "$TARGET" \
+        _tmux_type _send "$TARGET" < <(printf '/goal '; cat "$GOALFILE") \
           || log "ERROR: could not re-establish the carried goal in $TARGET; deliver it by hand: /goal $(cat "$GOALFILE")"
       fi
     fi
@@ -1085,7 +1122,7 @@ Nothing on this machine to deliver the close-out into."
     # already handed off. Its failure is logged, not fatal, so the retirement still runs.
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
-      { printf '/goal '; cat "$GOALFILE"; } | _tmux_type "$SESSION" \
+      { printf '/goal '; cat "$GOALFILE"; } | _tmux_type command "$SESSION" \
         || log "ERROR: could not re-establish the carried goal in $SESSION; deliver it by hand: /goal $(cat "$GOALFILE")"
     fi
 
