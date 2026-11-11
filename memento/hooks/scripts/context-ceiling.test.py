@@ -5,32 +5,23 @@ Each case feeds a synthetic transcript and the payload Claude Code delivers to t
 subprocess, then asserts the JSON it emits. Run with `python3 context-ceiling.test.py`.
 """
 
-import atexit
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-
-# One scratch root for every mkdtemp() below, removed on exit - each call still gets its own
-# subdirectory, but the suite no longer abandons one per case in the system temp dir.
-SCRATCH = tempfile.mkdtemp(prefix="context-ceiling-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The hooks install memento's cc-candybar plugin under XDG_DATA_HOME; every child this suite runs
-# inherits a scratch one, so no run reaches the plugin root of the machine it runs on.
-os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
-
-
-def scratch_dir():
-    return tempfile.mkdtemp(dir=SCRATCH)
-
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "context-ceiling.py")
 PLUGIN = os.path.dirname(os.path.dirname(HERE))
 LIB = os.path.join(PLUGIN, "lib")
+sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+hermetic.home()
+
+
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
 JOURNAL = os.path.join(PLUGIN, "skills", "journal", "bin", "journal")
@@ -42,7 +33,6 @@ OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
 SESSION = "s-1"
 # The file names come from the module the hook itself reads them from, so a fixture here cannot
 # drift from the files the hook looks for. [LAW:one-source-of-truth]
-sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE  # noqa: E402
 
 CLEAR_HOOK = os.path.join(HERE, "clear-session-ceiling.py")
@@ -99,25 +89,22 @@ def run(records, event="Stop", stop_hook_active=False,
         project=None, config_home=None, xdg=None, extra_env=None,
         session=SESSION):
     """Invoke the hook as Claude Code does and return (exit code, parsed stdout, stderr). Every
-    config layer is rooted in scratch space and ambient ones (CLAUDE_PROJECT_DIR, XDG_CONFIG_HOME)
-    are stripped, so a developer's own config cannot decide a test. user_conf=None writes no user
-    layer, so the case reaches the shipped default."""
+    config layer is rooted in scratch space. user_conf=None writes no user layer, so the case
+    reaches the shipped default."""
     handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     handle.write("".join(json.dumps(r) + "\n" for r in records))
     handle.close()
     log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
     log.close()
-    home = config_home or (os.path.join(xdg, "promptctl") if xdg else scratch_dir())
-    project = project or scratch_dir()
+    home = config_home or (os.path.join(xdg, "promptctl") if xdg else tempfile.mkdtemp())
+    project = project or tempfile.mkdtemp()
     if user_conf is not None:
         write_conf(os.path.join(home, CONFIG_NAME), user_conf)
     if session_conf is not None:
         write_conf(os.path.join(home, "sessions", session, CONFIG_NAME), session_conf)
     if project_conf is not None:
         write_conf(os.path.join(project, ".promptctl", CONFIG_NAME), project_conf)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env["MEMENTO_CEILING_LOG"] = log.name
+    env = dict(os.environ, MEMENTO_CEILING_LOG=log.name)
     # xdg drives the shipped path construction rather than overriding it, which is the only
     # way to exercise where the config really lives without reading the developer's own.
     if xdg is None:
@@ -264,7 +251,7 @@ for word in ("off", "OFF"):
           code == 0 and out is None, f"{code} {out}")
 
 # The project is the session's, not wherever a Bash call last left the shell.
-elsewhere = scratch_dir()
+elsewhere = tempfile.mkdtemp()
 code, out, _ = run([user, assistant(60_000)], project_conf="ceiling = 50000\n",
                    extra_env={"CLAUDE_PROJECT_DIR": elsewhere})
 check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
@@ -276,7 +263,7 @@ check("a cwd config is not read when CLAUDE_PROJECT_DIR points somewhere else",
 # governs its next stop. Each case therefore runs one session more than once against one config home.
 # The effect at a stop is a block, since Stop is the only event this runs on.
 
-home = scratch_dir()
+home = tempfile.mkdtemp()
 code, out, _ = run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
 check("a session's first stop passes under the shared ceiling as it stands",
       code == 0 and out is None, f"{code} {out}")
@@ -287,7 +274,7 @@ check("a shared ceiling raised under a running session lets its next stop throug
 
 # Between stops the hook writes nothing but the log: the sessions tree holds only what `ceiling set
 # session` puts there, so there is no per-session record to go stale.
-home = scratch_dir()
+home = tempfile.mkdtemp()
 run([user, assistant(1_000)], config_home=home, user_conf="ceiling = 350000\n")
 run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 350000\n")
 check("a session that only stops leaves nothing under the sessions tree",
@@ -296,7 +283,7 @@ check("a session that only stops leaves nothing under the sessions tree",
 
 # The session's own layer moves the ceiling immediately, in both directions - which is what makes the
 # block escapable from inside the block.
-home = scratch_dir()
+home = tempfile.mkdtemp()
 code, out, _ = run([user, assistant(300_000)], config_home=home, user_conf="ceiling = 250000\n",
                    session_conf="ceiling = +100_000\n")
 check("a session layer written mid-session raises the ceiling on the very next stop",
@@ -311,9 +298,8 @@ check("a session layer written mid-session raises the ceiling on the very next s
 def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None, log=None):
     """Invoke the SessionStart hook as Claude Code does on /clear, logging to `log` or to a scratch
     log. Returns (exit code, stderr)."""
-    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env.update({"MEMENTO_CONFIG_HOME": home,
-                "MEMENTO_CEILING_LOG": log or os.path.join(scratch_dir(), "log")})
+    env = dict(os.environ, MEMENTO_CONFIG_HOME=home,
+               MEMENTO_CEILING_LOG=log or os.path.join(tempfile.mkdtemp(), "log"))
     payload = raw if raw is not None else json.dumps(
         {"session_id": session, "hook_event_name": event, "source": source, "cwd": home})
     done = subprocess.run([sys.executable, CLEAR_HOOK], text=True, capture_output=True, env=env,
@@ -328,7 +314,7 @@ def logged_fields(log):
     return line.split(" -> ", 1)[0].split()[1:]
 
 
-home = scratch_dir()
+home = tempfile.mkdtemp()
 _, out, _ = run([user, assistant(400_000)], config_home=home, user_conf="ceiling = 250000\n",
                 session_conf="ceiling = 500000\n")
 check("before the reset, the session override is what gates the session", out is None, str(out))
@@ -343,7 +329,7 @@ check("a /clear in a session that set no override is not an error", code == 0 an
 
 # A drifted hooks.json is the way this hook would fire on the wrong event and drop an override the
 # session still means to have. Any payload that is not a /clear stops it.
-home = scratch_dir()
+home = tempfile.mkdtemp()
 run([user, assistant(1_000)], config_home=home, session_conf="ceiling = 500000\n")
 for event, source in (("SessionStart", "compact"), ("SessionStart", "startup"), ("Stop", "clear")):
     code, err = cleared(home, event=event, source=source)
@@ -358,13 +344,13 @@ for raw in ("42", "[]", "not json", "{}"):
     code, err = cleared(home, raw=raw)
     check(f"a /clear payload of {raw!r} stops the hook",
           code == 1, f"{code} {err}")
-log = os.path.join(scratch_dir(), "log")
+log = os.path.join(tempfile.mkdtemp(), "log")
 code, err = cleared(home, session="../..", log=log)
 fields = logged_fields(log)
 check("a session id that is not a bare name is refused by the /clear hook too, and its line names "
       "no override, since none was reached",
       code == 1 and not any(field.startswith("override=") for field in fields), f"{code} {fields}")
-log = os.path.join(scratch_dir(), "log")
+log = os.path.join(tempfile.mkdtemp(), "log")
 cleared(home, log=log)
 check("a /clear that reaches the override names it on its line",
       any(field.startswith("override=")
@@ -382,7 +368,7 @@ check("a misspelled key fails loudly rather than reading as a setting nobody mad
       code == 1, f"{code} {err}")
 # Bytes that are not text must fail loudly, because a traceback from a Stop hook leaves the gate off
 # with nothing stating why.
-bytes_home = scratch_dir()
+bytes_home = tempfile.mkdtemp()
 with open(os.path.join(bytes_home, CONFIG_NAME), "wb") as handle:
     handle.write(b"ceiling = 35\xff0000\n")
 code, out, err = run([user, assistant(400_000)], config_home=bytes_home, user_conf=None)
@@ -441,7 +427,7 @@ for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
 
 # The tokens are counted before the ceiling is read, so a ceiling that cannot be read stops the gate
 # with the count on its line and no ceiling.
-log = os.path.join(scratch_dir(), "log")
+log = os.path.join(tempfile.mkdtemp(), "log")
 code, _, err = run([user, assistant(OVER)], user_conf="ceiling = _350000\n",
                    extra_env={"MEMENTO_CEILING_LOG": log})
 fields = logged_fields(log)
@@ -510,9 +496,8 @@ check("a transcript with no assistant record reads as zero", code == 0 and out i
 
 # --- wiring --------------------------------------------------------------------------------
 
-isolated = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-isolated["MEMENTO_CONFIG_HOME"] = scratch_dir()
-isolated["MEMENTO_CEILING_LOG"] = os.path.join(scratch_dir(), "log")
+isolated = dict(os.environ, MEMENTO_CONFIG_HOME=tempfile.mkdtemp(),
+                MEMENTO_CEILING_LOG=os.path.join(tempfile.mkdtemp(), "log"))
 done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_output=True,
                       env=isolated)
 check("a payload with no event fails loudly", done.returncode == 1, str(done)[:200])
@@ -527,7 +512,7 @@ check("a payload with no transcript_path fails loudly",
       done.returncode == 1, str(done)[:200])
 # The project config is resolved from it, so a payload without it is a hook that would
 # silently read no project config at all.
-empty_transcript = write_conf(os.path.join(scratch_dir(), "t.jsonl"), "")
+empty_transcript = write_conf(os.path.join(tempfile.mkdtemp(), "t.jsonl"), "")
 done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=isolated,
                       input=json.dumps({"hook_event_name": "Stop", "session_id": SESSION,
                                         "transcript_path": empty_transcript}))
@@ -536,7 +521,7 @@ check("a payload with no cwd fails loudly",
 
 # stdin that parses but is not an object has no session to gate. It must stop loudly.
 for raw in ("42", "null", "[]", "not json at all"):
-    env = dict(isolated, MEMENTO_CEILING_LOG=os.path.join(scratch_dir(), "log"))
+    env = dict(isolated, MEMENTO_CEILING_LOG=os.path.join(tempfile.mkdtemp(), "log"))
     done = subprocess.run([sys.executable, HOOK], input=raw, text=True, capture_output=True, env=env)
     check(f"a stdin payload {raw!r} that is not a Stop object fails loudly",
           done.returncode == 1, f"{done.returncode}")

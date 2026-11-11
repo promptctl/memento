@@ -15,6 +15,9 @@ import tempfile
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+hermetic.home()
 from background_session import DaemonError, ask, background_id  # noqa: E402
 
 SESSION = "b08daab6-66a8-47af-9d13-aaa85780e908"

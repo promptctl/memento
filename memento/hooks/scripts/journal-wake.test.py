@@ -7,30 +7,25 @@ lines the launcher frames a handoff with and the lines this hook knows one by ar
 other here. Run with: python3 journal-wake.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
-SCRATCH = Path(tempfile.mkdtemp(prefix="journal-wake-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "journal-wake.py")
 PLUGIN = os.path.dirname(os.path.dirname(HERE))
 LAUNCHER = os.path.join(PLUGIN, "skills", "message-in-a-bottle", "bin", "finalize-session")
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home())
 from journal import Wake, entries  # noqa: E402
 
 # The session that wrote the handoff, which the handoff names, and the one it wakes.
 WRITER, WAKER = "session-that-closed-out", "session-that-woke"
-# All that every command here is given of the environment these tests run in. A git hook's names
-# its repository in GIT_DIR, and a git command that inherited it would act on that repository.
-BARE = {"PATH": os.environ["PATH"]}
 
 failures = []
 
@@ -41,18 +36,14 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
-def scratch_dir():
-    return Path(tempfile.mkdtemp(dir=SCRATCH))
-
-
 def launched(message):
     """A handoff the real launcher made, as its file's path and its text. The launcher writes the
     handoff before it looks for the claude it runs under, so a dry run with no $CLAUDE_PID is
     refused and leaves the handoff it wrote."""
-    home = scratch_dir()
+    home = Path(tempfile.mkdtemp())
     done = subprocess.run(
         [LAUNCHER, message], text=True, capture_output=True, timeout=30,
-        env={**BARE, "HOME": str(home), "TMPDIR": str(home),
+        env={**os.environ, "HOME": str(home), "TMPDIR": str(home),
              "MEMENTO_HANDOFF_DIR": str(home / "handoffs"), "FINALIZE_DRY_RUN": "1",
              "MEMENTO_JOURNAL": str(home / "journal.jsonl"), "CLAUDE_CODE_SESSION_ID": WRITER})
     written = sorted((home / "handoffs").glob("*"))
@@ -70,8 +61,8 @@ def pasted(text):
 def run(prompt, journal, event="UserPromptSubmit", cwd=SCRATCH):
     """Runs the hook on a prompt as Claude Code does. Returns the completed process and the lines
     it logged. The environment names another session than the payload does, as a hook's may."""
-    log = scratch_dir() / "hook.log"
-    env = {**BARE, "MEMENTO_JOURNAL": str(journal), "MEMENTO_CEILING_LOG": str(log),
+    log = Path(tempfile.mkdtemp()) / "hook.log"
+    env = {**os.environ, "MEMENTO_JOURNAL": str(journal), "MEMENTO_CEILING_LOG": str(log),
            "CLAUDE_CODE_SESSION_ID": "session-of-the-environment"}
     payload = {"session_id": WAKER, "hook_event_name": event, "cwd": str(cwd), "prompt": prompt}
     done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=env,
@@ -86,9 +77,9 @@ def passed_on(done):
 
 
 repo = SCRATCH / "repo"
-subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=BARE)
+subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
 subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/journal-lane"], cwd=repo, check=True,
-               capture_output=True, env=BARE)
+               capture_output=True)
 
 path, handoff = launched("Branch fix/parser-null, PR #91. Resume at step 10.")
 
@@ -99,7 +90,7 @@ path, handoff = launched("Branch fix/parser-null, PR #91. Resume at step 10.")
 for how, prompt in (("as a session's initial prompt", handoff),
                     ("pasted, as Claude Code wraps a paste", pasted(handoff)),
                     ("with blank lines around it", f"\n{handoff}\n\n")):
-    journal = scratch_dir() / "journal.jsonl"
+    journal = Path(tempfile.mkdtemp()) / "journal.jsonl"
     done, logged = run(prompt, journal, cwd=repo)
     kept = entries(journal)
     check(f"a launcher-made handoff {how} journals one wake naming its file, for the session and "
@@ -132,7 +123,7 @@ for what, prompt, verdict in (
          pasted(handoff) + "compare with" + pasted(handoff), NAMES_ONE),
         ("a handoff in a wrapping the hook does not know",
          f'<pasted-text id="df66">\n{handoff}\n</pasted-text>', NAMES_ONE)):
-    journal = scratch_dir() / "journal.jsonl"
+    journal = Path(tempfile.mkdtemp()) / "journal.jsonl"
     done, logged = run(prompt, journal)
     check(f"{what} journals nothing and is passed on, logged as: {verdict}",
           done.returncode == 0 and passed_on(done) and entries(journal) == []
@@ -142,7 +133,7 @@ for what, prompt, verdict in (
 # Each of these is a hook error Claude Code shows the user, with the prompt delivered as it was.
 
 relative = handoff.replace(path, "handoffs/20261110T031731Z-1.md")
-journal = scratch_dir() / "journal.jsonl"
+journal = Path(tempfile.mkdtemp()) / "journal.jsonl"
 done, logged = run(relative, journal)
 check("a handoff whose last line names a path that is not absolute journals nothing, with the "
       "journal's reason as the one line on stderr and in the log",
@@ -151,14 +142,14 @@ check("a handoff whose last line names a path that is not absolute journals noth
       and len(logged) == 1 and "-> stopped: " in logged[0] and "is not absolute" in logged[0],
       (done, logged))
 
-blocked = scratch_dir() / "a-file"
+blocked = Path(tempfile.mkdtemp()) / "a-file"
 blocked.write_text("in the journal's way\n")
 done, logged = run(handoff, blocked / "journal.jsonl")
 check("a handoff whose wake the journal cannot take fails without holding the prompt back",
       done.returncode == 1 and passed_on(done) and blocked.read_text() == "in the journal's way\n"
       and len(logged) == 1 and "-> stopped: " in logged[0], (done, logged))
 
-journal = scratch_dir() / "journal.jsonl"
+journal = Path(tempfile.mkdtemp()) / "journal.jsonl"
 done, logged = run(handoff, journal, event="Stop")
 check("a payload for another event journals nothing and names the event it was registered on",
       done.returncode == 1 and passed_on(done) and entries(journal) == []

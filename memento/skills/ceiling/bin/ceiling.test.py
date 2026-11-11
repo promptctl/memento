@@ -6,32 +6,22 @@ asserts on the files written and the output printed. The cases that matter most 
 Stop hook and check that it resolves the same ceiling the command reported. Run with: python3 ceiling.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-
-SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so no
-# developer's settings reach a test, every path derived from the home - the plugin install's among
-# them - lands in scratch, and every command run here is given that and what its case sets. A git
-# hook's environment names its repository in GIT_DIR, and a git command that inherited it would act
-# on that repository.
-path = os.environ["PATH"]
-os.environ.clear()
-os.environ.update(PATH=path, HOME=SCRATCH)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "ceiling")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import hermetic  # noqa: E402
+
+hermetic.home()
 # The file-format constants come from the module the command and the hook both use, so fixtures
 # match the files production writes.
-sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, PROJECT_CONFIG_DIR  # noqa: E402
 
 # Derived from the shipped default, so changing the default updates the expectation too.
@@ -47,16 +37,12 @@ def check(name, condition, detail=""):
         failures.append(name)
 
 
-def scratch_dir():
-    return tempfile.mkdtemp(dir=SCRATCH)
-
-
 def world(user_conf=None, project_conf=None, session_conf=None, git=True):
     """Creates a config home and a repo with a `sub` directory, and writes each given layer to its file.
 
     Layers go through real files rather than flags, so the tests exercise the paths the command
     resolves. Returns (home, repo)."""
-    home, repo = scratch_dir(), scratch_dir()
+    home, repo = tempfile.mkdtemp(), tempfile.mkdtemp()
     os.makedirs(os.path.join(repo, "sub"))
     if git:
         subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
@@ -93,7 +79,7 @@ def aged_argparse():
 
     On 3.13 and later, `-50_000` parses without any guard in the command, so placing this on PYTHONPATH
     is what makes the guard observable."""
-    directory = scratch_dir()
+    directory = tempfile.mkdtemp()
     with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
         handle.write("import argparse, re\n"
                      "_born = argparse._ActionsContainer.__init__\n"
@@ -109,7 +95,7 @@ def meddling_writer(text, target=None):
 
     This makes the race happen on every run. With no `target`, the text lands on each destination. A named
     `target` is a layer the command reads but does not write, which exercises the second resolution."""
-    directory = scratch_dir()
+    directory = tempfile.mkdtemp()
     with open(os.path.join(directory, "sitecustomize.py"), "w") as handle:
         handle.write(f"import sys\nsys.path.insert(0, {os.path.join(PLUGIN, 'lib')!r})\n"
                      "import ceiling_config\n"
@@ -144,7 +130,7 @@ exit 1
 
 def stub_git(behaviour):
     """Returns a directory holding a `git` with the given script, for placing first on PATH."""
-    directory = scratch_dir()
+    directory = tempfile.mkdtemp()
     standing_in = os.path.join(directory, "git")
     with open(standing_in, "w") as handle:
         handle.write(behaviour)
@@ -167,14 +153,14 @@ def repo_with_commit(path):
 
 def gate(home, repo, tokens, session=SESSION):
     """Runs the real Stop hook at a token count. Returns (verdict, ceiling), read from the hook's log line."""
-    transcript = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, dir=SCRATCH)
+    transcript = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     transcript.write(json.dumps({"type": "user", "isSidechain": False,
                                  "message": {"content": "hi"}}) + "\n")
     transcript.write(json.dumps({"type": "assistant", "isSidechain": False, "message": {"usage": {
         "input_tokens": 2, "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": tokens - 2, "output_tokens": 0}}}) + "\n")
     transcript.close()
-    log = os.path.join(scratch_dir(), "ceiling.log")
+    log = os.path.join(tempfile.mkdtemp(), "ceiling.log")
     env = dict(os.environ, MEMENTO_CONFIG_HOME=home, MEMENTO_CEILING_LOG=log)
     done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=env,
                           cwd=repo, input=json.dumps(
@@ -383,7 +369,7 @@ for name, git, said in (("fails", FAILING_GIT, "unlistable"),
 # The project is the anchored one, not the working directory. Other cases run with both in one place,
 # so this case is the one that tells them apart.
 home, repo = world()
-elsewhere = scratch_dir()
+elsewhere = tempfile.mkdtemp()
 subprocess.run(["git", "init", "-q", elsewhere], check=True, capture_output=True)
 code, out, err = run(home, elsewhere, "set", "project", "400_000", anchor=repo)
 check("a project move writes the anchored project even when run from another repository",
@@ -394,7 +380,7 @@ check("and leaves the repository it happened to be standing in alone",
       str(conf(elsewhere, PROJECT_CONFIG_DIR, CONFIG_NAME)))
 
 home, repo = world()
-code, out, err = run(home, scratch_dir(), "set", "project", "400_000", anchor=repo)
+code, out, err = run(home, tempfile.mkdtemp(), "set", "project", "400_000", anchor=repo)
 check("and finds the anchored repository from a directory that is no repository at all",
       code == 0 and project_conf(repo) == "ceiling = 400000\n", f"{code} {err}")
 
@@ -418,7 +404,7 @@ check("and leaves that session's own layer in force over it",
 # A change reaches only the project it was made in. No scope may write the user layer, and another
 # project must stay untouched.
 home, repo = world()
-other = scratch_dir()
+other = tempfile.mkdtemp()
 os.makedirs(os.path.join(other, PROJECT_CONFIG_DIR))
 subprocess.run(["git", "init", "-q", other], check=True, capture_output=True)
 for scope, value in (("session", "+100_000"), ("project", "+100_000"), ("project", "off"),
@@ -624,9 +610,9 @@ check("a layer the filesystem will not open refuses the same way",
 
 # A worktree's project is the checkout it belongs to, since a file at the worktree's root stops
 # applying once the worktree is deleted.
-home = scratch_dir()
-main = repo_with_commit(os.path.join(scratch_dir(), "main"))
-linked = os.path.join(scratch_dir(), "linked")
+home = tempfile.mkdtemp()
+main = repo_with_commit(os.path.join(tempfile.mkdtemp(), "main"))
+linked = os.path.join(tempfile.mkdtemp(), "linked")
 subprocess.run(["git", "worktree", "add", "-q", linked, "-b", "side"], cwd=main, check=True,
                capture_output=True)
 code, out, err = run(home, linked, "set", "project", "300_000")
@@ -637,9 +623,9 @@ check("and leaves no second project file at the worktree's own root",
 
 # A submodule's git dir sits in the superproject's storage, which no walk up from the submodule
 # reaches. The project file must be written at the submodule's own root.
-home = scratch_dir()
-superproject = repo_with_commit(os.path.join(scratch_dir(), "super"))
-vendored = repo_with_commit(os.path.join(scratch_dir(), "vendored"))
+home = tempfile.mkdtemp()
+superproject = repo_with_commit(os.path.join(tempfile.mkdtemp(), "super"))
+vendored = repo_with_commit(os.path.join(tempfile.mkdtemp(), "vendored"))
 subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", vendored,
                 "vendor"], cwd=superproject, check=True, capture_output=True)
 inside = os.path.join(superproject, "vendor")
@@ -655,7 +641,7 @@ check("and the hook reads that file back from inside the submodule",
 
 # A session started from a git hook inherits GIT_DIR and GIT_WORK_TREE naming the hook's repository.
 home, repo = world()
-other = repo_with_commit(os.path.join(scratch_dir(), "other"))
+other = repo_with_commit(os.path.join(tempfile.mkdtemp(), "other"))
 os.environ.update(GIT_DIR=os.path.join(other, ".git"), GIT_WORK_TREE=other)
 try:
     code, out, err = run(home, os.path.join(repo, "sub"), "set", "project", "300_000")

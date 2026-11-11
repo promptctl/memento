@@ -427,12 +427,13 @@ The handoff was NOT delivered. It is preserved at: $RECORDED}" >&2
 }
 
 # Makes a temp file or refuses: _mktemp_or_exit <varname> <purpose>. The result is assigned through the
-# caller's variable, so the exit belongs to this script. `mktemp -t` ignores $TMPDIR on macOS, so the
-# refusal names the purpose and no directory.
+# caller's variable, so the exit belongs to this script. The template names its directory, as macOS
+# mktemp given none, or only -t, ignores $TMPDIR for the per-user temp directory.
 _mktemp_or_exit() {
-  local __var="$1" purpose="$2" path
-  path=$(mktemp -t "finalize-$purpose.XXXXXX") \
-    || _refuse "cannot create the $purpose tempfile."
+  local __var="$1" purpose="$2" dir="${TMPDIR:-/tmp}" path
+  dir="${dir%/}"
+  path=$(mktemp "$dir/finalize-$purpose.XXXXXX") \
+    || _refuse "cannot create the $purpose tempfile in $dir."
   printf -v "$__var" '%s' "$path"
 }
 

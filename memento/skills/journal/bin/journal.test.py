@@ -4,28 +4,20 @@ origin, and what each exit code means. The chain and the record are proven in `l
 this runs the real command as a subprocess against a scratch journal. Run with: python3 journal.test.py
 """
 
-import atexit
 import os
-import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-SCRATCH = Path(tempfile.mkdtemp(prefix="journal-cli-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so every
-# command run here is given that and what its case sets. A git hook's environment names its
-# repository in GIT_DIR, and a git command that inherited it would act on that repository.
-path = os.environ["PATH"]
-os.environ.clear()
-os.environ.update(PATH=path, HOME=str(SCRATCH))
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home())
 from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Summary,  # noqa: E402
                      entries, noted, record, woke)
 
@@ -39,7 +31,7 @@ def check(name, condition, detail=""):
 
 
 def scratch_journal():
-    return Path(tempfile.mkdtemp(dir=SCRATCH)) / "journal.jsonl"
+    return Path(tempfile.mkdtemp()) / "journal.jsonl"
 
 
 def run(journal, *argv, session="session-A", cwd=SCRATCH):
@@ -53,7 +45,7 @@ def run(journal, *argv, session="session-A", cwd=SCRATCH):
 
 def summarize(journal, text, **how):
     """Records a summary as an agent does: written to a file, and given to the command by path."""
-    path = Path(tempfile.mkdtemp(dir=SCRATCH)) / "summary.md"
+    path = Path(tempfile.mkdtemp()) / "summary.md"
     path.write_text(text)
     return run(journal, "summary", "--file", str(path), **how)
 
@@ -109,11 +101,12 @@ check("summary records the file's text for the calling session, without its surr
       (done, kept))
 # A git that cannot list the variables naming a repository cannot say which branch is the directory's,
 # though it names one when asked.
-unlisting = Path(tempfile.mkdtemp(dir=SCRATCH))
+unlisting = Path(tempfile.mkdtemp())
 (unlisting / "git").write_text("#!/bin/sh\n[ \"$1\" = symbolic-ref ] && echo inherited && exit 0\n"
                                "echo 'git: unlistable' >&2\nexit 1\n")
 (unlisting / "git").chmod(0o755)
 unlisted = scratch_journal()
+path = os.environ["PATH"]
 os.environ["PATH"] = f"{unlisting}:{path}"
 try:
     done = summarize(unlisted, "under a git that cannot list", cwd=repo)

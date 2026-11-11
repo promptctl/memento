@@ -5,7 +5,6 @@ Each case runs the real hook and `ceiling` programs as subprocesses under scratc
 checks the files on disk, since cc-candybar reads only those files. Run with: python3 candybar.test.py
 """
 
-import atexit
 import json
 import os
 import shutil
@@ -13,10 +12,11 @@ import subprocess
 import sys
 import tempfile
 
-SCRATCH = tempfile.mkdtemp(prefix="candybar-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-
 LIB = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+hermetic.home()
 PLUGIN = os.path.dirname(LIB)
 STOP_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
 CLEAR_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "clear-session-ceiling.py")
@@ -25,7 +25,6 @@ CEILING = os.path.join(PLUGIN, "skills", "ceiling", "bin", "ceiling")
 SHIPPED = os.path.join(PLUGIN, "cc-candybar", "plugin.json5")
 VERSION = json.load(open(os.path.join(PLUGIN, ".claude-plugin", "plugin.json")))["version"]
 INSTALLED = f"// memento {VERSION}\n".encode() + open(SHIPPED, "rb").read()
-sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING  # noqa: E402
 
 SESSION = "0b6c3a4e-5d1f-4a7e-9c2b-8e1f0a3d5c71"
@@ -43,7 +42,7 @@ class World:
     session folder exists, as it does once cc-candybar has loaded the plugin."""
 
     def __init__(self, storage=True, user_conf=None):
-        self.root = tempfile.mkdtemp(dir=SCRATCH)
+        self.root = tempfile.mkdtemp()
         self.home = os.path.join(self.root, "home")
         self.project = os.path.join(self.root, "project")
         self.data = os.path.join(self.root, "data")
@@ -60,11 +59,8 @@ class World:
                 handle.write(user_conf)
 
     def env(self, **extra):
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME", "CLAUDE_CODE_SESSION_ID")}
-        env.update({"MEMENTO_CONFIG_HOME": self.home, "XDG_DATA_HOME": self.data,
-                    "MEMENTO_CEILING_LOG": self.log, **extra})
-        return env
+        return {**os.environ, "MEMENTO_CONFIG_HOME": self.home, "XDG_DATA_HOME": self.data,
+                "MEMENTO_CEILING_LOG": self.log, **extra}
 
     def hook(self, script, event, cwd=None, env=None, **payload):
         body = {"hook_event_name": event, "session_id": SESSION, "cwd": self.project,
@@ -229,7 +225,7 @@ check("a status that cannot be written exits 3, and the move it follows stands",
       (done.returncode, done.stderr, done.stdout))
 # A publish that fails for any reason, not only a filesystem error, also exits 3. Here the manifest
 # has no version, so the definition cannot be stamped.
-broken = os.path.join(tempfile.mkdtemp(dir=SCRATCH), "memento")
+broken = os.path.join(tempfile.mkdtemp(), "memento")
 shutil.copytree(PLUGIN, broken)
 with open(os.path.join(broken, ".claude-plugin", "plugin.json"), "w") as handle:
     handle.write("{}")

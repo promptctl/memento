@@ -6,21 +6,20 @@ scratch config directory, and the script form runs once as the launcher runs it.
 Run with: python3 transcript.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+hermetic.home()
 import transcript  # noqa: E402
 from transcript import Settings, Unrecorded, recorded_settings  # noqa: E402
 
-SCRATCH = tempfile.mkdtemp(prefix="transcript-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 SESSION = "5f0c2b1e-8d3a-4c6f-9e7b-1a2d3c4e5f60"
 failures = []
 
@@ -55,7 +54,7 @@ def tool_result():
 def config(*transcripts, session=SESSION, tail=""):
     """A config directory holding one transcript per entry, each a list of records, in its own project
     slug. `tail` is appended raw to the last one, as a partial append leaves it."""
-    root = tempfile.mkdtemp(dir=SCRATCH)
+    root = tempfile.mkdtemp()
     for slug, records in enumerate(transcripts):
         project = os.path.join(root, "projects", f"-project-{slug}")
         os.makedirs(project)

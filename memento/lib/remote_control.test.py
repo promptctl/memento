@@ -17,6 +17,9 @@ import uuid
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+hermetic.home()
 import fake_session_server  # noqa: E402
 import remote_control  # noqa: E402
 from fake_session_server import SessionLog  # noqa: E402

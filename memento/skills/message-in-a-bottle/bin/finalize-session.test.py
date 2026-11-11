@@ -40,6 +40,9 @@ HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "hyphenate-handoff.py")
 WAKE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "journal-wake.py")
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
+import hermetic  # noqa: E402
+
+HOME = hermetic.home()
 from journal import Close, Summary, chain, entries  # noqa: E402
 
 REAL_DIRS = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -495,9 +498,7 @@ exec %s "$@"
 RMDIR_READLINK_DIR = os.path.join(FIXTURES, "rmdirreadlink")
 os.mkdir(RMDIR_READLINK_DIR)
 install(RMDIR_READLINK_DIR, "readlink", RMDIR_READLINK)
-# A mktemp that refuses, so the launcher sees a tmpdir with no room in it. The
-# environment cannot produce this portably: macOS `mktemp -t` ignores $TMPDIR, so
-# only a refusing mktemp fails on every platform.
+# A mktemp that refuses, so the launcher sees a tmpdir with no room in it.
 NO_TMPDIR_BIN = os.path.join(FIXTURES, "notmpdir")
 os.mkdir(NO_TMPDIR_BIN)
 install(NO_TMPDIR_BIN, "mktemp", '#!/bin/bash\necho "mktemp: no space left on device" >&2\nexit 1\n')
@@ -512,7 +513,7 @@ os.mkdir(NO_LOGFILE_BIN)
 install(NO_LOGFILE_BIN, "mktemp", '''#!/bin/bash
 for arg in "$@"; do
   case "$arg" in
-    finalize-log.*) echo "mktemp: no space left on device" >&2; exit 1 ;;
+    */finalize-log.*) echo "mktemp: no space left on device" >&2; exit 1 ;;
   esac
 done
 exec /usr/bin/mktemp "$@"
@@ -526,7 +527,7 @@ os.mkdir(BAD_GOALPATH_BIN)
 install(BAD_GOALPATH_BIN, "mktemp", '''#!/bin/bash
 for arg in "$@"; do
   case "$arg" in
-    finalize-goal.*) echo "/nonexistent-finalize-dir/goal"; exit 0 ;;
+    */finalize-goal.*) echo "/nonexistent-finalize-dir/goal"; exit 0 ;;
   esac
 done
 exec /usr/bin/mktemp "$@"
@@ -636,7 +637,7 @@ def settle_detached(done, workdir, tmux_state):
 def settle_remote(done, url):
     """After a real remote-control run: the remote worker's log, read once the worker has exited, so the
     case sees every post it made. The worker is known by the session it posts to, which each case names
-    uniquely: its files are mktemp's, which on macOS sit outside the case's TMPDIR."""
+    uniquely."""
     def worker_running():
         rows = subprocess.run(["/bin/ps", "-eo", "args="], capture_output=True, text=True).stdout
         return any(f"--remote-worker {url} " in row for row in rows.split("\n"))
@@ -723,7 +724,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     os.mkdir(verbs)
     os.symlink(HOST_SHIM, os.path.join(verbs, host_argv[0]))
     pidfile = os.path.join(workdir, "root.pid")
-    home = os.path.join(workdir, "home") if config_unset else os.environ.get("HOME", workdir)
+    home = os.path.join(workdir, "home") if config_unset else HOME
     config_dir = os.path.join(home, ".claude") if config_unset else os.path.join(workdir, "config")
     write_transcripts(config_dir, transcripts)
     tmux_state = os.path.join(workdir, "tmux")
@@ -1010,11 +1011,13 @@ check("-- hands a lone two-dash word through to the handoff",
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # A tempfile the launcher cannot create is refused with its own message and the
-# contract's exit code. The goal mktemp runs before the handoff is written, so nothing
-# is recorded.
+# contract's exit code, naming the $TMPDIR it asked for the file in. The goal mktemp runs
+# before the handoff is written, so nothing is recorded.
 done, bodies = argv_case("a real handoff", path_prefix=NO_TMPDIR_BIN)
-check("a tempfile it cannot make is refused as the launcher, not as mktemp",
-      done.returncode == REFUSED_RC and "finalize-session:" in done.stderr and bodies == [],
+check("a tempfile it cannot make is refused as the launcher, not as mktemp, naming $TMPDIR",
+      done.returncode == REFUSED_RC and "finalize-session:" in done.stderr
+      and f"tempfile in {os.path.join(tempfile.gettempdir(), 'finalize-argv.')}" in done.stderr
+      and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # A refusal while creating the log tempfile happens after the handoff is written, so
@@ -2011,7 +2014,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": HOME,
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_STATE": tmux_state,
@@ -2209,7 +2212,7 @@ def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": HOME,
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_PANE_TEXT": pane_text,

@@ -4,9 +4,15 @@
 import json
 import os
 import subprocess
+import sys
 import unittest
 
-HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hyphenate-handoff.py")
+HERE = os.path.dirname(os.path.abspath(__file__))
+HOOK = os.path.join(HERE, "hyphenate-handoff.py")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib"))
+import hermetic  # noqa: E402
+
+hermetic.home()
 
 
 def rewritten(command):

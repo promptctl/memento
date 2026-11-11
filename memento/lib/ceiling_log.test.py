@@ -7,19 +7,18 @@ directory.
 Run with: python3 ceiling_log.test.py
 """
 
-import atexit
 import contextlib
 import io
 import json
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-SCRATCH = Path(tempfile.mkdtemp(prefix="ceiling-log-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home())
 import ceiling_log  # noqa: E402
 from ceiling_log import run  # noqa: E402
 
@@ -36,7 +35,7 @@ def check(name, condition, detail=""):
 def ran(work, payload=PAYLOAD, every_line=lambda hook: {}, log=None):
     """Runs `work` as the hook `test hook` on Stop, logging to `log` or to a log of its own. Returns
     (what it raised or None, the log's lines, stderr)."""
-    ceiling_log.LOG_FILE = log or Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+    ceiling_log.LOG_FILE = log or Path(tempfile.mkdtemp()) / "hook.log"
     sys.stdin = io.StringIO(payload if isinstance(payload, str) else json.dumps(payload))
     stderr = io.StringIO()
     raised = None
@@ -135,7 +134,7 @@ check("a verdict carrying every character str.splitlines breaks a line at, and a
       raised is None and len(lines) == 1 and lines[0].endswith(
           " -> allow\\n\\r\\x0b\\x0c\\x1c\\x1d\\x1e\\x85\\u2028\\u2029under\\x1b[0m"), (raised, lines))
 
-full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+full = Path(tempfile.mkdtemp()) / "hook.log"
 seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
 full.write_text("".join(f"{line}\n" for line in seeded))
 ran(decided, log=full)
@@ -156,7 +155,7 @@ check("a log over the cap a second time holds one dropped-lines line, at its top
       [n for n, line in enumerate(lines) if line.startswith("[older lines dropped")] == [0],
       lines[:2])
 
-unended = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+unended = Path(tempfile.mkdtemp()) / "hook.log"
 unended.write_text("x" * (ceiling_log.LOG_CAP + 1))
 ran(decided, log=unended)
 lines = unended.read_text().splitlines()
@@ -168,12 +167,12 @@ check("a log over the cap with no line ending in its newest half keeps none of i
 brim = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 94 - 1)]
 body = "".join(f"{line}\n" for line in brim)
 brimful = "p" * (ceiling_log.LOG_CAP - len(body)) + "\n" + body
-cut = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+cut = Path(tempfile.mkdtemp()) / "hook.log"
 cut.write_text(brimful)
 ran(decided, log=cut)
 written = cut.read_text()
 rewritten = written[:written.rstrip("\n").rfind("\n") + 1]
-killed = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+killed = Path(tempfile.mkdtemp()) / "hook.log"
 killed.write_text(rewritten + brimful[len(rewritten):])
 ran(decided, log=killed)
 lines = killed.read_text().splitlines()
@@ -184,7 +183,7 @@ check("a log one byte over the cap whose rewrite was killed before the cut, writ
       and newest == brim[-len(newest):] and lines[-1].endswith(" -> allow-under"),
       (len(brimful), lines[:2], [line for line in newest if line not in brim][:2]))
 
-under = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+under = Path(tempfile.mkdtemp()) / "hook.log"
 under.write_text("an older line\n")
 ran(decided, log=under)
 lines = under.read_text().splitlines()
