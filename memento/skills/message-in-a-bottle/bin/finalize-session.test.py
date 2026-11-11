@@ -1111,12 +1111,18 @@ for name, bridge in (("", None), (" though it inherited the bridge kind", "not-a
     check(f"the same direct host whose claude names no session is a daemon host{name}, relaunched in a detached window",
           picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
           f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# A claude started from the remote session's shell inherits its environment, but the session is the
-# outer one's: posting its /clear would reset the session that started this one.
-done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
+# A claude started from the remote session's shell inherits its environment, but not its command line,
+# which names no session: posting its /clear would reset the session that started this one.
+done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="not-a-cse-id")
 check("a claude started inside a remote-control session never posts to that session",
       remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, ")
       and "another claude (process " in ancestry(done) and "is further up" in ancestry(done),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# The command line decides, not the walk's kind: a process between the session's claude and its server
+# confines the walk, and a relaunch would take the session's claude from the server.
+done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
+check("a claude whose command line names its session posts to it, whatever sits between it and its server",
+      remote_picked(done) == session_url("cse_resets02") and ancestry(done).startswith("confined, "),
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
            bridge="cse_resets03", launcher_flags=("--goal", "the tests pass"))

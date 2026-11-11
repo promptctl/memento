@@ -59,8 +59,13 @@ check("a spawned session's command line names its session's URL, server included
       remote_control.session_url(SPAWNED) == URL)
 check("a claude started with no --sdk-url names none",
       remote_control.session_url("claude --permission-mode auto") is None)
-error = raised(lambda: remote_control.session_url(SPAWNED + " --resume=https://api.anthropic.com/v1/code/sessions/cse_other"))
-check("a command line naming two sessions is refused, naming both",
+check("a URL the claude's starting prompt quotes is no session of its own",
+      remote_control.session_url(f"claude --permission-mode auto look at {URL} and --sdk-url-ish {URL}") is None)
+check("the --sdk-url=<url> spelling names the session too",
+      remote_control.session_url(f"claude --print --sdk-url={URL}") == URL)
+error = raised(lambda: remote_control.session_url(
+    SPAWNED + " --sdk-url https://api.anthropic.com/v1/code/sessions/cse_other"))
+check("a command line giving two sessions as --sdk-url is refused, naming both",
       isinstance(error, Refused) and "cse_other" in str(error) and SESSION in str(error), error)
 
 # --- where the login is kept -------------------------------------------------
@@ -114,6 +119,17 @@ check("and idle once the log holds the turn's result", log.idle)
 session.post(remote_control.user_event(session.id, "/clear"))
 log.read()
 check("a /clear's reset is read with its sequence number", log.last_reset > head and log.idle, vars(log))
+
+class Malformed:
+    id = "cse_malformed"
+
+    def events_after(self, cursor):
+        return [{"payload": {"type": "assistant"}}]
+
+
+error = raised(Log(Malformed(), 0).read)
+check("an event with no sequence number is a refusal, not a crash",
+      type(error) is Refused and "no sequence number" in str(error), error)
 
 
 class Recording:
@@ -217,14 +233,19 @@ check("and is posted once it has", session.prompts()[-1] == "/goal the tests pas
 
 
 class Unanswered:
-    """A session whose posts get no answer; `lands` says whether each still reaches the log."""
-    def __init__(self, log, lands):
-        self.log, self.id, self.lands = log, log.id, lands
+    """A session whose first `failing` posts fail in passing; `lands` says whether each still reaches the
+    log. It records the uuid of every post it is sent."""
+    def __init__(self, log, lands, failing=1000):
+        self.log, self.id, self.lands, self.failing, self.sent = log, log.id, lands, failing, []
 
     def events_after(self, cursor):
         return self.log.events_after(cursor)
 
     def post(self, event):
+        self.sent.append(event["payload"]["uuid"])
+        if not self.failing:
+            return self.log.post(event)
+        self.failing -= 1
         if self.lands:
             self.log.post(event)
         raise Transient("POST got no answer: timed out")
@@ -232,14 +253,23 @@ class Unanswered:
 
 session, head = fresh()
 session.end_turn()
-withheld, notes = run_deliver(Unanswered(session, lands=True), head)
+unanswered = Unanswered(session, lands=True)
+withheld, notes = run_deliver(unanswered, head)
 check("a post whose answer was lost but which landed is found in the log by its uuid, and the handoff goes on",
-      withheld is None and session.prompts() == ["/clear", "the handoff"], (withheld, notes))
+      withheld is None and session.prompts() == ["/clear", "the handoff"] and len(unanswered.sent) == 2,
+      (withheld, notes, unanswered.sent))
+session, head = fresh()
+session.end_turn()
+unanswered = Unanswered(session, lands=False, failing=1)
+withheld, notes = run_deliver(unanswered, head)
+check("one that failed in passing and did not land is posted again as the same event, and lands once",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and unanswered.sent[0] == unanswered.sent[1] and len(unanswered.sent) == 3, (withheld, unanswered.sent))
 session, head = fresh()
 session.end_turn()
 withheld, _ = run_deliver(Unanswered(session, lands=False), head, reset_timeout=1)
 check("one the log never shows is withheld, saying so",
-      withheld[0] == "the /clear" and "never showed it" in withheld[1], withheld)
+      withheld[0] == "the /clear" and "never showed the prompt" in withheld[1], withheld)
 
 # Two workers on one session: an earlier handoff's, waiting to post its carried goal once the handoff's
 # turn ends, and the next agent's, started from inside that turn, waiting to post /clear once it ends.
@@ -328,6 +358,8 @@ error = raised(lambda: flaky.events_after(0))
 check("a 5xx is a passing failure", isinstance(error, Transient) and "HTTP 502" in str(error), error)
 closed = remote_control.Session("http://127.0.0.1:9/v1/code/sessions/cse_x", login("tok"))
 check("so is a server that does not answer", isinstance(raised(closed.head), Transient))
+error = raised(remote("cse_garbled01").head)
+check("a 2xx that is not JSON is a refusal naming what came", type(error) is Refused and "<html>" in str(error), error)
 
 # --- the script, as the launcher runs it ---------------------------------------
 
@@ -338,6 +370,12 @@ check("session prints the session's URL", done.returncode == 0 and done.stdout.s
 done = subprocess.run([sys.executable, "-I", script, "session", "claude"], capture_output=True, text=True)
 check("session for a claude that names none prints nothing and exits 0",
       done.returncode == 0 and done.stdout.strip() == "", (done.returncode, done.stdout, done.stderr))
+missing = os.path.join(LIB, "no-such-handoff.md")
+done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
+                       missing, missing, "1", "1"], capture_output=True, text=True)
+check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",
+      done.returncode == 1 and "the /clear was NOT posted" in done.stdout and missing in done.stdout
+      and not fake_session_server.REQUESTS.get("cse_lost01"), (done.returncode, done.stdout, done.stderr))
 done = subprocess.run([sys.executable, "-I", script, "deliver", URL], capture_output=True, text=True)
 check("a command missing an argument prints the usage and exits 2",
       done.returncode == 2 and "usage: remote_control.py session" in done.stderr

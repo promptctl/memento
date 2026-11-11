@@ -24,6 +24,7 @@ idle, which a `result` after the last prompt marks.
 
 import fcntl
 import hashlib
+import http.client
 import inspect
 import json
 import os
@@ -35,6 +36,7 @@ import time
 import traceback
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -46,8 +48,9 @@ POLL_CEILING_SECONDS = 5
 # --resume=). A tool call sees neither the id nor the worker token naming it: its CLAUDE_CODE_SESSION_ID
 # is a local uuid, and Claude Code strips the token from a bridge child's tools (2.1.299).
 # [LAW:one-source-of-truth] The URL also names the server, so the login goes where the session's own
-# claude goes.
-SESSION_URL = re.compile(r"https?://[^\s/]+/v1/code/sessions/cse_[A-Za-z0-9]+")
+# claude goes. Only the --sdk-url value is read, since the command line also holds any prompt the claude
+# was started with, which may quote a URL.
+SESSION_URL = re.compile(r"(?:^|\s)--sdk-url[=\s](https?://[^\s/]+/v1/code/sessions/cse_[A-Za-z0-9]+)(?=\s|$)")
 
 
 class Refused(Exception):
@@ -66,7 +69,7 @@ def session_url(command_line):
     """The URL of the one session a claude's command line names, or None when it names none."""
     found = set(SESSION_URL.findall(command_line))
     if len(found) > 1:
-        raise Refused(f"the claude's command line names {len(found)} Remote Control sessions "
+        raise Refused(f"the claude's command line gives {len(found)} Remote Control sessions as --sdk-url "
                       f"({', '.join(sorted(found))}), not one: {command_line[:300]}")
     return found.pop() if found else None
 
@@ -162,7 +165,7 @@ class Session:
                 "anthropic-client-platform": "claude_code_cli"})
             try:
                 with urllib.request.urlopen(call, timeout=30) as answer:
-                    return json.loads(answer.read())
+                    text = answer.read()
             except urllib.error.HTTPError as error:
                 if error.code == 401 and attempt == 1:
                     self.login.refresh()
@@ -170,9 +173,13 @@ class Session:
                 reason = (f"{method} {self.url}{path} answered HTTP {error.code}: "
                           f"{error.read().decode(errors='replace')[:400]}")
                 raise (Transient if error.code == 429 or error.code >= 500 else Refused)(reason) from None
-            # A refused connection, a timeout, a reset: no answer at all.
-            except OSError as error:
-                raise Transient(f"{method} {self.url}{path} got no answer: {error}") from None
+            # A refused connection, a timeout, a reset, a body cut short: no whole answer.
+            except (OSError, http.client.HTTPException) as error:
+                raise Transient(f"{method} {self.url}{path} got no answer: {error!r}") from None
+            try:
+                return json.loads(text)
+            except ValueError:
+                raise Refused(f"{method} {self.url}{path} answered with no JSON: {text[:400]!r}") from None
 
     def post(self, event):
         """Appends an event to the log and returns the sequence number it was given."""
@@ -191,13 +198,16 @@ class Session:
             raise Refused(f"session {self.id}'s log answered with no last event: {page!r}") from None
 
     def events_after(self, cursor):
-        """Every log event after sequence number `cursor`, oldest first, across pages."""
+        """Every log event after sequence number `cursor`, oldest first, across pages. A page's next_cursor
+        is the server's token, passed back as it came."""
         events = []
         while True:
-            page = self.request("GET", f"/events?sort_order=asc&cursor={cursor}")
+            page = self.request("GET", f"/events?sort_order=asc&cursor={urllib.parse.quote(str(cursor), safe='')}")
             events += page.get("data", [])
             if not page.get("next_cursor"):
                 return events
+            if str(page["next_cursor"]) == str(cursor):
+                raise Refused(f"session {self.id}'s log gave back the cursor it was read at: {cursor!r}")
             cursor = page["next_cursor"]
 
 
@@ -216,7 +226,11 @@ class Log:
 
     def read(self):
         for event in self.session.events_after(self.cursor):
-            seq, payload = int(event["sequence_num"]), event.get("payload") or {}
+            try:
+                seq, payload = int(event["sequence_num"]), event.get("payload") or {}
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise Refused(f"session {self.session.id}'s log holds an event with no sequence number: "
+                              f"{event!r}"[:400]) from None
             kind = payload.get("type")
             if kind == "user":
                 self.idle = False
@@ -228,36 +242,53 @@ class Log:
             self.cursor = seq
 
 
-def await_state(log, settled, timeout, note, clock=time.monotonic, sleep=time.sleep):
-    """Reads the log until `settled(log)`: True once it is, False at the timeout. A read that got no answer
-    is noted and tried again, since the next may get one; a refusal ends the wait.
-    [LAW:no-ambient-temporal-coupling] The session's own log is the one signal of where it stands."""
+def retry(attempt, timeout, clock=time.monotonic, sleep=time.sleep):
+    """Calls `attempt()` until it returns something other than None, and returns that, or None at the
+    timeout. Between calls it waits POLL_SECONDS, doubling up to POLL_CEILING_SECONDS."""
     deadline, interval = clock() + timeout, POLL_SECONDS
     while True:
-        try:
-            log.read()
-        except Transient as error:
-            note(f"reading the log failed, retrying: {error}")
-        if settled(log):
-            return True
-        if clock() >= deadline:
-            return False
+        outcome = attempt()
+        if outcome is not None or clock() >= deadline:
+            return outcome
         sleep(interval)
         interval = min(interval * 2, POLL_CEILING_SECONDS)
 
 
-def post(session, log, text, timeout, note):
-    """Posts a prompt and returns its sequence number. A post that got no answer may still have landed, so
-    the log settles it: the prompt's uuid in the log is the post having landed."""
-    event = user_event(session.id, text)
+def read(log, note):
+    """Reads the log on. A read that failed in passing is noted and left for the next, which may pass; a
+    refusal propagates."""
     try:
-        return session.post(event)
+        log.read()
     except Transient as error:
-        note(f"the post got no answer, reading the log for it: {error}")
-        posted = event["payload"]["uuid"]
-        if await_state(log, lambda log: posted in log.prompts, timeout, note):
-            return log.prompts[posted]
-        raise Refused(f"the post got no answer and the log never showed it: {error}") from None
+        note(f"reading the log failed, retrying: {error}")
+
+
+def await_state(log, settled, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """Reads the log until `settled(log)`: True once it is, False at the timeout.
+    [LAW:no-ambient-temporal-coupling] The session's own log is the one signal of where it stands."""
+    return retry(lambda: read(log, note) or settled(log) or None, timeout, clock, sleep) is not None
+
+
+def post(session, log, text, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """Posts a prompt and returns its sequence number. A post that failed in passing may still have landed,
+    so before it is sent again the log settles it: the prompt's uuid in the log is the post having landed.
+    It is sent again as the same event, uuid and all."""
+    event = user_event(session.id, text)
+    posted, failures = event["payload"]["uuid"], []
+
+    def attempt():
+        try:
+            return session.post(event)
+        except Transient as error:
+            note(f"posting failed, reading the log for it before posting again: {error}")
+            failures.append(error)
+        read(log, note)
+        return log.prompts.get(posted)
+
+    seq = retry(attempt, timeout, clock, sleep)
+    if seq is None:
+        raise Refused(f"posting failed and the log never showed the prompt: {failures[-1]}")
+    return seq
 
 
 def exclusive(session_id, note):
@@ -336,19 +367,20 @@ def _head(session):
 
 
 def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout, *setting):
-    with open(msgfile) as handle:
-        handoff = handle.read()
-    with open(goalfile) as handle:
-        goal = handle.read()
-    lock = exclusive(session.rpartition("/")[2], _note)  # noqa: F841 - held until exit
     _note(f"waking; remote-control session {session}, log head {after_seq}")
     try:
+        lock = exclusive(session.rpartition("/")[2], _note)  # noqa: F841 - held until exit
+        with open(msgfile) as handle:
+            handoff = handle.read()
+        with open(goalfile) as handle:
+            goal = handle.read()
         remote = Session(session, _login())
         deliver(remote, Log(remote, int(after_seq)), handoff, goal, setting, float(idle_timeout),
                 float(reset_timeout), _note)
     except Withheld as error:
         what, why = error.args
-    except Refused as error:
+    # Before the first post: no lock, no handoff or goal to read, or no login.
+    except (Refused, OSError) as error:
         what, why = "the /clear", str(error)
     else:
         _note("delivered")

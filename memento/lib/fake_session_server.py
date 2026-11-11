@@ -9,6 +9,7 @@ only in the id it uses:
   cse_stalls...   a /clear brings no reset
   cse_refuses...  every request is answered 403
   cse_flaky...    the first read of the log after the head is answered 502
+  cse_garbled...  every request is answered 200 with a page of HTML
   anything else   the asking turn ends once the log's head has been read
 Every request must carry TOKEN as its bearer, or it is answered 401.
 """
@@ -16,6 +17,7 @@ Every request must carry TOKEN as its bearer, or it is answered 401.
 import http.server
 import json
 import threading
+import urllib.parse
 
 TOKEN = "fixture-login"
 # A read returns at most PAGE events and a next_cursor, so following pages is exercised.
@@ -67,22 +69,18 @@ class SessionLog:
         with self.lock:
             return int(self.events[-1]["sequence_num"])
 
-    def page(self, cursor):
-        """The events after `cursor`, PAGE at a time, as the server pages them."""
+    def events_after(self, cursor):
         with self.lock:
-            after = [event for event in self.events if int(event["sequence_num"]) > int(cursor)]
+            return [event for event in self.events if int(event["sequence_num"]) > int(cursor)]
+
+    def page(self, cursor):
+        """The events after `cursor`, PAGE at a time, as the server pages them over HTTP. Its next_cursor
+        is a token holding a `+`, which reaches the server intact only when the client encodes it."""
+        after = self.events_after(cursor[len("p+"):] if cursor.startswith("p+") else cursor)
         page = {"data": after[:PAGE]}
         if len(after) > PAGE:
-            page["next_cursor"] = after[PAGE - 1]["sequence_num"]
+            page["next_cursor"] = "p+" + after[PAGE - 1]["sequence_num"]
         return page
-
-    def events_after(self, cursor):
-        events, page = [], self.page(cursor)
-        events += page["data"]
-        while page.get("next_cursor"):
-            page = self.page(page["next_cursor"])
-            events += page["data"]
-        return events
 
     def prompts(self):
         return [text for text, _ in self.posts]
@@ -135,13 +133,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         refused = self.refusal()
         if refused:
             return self.answer(*refused)
+        if "/cse_garbled" in self.path:
+            self.send_response(200)
+            self.end_headers()
+            return self.wfile.write(b"<html>sign in</html>")
         log = log_of(self.path.split("/")[4].split("?")[0])
         if "sort_order=desc&limit=1" in self.path:
             head = log.head()
             if not log.id.startswith("cse_busy"):
                 log.end_turn()
             return self.answer(200, {"data": [{"sequence_num": str(head), "payload": {"type": "assistant"}}]})
-        self.answer(200, log.page(self.path.rpartition("cursor=")[2]))
+        self.answer(200, log.page(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["cursor"][0]))
 
 
 def serve():

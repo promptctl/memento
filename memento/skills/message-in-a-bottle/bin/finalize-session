@@ -551,9 +551,32 @@ case "$MODE" in
       || _refuse "cannot read the command line of claude process $CLAUDE_PID"
     REMOTE_SESSION=$(python3 -I "$REMOTE" session "$ARGS") \
       || _refuse "cannot tell which Remote Control session claude process $CLAUDE_PID is"
+    # A claude started with a Remote Control session's URL takes its input from that session's stream, so
+    # no pane or relaunch reaches it, whatever sits above it: its prompts come through its log on the
+    # session server. `claude remote-control` starts such a claude as its direct child (hosted).
+    if [[ -n "$REMOTE_SESSION" ]]; then
+      # [LAW:no-ambient-temporal-coupling] Nothing is posted during this turn: a prompt posted now can be
+      # handed to this turn as text at its next tool call, so a /clear would be read, not run. The worker
+      # waits for the turn's end from the log's last event now.
+      # Reading it here puts a refusal (no login, a 401 or 403) in front of the agent that asked, in a dry
+      # run too.
+      HEAD=$(python3 -I "$REMOTE" head "$REMOTE_SESSION") \
+        || _refuse "remote-control transport: cannot read the log of $REMOTE_SESSION"
+      if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
+        echo "[dry-run] transport=remote-control session=$REMOTE_SESSION log_head=$HEAD msgfile=$MSGFILE"
+        echo "[dry-run] carried goal: ${GOAL:-(none)}"
+        echo "[dry-run] requested model: ${MODEL:-(none)} effort: ${EFFORT:-(none)}"
+        exit 0
+      fi
+      _mktemp_or_exit LOGFILE log
+      nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
+        ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 &
+      trap - EXIT
+      echo "handoff scheduled → remote-control session $REMOTE_SESSION: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
+
     # The pane id is the target: tmux keeps it for the pane's life, where a session:window.pane index can
     # shift before the worker wakes.
-    if [[ "$KIND" == pane ]]; then
+    elif [[ "$KIND" == pane ]]; then
       TARGET="$PANE"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
         echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
@@ -566,28 +589,6 @@ case "$MODE" in
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
-
-    # A `claude remote-control` server hosts this session, whose claude it started with the session's URL,
-    # so the session's input is that server's pipe and no pane or relaunch reaches it. Its prompts come
-    # through its log on the session server instead.
-    elif [[ "$KIND" == hosted && -n "$REMOTE_SESSION" ]]; then
-      if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
-        echo "[dry-run] transport=remote-control session=$REMOTE_SESSION msgfile=$MSGFILE"
-        echo "[dry-run] carried goal: ${GOAL:-(none)}"
-        echo "[dry-run] requested model: ${MODEL:-(none)} effort: ${EFFORT:-(none)}"
-        exit 0
-      fi
-      # [LAW:no-ambient-temporal-coupling] Nothing is posted during this turn: a prompt posted now can be
-      # handed to this turn as text at its next tool call, so a /clear would be read, not run. The worker
-      # waits for the turn's end from the log's last event now.
-      # Reading it here puts a refusal (no login, a 401 or 403) in front of the agent that asked.
-      HEAD=$(python3 -I "$REMOTE" head "$REMOTE_SESSION") \
-        || _refuse "remote-control transport: cannot read the log of $REMOTE_SESSION"
-      _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
-        ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 &
-      trap - EXIT
-      echo "handoff scheduled → remote-control session $REMOTE_SESSION: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
 
     # $ITERM_SESSION_ID is inherited like $TMUX_PANE, so it names this session's terminal only when the walk
     # showed nothing above this session that could own it.
