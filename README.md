@@ -5,11 +5,11 @@ session has a beginning, a middle, and an end, and the ends are where work gets 
 a PR review half-addressed, a session that hits the context limit and forgets what it
 was doing.
 
-`memento` gives you three skills you invoke by hand: work a PR review to clean, write a
-handoff for the next session, move the context ceiling for this session or its project.
-It also ships one hook, which takes the handoff skill and makes it mandatory — past a
-token ceiling, a session cannot end its turn until it has closed out: written the handoff
-and reset.
+`memento` gives you four skills you invoke by hand: work a PR review to clean, write a
+handoff for the next session, keep a journal of what each session did, move the context
+ceiling for this session or its project. Its hooks take the handoff skill and make it
+mandatory — past a token ceiling, a session cannot end its turn until it has closed out:
+written the handoff and reset — and journal which handoff each session woke from.
 
 ## Install
 
