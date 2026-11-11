@@ -706,13 +706,14 @@ case "$MODE" in
         printf '%s' "$CLAIMED" > "$GOALFILE" \
           || _refuse "cannot write the carried goal to $GOALFILE, so it was NOT carried on; deliver it by hand once the session is up: /goal $CLAIMED"
       fi
-      # The worker reads the goal and writes to the log after this launcher exits, so they are its own.
-      trap - EXIT
       # The worker waits through the agent's turns, up to a day, so it is double-forked out of this Bash
       # call's process tree, as the detached worker is: Claude Code kills a stopped call's tree by
       # parentage, and nohup guards only against hangup.
       ( nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" "$$" "$LAUNCHER_IDENT" \
-          ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 & )
+          ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 & ) \
+        || _refuse "remote-control transport: cannot start the worker${CLAIMED:+; the goal an earlier handoff carried was claimed, so deliver it by hand once the session is up: /goal $CLAIMED}"
+      # The worker reads the goal and writes to the log after this launcher exits, so they are its own.
+      trap - EXIT
       echo "handoff scheduled → remote-control session $REMOTE_SESSION: once this call returns, this turn is interrupted, then /clear and the handoff are posted, and a carried goal once the handoff's turn ends (log: $LOGFILE)"
 
     # The pane id is the target: tmux keeps it for the pane's life, where a session:window.pane index can

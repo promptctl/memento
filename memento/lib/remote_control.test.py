@@ -572,6 +572,22 @@ publication.held.close()
 check("a goal whose publisher is gone is dropped by its claim, saying so",
       remote_control.claim(HANDOFFS, "cse_dead01", notes.append) == "" and "is gone" in notes[0]
       and not os.listdir(HANDOFFS), (notes, os.listdir(HANDOFFS)))
+publication, rename = remote_control.publish(HANDOFFS, "cse_exits", "the tests pass"), os.rename
+
+
+def exiting_first(source, target):
+    """The publisher exits between the claim's test of its lock and the claim's rename."""
+    publication.held.close()
+    rename(source, target)
+
+
+os.rename = exiting_first
+try:
+    taken = remote_control.claim(HANDOFFS, "cse_exits", notes.append)
+finally:
+    os.rename = rename
+check("a goal whose publisher exits after the claim tested its lock is still claimed",
+      taken == "the tests pass" and not os.listdir(HANDOFFS), (taken, os.listdir(HANDOFFS)))
 remote_control.publish(HANDOFFS, "cse_dead02", "the old goal").held.close()
 publication = remote_control.publish(HANDOFFS, "cse_dead02", "the new goal")
 check("and one a live publisher replaced is claimed as live",

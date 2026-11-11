@@ -572,26 +572,34 @@ def publish(directory, session_id, goal):
 
 def claim(directory, session_id, note):
     """The goal published for the session, claimed by the close-out of the successor's first turn, or ""
-    when there is none. The name is renamed onto the claim first, and only the file now held is tested: its
-    publisher is alive when its lock is held. A goal whose publisher died is dropped, saying so, since a
-    goal whose carrier died is not adopted days later."""
+    when there is none. Its publisher is alive when its lock is held, which is tested before the name is
+    renamed onto the claim: a publisher that exits after the test had taken the goal back or lost it to
+    this claim, and a file published between the two, which the claim then holds, is a live one. A goal
+    whose publisher died is dropped, saying so, since a goal whose carrier died is not adopted days later."""
     path = published_goal(directory, session_id)
     mine = f"{path}.claim.{os.getpid()}"
     try:
-        os.rename(path, mine)
+        tested = open(path)
     except FileNotFoundError:
         return ""
-    try:
-        with open(mine) as handle:
-            goal = handle.read()
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return goal
-        note(f"dropped the goal published for this session, since the worker that published it is gone: {goal}")
-        return ""
-    finally:
-        os.remove(mine)
+    with tested:
+        try:
+            fcntl.flock(tested, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            live = False
+        except BlockingIOError:
+            live = True
+        try:
+            os.rename(path, mine)
+        except FileNotFoundError:
+            return ""
+        live = live or os.stat(mine).st_ino != os.fstat(tested.fileno()).st_ino
+    with open(mine) as handle:
+        goal = handle.read()
+    os.remove(mine)
+    if live:
+        return goal
+    note(f"dropped the goal published for this session, since the worker that published it is gone: {goal}")
+    return ""
 
 
 def exclusive(directory, session_id, note):
