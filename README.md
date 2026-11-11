@@ -80,7 +80,9 @@ finalize-session --summary-file <path> [--goal '<condition>'] [--model <model>] 
 `--summary-file` is required. The file holds the outgoing session's summary of what it did,
 what came of it and why, and the launcher journals it as that session's close-out (see
 `journal` below) before the handoff file has its name, so a run with no summary, or one the
-journal refuses, exits 2 and leaves no handoff. The summary travels in a file because
+journal refuses, exits 2 and leaves no handoff. The launcher removes the file once the
+journal holds its text, so no later run can journal it as its own. The summary travels in a
+file because
 memento's hook respells git and shell names through a `finalize-session` command's whole
 text; for the same reason a summary path holding single letters joined by hyphens is
 refused, since it cannot be told from one the hook changed.

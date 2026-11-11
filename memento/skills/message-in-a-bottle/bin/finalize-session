@@ -23,6 +23,7 @@
 # The launcher journals the session's close-out, the summary it is given and the handoff's path, with
 # `journal close`. It does so once the handoff's text is on disk and before that file has the handoff's
 # name, so a refused close-out leaves no handoff, and a handoff that cannot be written leaves no entry.
+# The summary's file is removed once both hold, so no later run can journal it as its own.
 #
 # Modes:
 #   launcher:         see --help
@@ -369,7 +370,8 @@ usage: finalize-session --summary-file <path> [--goal <condition>]
   --summary-file <path>   required: the file holding this session's close-out
                           summary, which is what was done, what came of it, and
                           why. It is journaled with the handoff, and is what a
-                          later session's `journal recall` reads of this one
+                          later session's `journal recall` reads of this one.
+                          The file is removed once the journal holds its text
   --goal <condition>      re-issue an active /goal into the reset session, which
                           otherwise wakes with no goal and stops an unattended run
   --model <model>         start the next session on this model; omit to leave the
@@ -486,7 +488,7 @@ case "$MODE" in
     # Every run takes a summary, a dry run included, so whether argv is valid does not depend on the
     # environment. This refusal is where a session holding older instructions learns the flag.
     [[ -n "${SUMMARY_FILE+given}" ]] \
-      || _refuse "--summary-file <path> is required. The file holds this session's close-out summary: what was done, what came of it, and why. It is journaled with the handoff, and it is all a later session's \`journal recall\` reads of this one. Skill(memento:message-in-a-bottle) says how to write it."
+      || _refuse "--summary-file <path> is required, ahead of the message: finalize-session --summary-file <path> '<message>'. The file holds this session's close-out summary: what was done, what came of it, and why. It is journaled with the handoff, and it is all a later session's \`journal recall\` reads of this one. Skill(memento:message-in-a-bottle) says how to write it."
     # memento's hook (hooks/scripts/hyphenate-handoff.py) respells a git or shell name anywhere in a
     # finalize-session command, a path included: /tmp/git-summary.md arrives as /tmp/g-i-t-summary.md. A file
     # already at the respelled path would be journaled as this session's summary, so a path holding the
@@ -496,9 +498,11 @@ case "$MODE" in
     SPELLED='(^|[^A-Za-z])([A-Za-z](-[A-Za-z])+)([^A-Za-z]|$)'
     [[ ! "$SUMMARY_FILE" =~ $SPELLED ]] \
       || _refuse "the summary path $SUMMARY_FILE holds '${BASH_REMATCH[2]}'. Single letters joined by hyphens are how memento's hook spells a git or shell name in a finalize-session command, so this path cannot be told from one the hook changed. Write the summary at a path that holds neither such a name nor that spelling, and pass that path."
-    # Trailing newlines are dropped by the substitution. What a summary may be is the journal's to say.
-    SUMMARY=$(cat -- "$SUMMARY_FILE") \
-      || _refuse "cannot read the summary file '$SUMMARY_FILE'"
+    # Read by the shell and not by cat, which takes - for its own input: a summary arriving there in a
+    # heredoc is command text the hook has respelled. Trailing newlines are dropped by the substitution.
+    # What a summary may be is the journal's to say.
+    SUMMARY=$(<"$SUMMARY_FILE") \
+      || _refuse "cannot read the summary file '$SUMMARY_FILE'. If an earlier run journaled it, that run removed it: write it again."
 
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
@@ -532,6 +536,11 @@ case "$MODE" in
       || _refuse "cannot give the handoff its name, $MSGFILE"
     # $RECORDED stays empty until the file has the handoff's name, so no refusal before this names a handoff.
     RECORDED="$MSGFILE"
+    # The journal holds the summary now, so the file that carried it is removed: left behind, it would be
+    # journaled again, as the summary of whichever later run names the same path. A dry run journaled
+    # nothing and leaves it.
+    [[ -n "${FINALIZE_DRY_RUN:-}" ]] || rm -f -- "$SUMMARY_FILE" \
+      || _refuse "cannot remove the summary file $SUMMARY_FILE now that the journal holds it. Left there, it would be journaled again by a later run that names the same path. Write the summary where this run can remove it."
     # The goal is passed as a file value, empty when none was carried. Workers re-issue /goal only when it is non-empty.
     printf '%s' "$GOAL" > "$GOALFILE" \
       || _refuse "cannot write the carried goal to $GOALFILE"
