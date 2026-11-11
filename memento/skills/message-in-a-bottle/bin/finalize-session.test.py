@@ -307,13 +307,13 @@ PS = r"""#!/bin/bash
 #                           whatever session launched the suite. A host a case plants
 #                           sits below the runner and is still seen.
 #   $FIXTURE_PS_FAILS       the whole table read exits 1.
-#   $FIXTURE_MUTE_IDENTITY  the identity read (`-o lstart=,ucomm= -p <pid>`)
+#   $FIXTURE_MUTE_IDENTITY  the identity read (`-o stat=,lstart=,ucomm= -p <pid>`)
 #                           exits 0 printing nothing, which is what a pid whose
 #                           holder exited reports: success with no identity in it.
 # Every other ps call passes straight through.
 set -uo pipefail
 for arg in "$@"; do
-  [ "$arg" = "lstart=,ucomm=" ] && [ -n "${FIXTURE_MUTE_IDENTITY:-}" ] && exit 0
+  [ "$arg" = "stat=,lstart=,ucomm=" ] && [ -n "${FIXTURE_MUTE_IDENTITY:-}" ] && exit 0
 done
 [ "${1:-}" = "-eo" ] || exec /bin/ps "$@"
 [ -z "${FIXTURE_PS_FAILS:-}" ] || { echo "ps: fixture refuses the process table" >&2; exit 1; }
@@ -1578,11 +1578,18 @@ try:
 finally:
     shutil.rmtree(claims, ignore_errors=True)
 
+def identity_of(pid):
+    # The worker's `read -r state raw` drops the state column and the padding around the rest, and keeps
+    # the spacing inside it; matching that exactly matters, because the whole check is a string comparison
+    # against it.
+    return subprocess.run(["ps", "-o", "stat=,lstart=,ucomm=", "-p", str(pid)],
+                          text=True, capture_output=True).stdout.strip().split(None, 1)[1]
+
+
 # The worker's first post interrupts the asking turn, which would abort the launcher's Bash call were it
 # still running, so the worker posts nothing while the launcher lives.
 launcher = subprocess.Popen(["sleep", "30"])
-identity = subprocess.run(["ps", "-o", "lstart=,ucomm=", "-p", str(launcher.pid)],
-                          text=True, capture_output=True).stdout.rstrip("\n")
+identity = identity_of(launcher.pid)
 waits = tempfile.mkdtemp(prefix="finalize-waits.")
 login_dir = os.path.join(waits, "config")
 os.mkdir(login_dir)
@@ -2100,16 +2107,9 @@ exit $status
 """)
 
 
-def identity_of(pid):
-    # `$(...)` strips trailing newlines and nothing else; matching that exactly
-    # matters, because the whole check is a string comparison against it.
-    return subprocess.run(["ps", "-o", "lstart=,ucomm=", "-p", str(pid)],
-                          text=True, capture_output=True).stdout.rstrip("\n")
-
-
 def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), successor="records",
                 hold_launcher=False, retirement=("signal",), stop_leaves=False, unsignallable=False,
-                kill_after_mark=False):
+                kill_after_mark=False, reaped=True):
     """Run one detached worker over a real process standing in for the old claude.
 
     The old session has an id of its own, and `done.fence` is the handed-off hook's answer for it once the
@@ -2128,7 +2128,8 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     as background session BACKGROUND_ID, so `done.victim_signal` tells its stop (SIGUSR1)
     from a TERM or KILL; `stop_leaves` has the daemon accept the stop and leave the victim
     running. The victim is reaped the moment it exits, as a claude is by the process that
-    started it, so ps never shows it lingering as a zombie.
+    started it, so ps never shows it lingering as a zombie; unless `reaped`, it lingers as one
+    until the worker is done.
     """
     if unsignallable:
         # Run as root, the worker's signals would reach pid 1.
@@ -2137,7 +2138,8 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         victim_pid = 1
     else:
         proc = subprocess.Popen(list(victim), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        threading.Thread(target=proc.wait, daemon=True).start()
+        if reaped:
+            threading.Thread(target=proc.wait, daemon=True).start()
         victim_pid = proc.pid
     old_session = str(uuid.uuid4())
     real = identity_of(victim_pid)
@@ -2283,6 +2285,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     stop_after_gone = pool.submit(worker_case, "reused", retirement=("stop", HOST_SHIM, BACKGROUND_ID))
     unsignallable = pool.submit(worker_case, "match", unsignallable=True)
     mark_killed = pool.submit(worker_case, "match", kill_after_mark=True)
+    zombie = pool.submit(worker_case, "match", reaped=False)
     iterm_unsignallable = pool.submit(iterm_worker_case, goal="ship the thing")
 
 
@@ -2389,6 +2392,11 @@ for future, name in ((stop_refused, "the daemon refuses the stop"),
     retired, done = future.result()
     check(f"a session that may still run stays fenced when {name}",
           not retired and done.fence is not None and "stays fenced" in done.stdout, worker_detail(done))
+retired, done = stop_after_gone.result()
+check("a session whose old process had already gone stays fenced after its stop, since a respawn's exit "
+      "cannot be checked",
+      done.fence is not None and "cannot be checked" in done.stdout and "stays fenced" in done.stdout,
+      worker_detail(done))
 retired, done = spawn_fails.result()
 check("a handoff refused before any take leaves the session unfenced, since it keeps the work",
       done.fence is None and "fenced" not in done.stdout, worker_detail(done))
@@ -2401,6 +2409,10 @@ retired, done = mark_killed.result()
 check("a worker that dies between its mark and its verdict leaves no verdict, and a fence naming the successor "
       "that took the message",
       done.verdict == "" and done.fence is not None and SUCCESSOR_NAMED in done.fence, worker_detail(done))
+retired, done = zombie.result()
+check("an old process that exits but is not yet reaped is retired, and the fence comes down",
+      retired and "terminated" in done.stdout and "survived" not in done.stdout and done.fence is None,
+      worker_detail(done))
 
 # The iTerm2 worker types its relaunch into the session its old claude ran in, so a claude that survives
 # would read the line as a prompt.
@@ -2408,7 +2420,8 @@ done = iterm_unsignallable.result()
 check("an iTerm2 worker whose old claude survives KILL sends no relaunch, and says so, naming the goal",
       done.returncode == 1 and done.osascript_log == ""
       and "ERROR: old claude 1 survived KILL" in done.stdout and "the relaunch was NOT sent" in done.stdout
-      and "carried goal NOT delivered: /goal ship the thing" in done.stdout,
+      and "carried goal NOT delivered: /goal ship the thing" in done.stdout
+      and "Run the handoff by hand: claude --session-id 0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} osascript={done.osascript_log!r}")
 
 

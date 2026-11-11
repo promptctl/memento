@@ -53,6 +53,17 @@ class Fence(unittest.TestCase):
         self.assertIsNone(decided("old-3"))
         self.assertEqual(script("clear", "old-3").returncode, 0)
 
+    def test_a_record_that_stands_but_cannot_be_read_still_denies_naming_why(self):
+        script("mark", "old-5", "its successor is session new-5.")
+        os.chmod(handed_off.path("old-5"), 0)
+        try:
+            output = decided("old-5")
+        finally:
+            os.chmod(handed_off.path("old-5"), 0o600)
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("could not be read", output["permissionDecisionReason"])
+        self.assertIn(handed_off.path("old-5"), output["permissionDecisionReason"])
+
     def test_a_mark_that_cannot_be_written_fails_naming_why(self):
         # A HOME of its own, where a file stands where the records' directory goes.
         home = tempfile.mkdtemp()
@@ -62,6 +73,13 @@ class Fence(unittest.TestCase):
         marked = script("mark", "old-4", "its successor is session new-4.", home=home)
         self.assertEqual(marked.returncode, 2)
         self.assertIn(blocked, marked.stderr)
+
+    def test_a_mark_whose_write_fails_leaves_no_record_to_fence_on(self):
+        # A directory where the staged file goes fails the write before anything is renamed.
+        os.makedirs(handed_off.path("old-6") + ".staged")
+        marked = script("mark", "old-6", "its successor is session new-6.")
+        self.assertEqual(marked.returncode, 2)
+        self.assertIsNone(decided("old-6"))
 
 
 if __name__ == "__main__":

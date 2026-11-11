@@ -25,18 +25,24 @@ def path(session_id):
 
 def reason(session_id):
     """The successor the session handed off to, as the worker recorded it, or None when the session has
-    no record, which is also so when a file stands where the records' directory goes."""
+    no record, which is also so when a file stands where the records' directory goes. A record that stands
+    but cannot be read raises OSError."""
     try:
-        with open(path(session_id)) as record:
+        with open(path(session_id), encoding="utf-8") as record:
             return record.read()
     except (FileNotFoundError, NotADirectoryError):
         return None
 
 
 def mark(session_id, successor):
+    # A record stands whole or not at all: it is written beside its place and renamed onto it, so a write
+    # that fails leaves only the staged file, which nothing reads, and the worker that hears the failure
+    # is right that the session is not fenced.
     os.makedirs(os.path.dirname(path(session_id)), exist_ok=True)
-    with open(path(session_id), "w") as record:
+    staged = path(session_id) + ".staged"
+    with open(staged, "w", encoding="utf-8") as record:
         record.write(successor)
+    os.replace(staged, path(session_id))
     print(path(session_id))
     return 0
 

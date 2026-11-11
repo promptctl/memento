@@ -296,16 +296,18 @@ _relaunch_target() { # <transport name>
 }
 
 # Returns what a pid holds, as its start time and executable name. Those survive the pid being reissued.
-# Empty output means the pid holds nothing, and that is a failure to identify.
+# Empty output means the pid holds nothing, and that is a failure to identify. So does a zombie: it has
+# exited and keeps its start time and name only until its parent reaps it.
 #
 # A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
 # time tells the two apart. The detached worker acts on a pid up to a minute after capturing it, so this
 # check is as strict as the ancestry walk's pid-reuse guard.
 _process_identity() {
-  local pid="${1:-}" raw
+  local pid="${1:-}" raw state
   [ -n "$pid" ] || return 1
-  raw=$(ps -o lstart=,ucomm= -p "$pid" 2>/dev/null) || return 1
-  [ -n "$raw" ] || return 1
+  raw=$(ps -o stat=,lstart=,ucomm= -p "$pid" 2>/dev/null) || return 1
+  read -r state raw <<<"$raw"
+  [[ -n "$raw" && "$state" != Z* ]] || return 1
   printf '%s' "$raw"
 }
 
@@ -345,14 +347,17 @@ _retire() { # <pid> <identity captured at launch>
 # crash, and respawns it with a prompt to continue, beside its successor. So this never signals: a session
 # whose stop failed sits idle at the end of the turn that handed off, where a respawned one goes on with the
 # work. It is stopped by its id even when the old process has already left its pid, since the daemon may
-# have respawned it under another. Reports through the worker's log, and returns 1 when the session may
-# still run.
+# have respawned it under another, whose exit nothing here can watch. Reports through the worker's log, and
+# returns 1 when the session may still run, a respawn included.
 _stop_background() {
-  local said seen="still running"
-  _still_captured_process "$3" "$4" || seen="already gone, so any process the daemon now runs for it is a respawn"
-  log "asking the daemon to stop background session $2 (old claude $3: $seen)"
+  local said gone=""
+  _still_captured_process "$3" "$4" || gone=": already gone, so any process the daemon now runs for it is a respawn"
+  log "asking the daemon to stop background session $2 (old claude $3${gone:-: still running})"
   if ! said=$(python3 -I "$BACKGROUND" stop "$1" "$2" 2>&1); then
     log "ERROR: the daemon did not stop background session $2: $said. Old claude $3 is still live beside its successor; stop it with: claude stop $2"
+    return 1
+  elif [[ -n "$gone" ]]; then
+    log "the daemon accepted the stop of background session $2 ($said), but its old claude $3 had already gone, so whether a respawn of it still runs cannot be checked"
     return 1
   elif ! _await_exit "$3" "$4"; then
     log "ERROR: the daemon accepted the stop of background session $2 ($said), but old claude $3 still runs 10s later, beside its successor; stop it with: claude stop $2"
@@ -950,7 +955,7 @@ Nothing on this machine to deliver the close-out into."
     # Stop the running claude so the shell regains the session. One that survives would read the relaunch
     # line as a prompt, so nothing is written to the session then.
     if ! _retire "$CLAUDE_PID" "$CLAUDE_IDENT"; then
-      log "ERROR: the relaunch was NOT sent, since claude $CLAUDE_PID still runs in iTerm2 session $UUID; that session is unchanged"
+      log "ERROR: the relaunch was NOT sent, since claude $CLAUDE_PID still runs in iTerm2 session $UUID; that session is unchanged. Run the handoff by hand: $RELAUNCH"
       if [[ -s "$GOALFILE" ]]; then
         log "carried goal NOT delivered: /goal $(cat "$GOALFILE")"
       fi

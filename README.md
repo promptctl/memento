@@ -107,8 +107,8 @@ that runs it needs a timeout of 60s or more. Once the new session has taken the 
 the old one makes is denied, since a session with no terminal has no way to end its `/goal`, which would
 otherwise go on working beside its successor. Once the launcher returns, the old session is retired: one a
 daemon hosts (`claude --bg`) through `claude stop`, since the daemon respawns a session whose process
-is signalled, and any other with a signal. One that cannot be retired stays fenced, and the worker's
-log names the file to remove to lift it. A session `claude remote-control` spawned is
+is signalled, and any other with a signal. One whose retirement cannot be checked stays fenced, and each
+call it is denied names the file to remove to lift it. A session `claude remote-control` spawned is
 reached through the session server instead: once the turn ends, a worker posts `/clear` and
 then the message into it, as claude.ai does, under your claude.ai login, and the launcher
 returns at once. Prefix `FINALIZE_DRY_RUN=1` to see which one
