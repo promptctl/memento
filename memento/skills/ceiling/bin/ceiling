@@ -15,7 +15,6 @@ import collections
 import functools
 import math
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +27,7 @@ from ceiling_config import (CONFIG_NAME, PROJECT_CONFIG_DIR, USER_CONFIG,  # noq
                             live_shared, project_file, session_directory, staging)
 from candybar import publish  # noqa: E402
 from ceiling_log import reason_of  # noqa: E402
+from git_at import git_at  # noqa: E402
 
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 ANCHOR = anchored(os.getcwd())
@@ -58,12 +58,12 @@ def this_session():
 def asked_of_git(anchor, question):
     """Returns the path git reports for `question`, relative to the anchor, or None if git reports nothing.
 
-    git runs from the anchor rather than this process's directory, so a `cd` in the session cannot
-    change the repository. Older git versions echo an unknown option back as output, so an answer
-    that repeats the question is refused instead of being used as a path."""
+    git runs about the anchor rather than this process's directory or an inherited GIT_DIR, so
+    neither a `cd` in the session nor a git hook's environment can change the repository. Older git
+    versions echo an unknown option back as output, so an answer that repeats the question is
+    refused instead of being used as a path."""
     try:
-        done = subprocess.run(["git", "rev-parse", question],
-                              capture_output=True, text=True, cwd=anchor)
+        done = git_at(anchor, "rev-parse", question)
     except OSError as failure:
         sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
     if done.returncode != 0:

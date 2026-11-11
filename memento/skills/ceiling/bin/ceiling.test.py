@@ -124,12 +124,21 @@ def meddling_writer(text, target=None):
     return directory
 
 
-ECHOING_GIT = """#!/bin/sh
-# Echoes any `--` option back and exits 0, as an old `git rev-parse` does for unknown options.
-for argument in "$@"; do
+ECHOING = """for argument in "$@"; do
   case "$argument" in --*) echo "$argument" ;; esac
 done
 exit 0
+"""
+# Echoes any `--` option back and exits 0, as an old `git rev-parse` does for unknown options. One
+# older than 2.13 still lists the variables naming a repository, as git has since 1.7.
+ECHOING_GIT = """#!/bin/sh
+[ "$*" = "rev-parse --local-env-vars" ] && echo GIT_DIR && exit 0
+""" + ECHOING
+ECHOING_EVERYTHING_GIT = "#!/bin/sh\n" + ECHOING
+
+FAILING_GIT = """#!/bin/sh
+echo "git: unlistable" >&2
+exit 1
 """
 
 
@@ -358,6 +367,18 @@ check("and no config lands in a directory named after a flag",
       project_conf(repo) is None and session_conf(home) is None
       and [name for name in os.listdir(repo) if name.startswith("--")] == [],
       f"{project_conf(repo)} {sorted(os.listdir(repo))}")
+
+# A git that runs but cannot list the variables naming a repository cannot be asked about one.
+for name, git, said in (("fails", FAILING_GIT, "unlistable"),
+                        ("hands that question back", ECHOING_EVERYTHING_GIT, "--local-env-vars")):
+    home, repo = world()
+    code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(git))
+    check(f"a git that {name} when asked for the repository variables is refused in one line",
+          code == 1 and err.startswith("ceiling: cannot run git")
+          and "cannot list the variables" in err and said in err and "Traceback" not in err,
+          f"{code} {err}")
+    check("and nothing is written", project_conf(repo) is None and session_conf(home) is None,
+          f"{project_conf(repo)} {session_conf(home)}")
 
 # The project is the anchored one, not the working directory. Other cases run with both in one place,
 # so this case is the one that tells them apart.
@@ -631,6 +652,19 @@ check("and writes nothing into the superproject's git storage",
 verdict, enforced = gate(home, inside, 310_000, session="sub-1")
 check("and the hook reads that file back from inside the submodule",
       enforced == 300_000 and verdict == "block", f"{verdict} {enforced}")
+
+# A session started from a git hook inherits GIT_DIR and GIT_WORK_TREE naming the hook's repository.
+home, repo = world()
+other = repo_with_commit(os.path.join(scratch_dir(), "other"))
+os.environ.update(GIT_DIR=os.path.join(other, ".git"), GIT_WORK_TREE=other)
+try:
+    code, out, err = run(home, os.path.join(repo, "sub"), "set", "project", "300_000")
+finally:
+    del os.environ["GIT_DIR"], os.environ["GIT_WORK_TREE"]
+check("a project move writes the directory's repository whatever repository GIT_DIR names",
+      code == 0 and project_conf(repo) == "ceiling = 300000\n", f"{code} {out} {err}")
+check("and writes nothing beside the repository GIT_DIR names",
+      project_conf(other) is None, str(project_conf(other)))
 
 # --- the gate reads what this wrote -----------------------------------------------------
 
