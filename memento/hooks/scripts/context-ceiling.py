@@ -22,9 +22,12 @@ from ceiling_log import hook_payload, log, reason_of  # noqa: E402
 # read from the layers again rather than passed in, so one reader serves every caller. A bar that
 # cannot be updated does not stop the gate.
 from candybar import published  # noqa: E402
+from journal import SUMMARY_CAP  # noqa: E402
 from transcript import records_newest_first  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
+# The journal's command, which records the summary the launcher's close-out takes.
+JOURNAL = os.path.join(PLUGIN_ROOT, "skills", "journal", "bin", "journal")
 # Matched by basename rather than absolute path, because an agent may reach the launcher by name or
 # through a wrapper. The basename is a substring of the full path, so it covers both.
 LAUNCHER_NAME = os.path.basename(LAUNCHER)
@@ -45,11 +48,12 @@ Band = collections.namedtuple("Band", "label reason spent")
 # finishing blocks carry it, because the escalation never needs to name a closing block.
 FINISHING_MARK = "Finish the unit of work you are in the middle of"
 
-# The close-out instructions both bands share: the launcher command and the
+# The close-out instructions both bands share: the two commands of a close-out, the summary and the
 # handoff contract. Each band's reason is its own opening, this text, and one clause on what not to do.
 CLOSE_OUT = """
+    {journal} summary --file <path> &&
     {launcher} '<handoff message>'
-Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
+The first command records what this session did, for the sessions after it to read back. Before you run it, use the Write tool to put what the session did, what came of it and why, in at most {cap:,} characters, in a file under /tmp, and give that file's path. The second records the handoff and resets this session into it; it is refused where the first has not run. Load Skill(memento:message-in-a-bottle) for the handoff contract. The handoff message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
 
 FINISHING = Band("finish",
     "CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. "
@@ -163,7 +167,8 @@ def stop(hook, tokens, ceiling):
             return f"spent-{band.label}", {"systemMessage": band.spent.format(
                 tokens=tokens, ceiling=ceiling, limit=limit)}
     return band.label, {"decision": "block", "reason": band.reason.format(
-        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER))}
+        tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
+        journal=shlex.quote(JOURNAL), cap=SUMMARY_CAP)}
 
 # The ceiling depends on the payload's session and project, so it is resolved here rather than at
 # import. Any failure before the gate decides is logged with the values established so far, then

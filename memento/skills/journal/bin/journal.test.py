@@ -20,8 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
-from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, entries,  # noqa: E402
-                     noted, record, woke)
+from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Summary,  # noqa: E402
+                     entries, noted, record, woke)
 
 failures = []
 
@@ -46,12 +46,19 @@ def run(journal, *argv, session="session-A", cwd=SCRATCH):
                           cwd=cwd)
 
 
+def summarize(journal, text, **how):
+    """Records a summary as an agent does: written to a file, and given to the command by path."""
+    path = Path(tempfile.mkdtemp(dir=SCRATCH)) / "summary.md"
+    path.write_text(text)
+    return run(journal, "summary", "--file", str(path), **how)
+
+
 repo = SCRATCH / "repo"
 subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
 subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/journal-lane"], cwd=repo, check=True,
                capture_output=True)
 
-# --- note and close write the calling session's entry -------------------------------------------
+# --- note, summary and close write the calling session's entry ----------------------------------
 
 journal = scratch_journal()
 done = run(journal, "note", "the parser\nloses a byte", cwd=repo)
@@ -83,21 +90,55 @@ check("and is found by the words in it",
       done.returncode == 0 and "  text: Ran git pull --rebase, then bash -n" in done.stdout
       and "didn't help" in done.stdout and "several words" not in done.stdout, done)
 
-done = run(journal, "close", "--handoff", "/handoffs/1.md", "--summary=- shipped the parser")
-last = entries(journal)[-1]
-check("close records the handoff written and the summary, which may open with a dash",
-      done.returncode == 0 and isinstance(last, Close)
-      and (last.session, last.handoff, last.summary)
-      == ("session-A", "/handoffs/1.md", "- shipped the parser"), (done, last))
-
 done = run(journal, "note", "from nowhere", session=None)
 check("a note from an environment that names no session is kept, with the session absent",
       done.returncode == 0 and entries(journal)[-1].session is None, done)
+
+journal = scratch_journal()
+did = "- Ran git pull --rebase, then bash -n on the launcher.\n\nIt holds: `sh` isn't $SHELL."
+done = summarize(journal, f"\n{did}\n\n\n", cwd=repo)
+kept = entries(journal)
+check("summary records the file's text for the calling session, without its surrounding whitespace",
+      done.returncode == 0 and done.stdout == "" and len(kept) == 1 and isinstance(kept[0], Summary)
+      and (kept[0].session, kept[0].branch, kept[0].summary) == ("session-A", "journal-lane", did),
+      (done, kept))
+done = run(journal, "close", "--handoff", "/handoffs/1.md")
+kept = entries(journal)
+check("close records the handoff written, with the summary the session recorded",
+      done.returncode == 0 and done.stdout == "" and len(kept) == 2 and isinstance(kept[1], Close)
+      and (kept[1].session, kept[1].handoff, kept[1].summary)
+      == ("session-A", "/handoffs/1.md", did), (done, kept))
+done = run(journal, "close", "--handoff", "/handoffs/2.md")
+check("a second close-out exits 2, says how to record a summary, and writes nothing",
+      done.returncode == 2 and "since its last close-out" in done.stderr
+      and "journal summary --file <path>" in done.stderr and entries(journal) == kept, done)
+summarize(journal, "a first draft")
+summarize(journal, "the retry")
+# A close-out the journal refuses for its handoff leaves the summary for the one that follows.
+done = run(journal, "close", "--handoff", "")
+check("a close-out with no handoff path exits 2, says why, and writes nothing",
+      done.returncode == 2 and "not absolute" in done.stderr and len(entries(journal)) == 4, done)
+done = run(journal, "close", "--handoff", "/handoffs/2.md")
+last = entries(journal)[-1]
+check("of two summaries a close-out holds the later",
+      done.returncode == 0 and (last.handoff, last.summary) == ("/handoffs/2.md", "the retry"),
+      (done, last))
+
+# An environment that names no session closes out with the summary recorded the same way.
+journal = scratch_journal()
+summarize(journal, "did it unnamed", session=None)
+summarize(journal, "did A")
+done = run(journal, "close", "--handoff", "/handoffs/1.md", session=None)
+last = entries(journal)[-1]
+check("a close-out that names no session holds the summary recorded with none",
+      done.returncode == 0 and (last.session, last.summary) == (None, "did it unnamed"),
+      (done, last))
 
 # --- text the journal does not take --------------------------------------------------------------
 
 journal = scratch_journal()
 (SCRATCH / "empty.md").write_text("\n")
+(SCRATCH / "long.md").write_text("x" * (SUMMARY_CAP + 1))
 for name, argv in (("an empty note", ("note", "  ")),
                    ("no note at all", ("note",)),
                    ("a note whose file is empty", ("note", "--file", str(SCRATCH / "empty.md"))),
@@ -106,12 +147,11 @@ for name, argv in (("an empty note", ("note", "  ")),
                    ("a note given as words and as a file with no name",
                     ("note", "words", "--file", "")),
                    ("a one-word note that reads as an option", ("note", "-x")),
-                   ("a close-out with no handoff path",
-                    ("close", "--handoff", "", "--summary", "did it")),
-                   ("an empty summary", ("close", "--handoff", "/h.md", "--summary", "")),
-                   ("a summary over the cap",
-                    ("close", "--handoff", "/h.md", "--summary", "x" * (SUMMARY_CAP + 1))),
-                   ("a close-out with no summary", ("close", "--handoff", "/h.md")),
+                   ("a summary whose file is empty", ("summary", "--file", str(SCRATCH / "empty.md"))),
+                   ("a summary over the cap", ("summary", "--file", str(SCRATCH / "long.md"))),
+                   ("a summary given as words", ("summary", "shipped", "the", "parser")),
+                   ("a summary given no file", ("summary",)),
+                   ("a close-out with no summary recorded", ("close", "--handoff", "/h.md")),
                    ("a filter on a field no entry has", ("show", "mood=good")),
                    ("no verb", ())):
     done = run(journal, *argv)
@@ -122,8 +162,8 @@ for name, argv in (("an empty note", ("note", "  ")),
 
 journal = scratch_journal()
 run(journal, "note", "a dead end worth keeping", session="session-A")
-run(journal, "close", "--handoff", "/handoffs/1.md", "--summary", "shipped the parser",
-    session="session-A", cwd=repo)
+summarize(journal, "shipped the parser", session="session-A")
+run(journal, "close", "--handoff", "/handoffs/1.md", session="session-A", cwd=repo)
 record(woke(Origin("2026-11-10T00:00:00Z", "session-B", "/work", None), "/handoffs/1.md"), journal)
 done = run(journal, "recall", session="session-B")
 check("recall prints the summary of the session whose handoff woke this one, and not its note",
@@ -144,10 +184,11 @@ check("recall with no session named exits 1 and says what is missing",
 
 run(journal, "note", "another agent's note", session="session-elsewhere")
 done = run(journal, "show")
-check("show prints every entry, oldest first",
+check("show prints every entry, oldest first, a close-out's text under its summary and its close",
       done.returncode == 0 and [line.split("  ")[1] for line in done.stdout.splitlines()
-                                if not line.startswith(" ")] == ["note", "close", "wake", "note"],
-      done)
+                                if not line.startswith(" ")]
+      == ["note", "summary", "close", "wake", "note"]
+      and done.stdout.count("  summary: shipped the parser\n") == 2, done)
 done = run(journal, "show", "--chain", "session-B")
 check("show --chain keeps the entries of that session's chain and no other session's",
       done.returncode == 0 and "a dead end worth keeping" in done.stdout
@@ -193,33 +234,50 @@ with open(journal, "a") as handle:
 for verb in ("recall", "show"):
     done = run(journal, verb, session="session-B")
     check(f"{verb} of a journal with a line that is not an entry exits 1 naming the line",
-          done.returncode == 1 and f"{journal} line 5 is not a journal entry" in done.stderr
+          done.returncode == 1 and f"{journal} line 6 is not a journal entry" in done.stderr
           and done.stdout == "", done)
+# A close-out takes its summary from the record, so it is the one writer that needs to read it.
+journal = scratch_journal()
+summarize(journal, "shipped the parser")
+whole = journal.read_bytes()
+journal.write_bytes(whole + b"not an entry\n")
+done = run(journal, "close", "--handoff", "/handoffs/1.md")
+check("close of a journal with a line that is not an entry exits 1 naming the line, and writes nothing",
+      done.returncode == 1 and f"{journal} line 2 is not a journal entry" in done.stderr
+      and journal.read_bytes() == whole + b"not an entry\n", done)
+journal.write_bytes(whole)
+done = run(journal, "close", "--handoff", "/handoffs/1.md")
+check("and with the line removed, the close-out holds the summary recorded before it",
+      done.returncode == 0 and entries(journal)[-1].summary == "shipped the parser", done)
 blocked = SCRATCH / "a-file"
 blocked.write_text("")
 done = run(blocked / "journal.jsonl", "note", "nowhere to go")
 check("a journal that cannot be written exits 1 with the reason",
       done.returncode == 1 and done.stderr.startswith("journal: "), done)
 journal = scratch_journal()
+(SCRATCH / "bytes.md").write_bytes(b"\xff\xfe")
 for name, path in (("is not there", SCRATCH / "absent.md"), ("is not text", SCRATCH / "bytes.md"),
                    ("has no name", "")):
-    (SCRATCH / "bytes.md").write_bytes(b"\xff\xfe")
-    done = run(journal, "note", "--file", str(path))
-    check(f"a note whose file {name} exits 1 with the reason and writes nothing",
-          done.returncode == 1 and done.stderr.startswith("journal: ") and not journal.exists(),
-          done)
+    for verb in ("note", "summary"):
+        done = run(journal, verb, "--file", str(path))
+        check(f"a {verb} whose file {name} exits 1 with the reason and writes nothing",
+              done.returncode == 1 and done.stderr.startswith("journal: ")
+              and not journal.exists(), done)
 
 # A session that removed its worktree closes out from a directory that is no longer there.
 gone = SCRATCH / "gone"
 gone.mkdir()
 journal = scratch_journal()
+(SCRATCH / "removed.md").write_text("removed the worktree")
 done = subprocess.run(
-    ["sh", "-c", 'cd "$1" && rmdir "$1" && exec "$2" "$3" close --handoff /handoffs/9.md '
-                 '--summary "removed the worktree"', "sh", str(gone), sys.executable, CLI],
+    ["sh", "-c", 'cd "$1" && rmdir "$1" && "$2" "$3" summary --file "$4" '
+                 '&& exec "$2" "$3" close --handoff /handoffs/9.md',
+     "sh", str(gone), sys.executable, CLI, str(SCRATCH / "removed.md")],
     text=True, capture_output=True,
     env=dict(os.environ, MEMENTO_JOURNAL=str(journal), CLAUDE_CODE_SESSION_ID="session-A"))
-check("a close-out from a working directory since removed is recorded under the name the shell holds",
-      done.returncode == 0 and [entry.cwd for entry in entries(journal)] == [str(gone)], done)
+check("a summary and a close-out from a working directory since removed are recorded under the name "
+      "the shell holds",
+      done.returncode == 0 and [entry.cwd for entry in entries(journal)] == [str(gone)] * 2, done)
 
 skill = open(os.path.join(os.path.dirname(HERE), "SKILL.md")).read()
 check("the skill that documents it names it", "bin/journal" in skill)
