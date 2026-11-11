@@ -67,7 +67,8 @@ counted = inheriting({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "memento.coun
                       "GIT_CONFIG_VALUE_0": "kept"}, "config", "memento.counted")
 check("a setting GIT_CONFIG_COUNT carries reaches the directory's repository",
       counted.stdout == "kept\n", f"{counted.stdout!r} {counted.stderr!r}")
-passed = inheriting({"GIT_CONFIG_PARAMETERS": "'memento.passed'='kept'"}, "config", "memento.passed")
+# The form every git reads; git 2.31 and later also write `'key'='value'`.
+passed = inheriting({"GIT_CONFIG_PARAMETERS": "'memento.passed=kept'"}, "config", "memento.passed")
 check("and so does one `git -c` carries", passed.stdout == "kept\n",
       f"{passed.stdout!r} {passed.stderr!r}")
 

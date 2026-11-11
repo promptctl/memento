@@ -18,13 +18,14 @@ CONFIG_SETTINGS = frozenset({"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
 @functools.cache
 def _naming_a_repository():
     """The variables that name the repository git works in: those git lists as local to a repository,
-    less the config settings it carries into another. Raises OSError where git cannot list them, a git
-    that hands the question back among them: without the list, the inherited repository would answer."""
+    less the config settings it carries into another. Raises OSError where git cannot list them: where
+    it exits non-zero, or answers without GIT_DIR, as a git older than the question does by echoing it
+    back. Without the list, the inherited repository would answer."""
     listed = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True)
     named = frozenset(listed.stdout.split())
     if listed.returncode != 0 or "GIT_DIR" not in named:
-        raise OSError(f"git cannot list the variables that name a repository: "
-                      f"{listed.stderr.strip() or listed.stdout.strip()}")
+        raise OSError(f"git cannot list the variables that name a repository, exiting "
+                      f"{listed.returncode}: {listed.stderr.strip() or listed.stdout.strip()}")
     return named - CONFIG_SETTINGS
 
 

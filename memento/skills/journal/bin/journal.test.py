@@ -107,9 +107,11 @@ check("summary records the file's text for the calling session, without its surr
       done.returncode == 0 and done.stdout == "" and len(kept) == 1 and isinstance(kept[0], Summary)
       and (kept[0].session, kept[0].branch, kept[0].summary) == ("session-A", "journal-lane", did),
       (done, kept))
-# A git that cannot list the variables naming a repository cannot say which branch is the directory's.
+# A git that cannot list the variables naming a repository cannot say which branch is the directory's,
+# though it names one when asked.
 unlisting = Path(tempfile.mkdtemp(dir=SCRATCH))
-(unlisting / "git").write_text("#!/bin/sh\necho 'git: unlistable' >&2\nexit 1\n")
+(unlisting / "git").write_text("#!/bin/sh\n[ \"$1\" = symbolic-ref ] && echo inherited && exit 0\n"
+                               "echo 'git: unlistable' >&2\nexit 1\n")
 (unlisting / "git").chmod(0o755)
 unlisted = scratch_journal()
 os.environ["PATH"] = f"{unlisting}:{path}"
