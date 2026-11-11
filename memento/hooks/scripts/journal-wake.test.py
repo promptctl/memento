@@ -7,30 +7,25 @@ lines the launcher frames a handoff with and the lines this hook knows one by ar
 other here. Run with: python3 journal-wake.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
-SCRATCH = Path(tempfile.mkdtemp(prefix="journal-wake-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "journal-wake.py")
 PLUGIN = os.path.dirname(os.path.dirname(HERE))
 LAUNCHER = os.path.join(PLUGIN, "skills", "message-in-a-bottle", "bin", "finalize-session")
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home("journal-wake-test-"))
 from journal import Wake, entries  # noqa: E402
 
 # The session that wrote the handoff, which the handoff names, and the one it wakes.
 WRITER, WAKER = "session-that-closed-out", "session-that-woke"
-# All that every command here is given of the environment these tests run in. A git hook's names
-# its repository in GIT_DIR, and a git command that inherited it would act on that repository.
-BARE = {"PATH": os.environ["PATH"]}
 
 failures = []
 
@@ -52,7 +47,7 @@ def launched(message):
     home = scratch_dir()
     done = subprocess.run(
         [LAUNCHER, message], text=True, capture_output=True, timeout=30,
-        env={**BARE, "HOME": str(home), "TMPDIR": str(home),
+        env={**os.environ, "HOME": str(home), "TMPDIR": str(home),
              "MEMENTO_HANDOFF_DIR": str(home / "handoffs"), "FINALIZE_DRY_RUN": "1",
              "MEMENTO_JOURNAL": str(home / "journal.jsonl"), "CLAUDE_CODE_SESSION_ID": WRITER})
     written = sorted((home / "handoffs").glob("*"))
@@ -71,7 +66,7 @@ def run(prompt, journal, event="UserPromptSubmit", cwd=SCRATCH):
     """Runs the hook on a prompt as Claude Code does. Returns the completed process and the lines
     it logged. The environment names another session than the payload does, as a hook's may."""
     log = scratch_dir() / "hook.log"
-    env = {**BARE, "MEMENTO_JOURNAL": str(journal), "MEMENTO_CEILING_LOG": str(log),
+    env = {**os.environ, "MEMENTO_JOURNAL": str(journal), "MEMENTO_CEILING_LOG": str(log),
            "CLAUDE_CODE_SESSION_ID": "session-of-the-environment"}
     payload = {"session_id": WAKER, "hook_event_name": event, "cwd": str(cwd), "prompt": prompt}
     done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=env,
@@ -86,9 +81,9 @@ def passed_on(done):
 
 
 repo = SCRATCH / "repo"
-subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, env=BARE)
+subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
 subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/journal-lane"], cwd=repo, check=True,
-               capture_output=True, env=BARE)
+               capture_output=True)
 
 path, handoff = launched("Branch fix/parser-null, PR #91. Resume at step 10.")
 

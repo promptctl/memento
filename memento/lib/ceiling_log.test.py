@@ -7,19 +7,18 @@ directory.
 Run with: python3 ceiling_log.test.py
 """
 
-import atexit
 import contextlib
 import io
 import json
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-SCRATCH = Path(tempfile.mkdtemp(prefix="ceiling-log-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home("ceiling-log-test-"))
 import ceiling_log  # noqa: E402
 from ceiling_log import run  # noqa: E402
 

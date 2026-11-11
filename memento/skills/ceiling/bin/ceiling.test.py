@@ -6,32 +6,22 @@ asserts on the files written and the output printed. The cases that matter most 
 Stop hook and check that it resolves the same ceiling the command reported. Run with: python3 ceiling.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-
-SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so no
-# developer's settings reach a test, every path derived from the home - the plugin install's among
-# them - lands in scratch, and every command run here is given that and what its case sets. A git
-# hook's environment names its repository in GIT_DIR, and a git command that inherited it would act
-# on that repository.
-path = os.environ["PATH"]
-os.environ.clear()
-os.environ.update(PATH=path, HOME=SCRATCH)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "ceiling")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+import hermetic  # noqa: E402
+
+SCRATCH = hermetic.home("ceiling-test-")
 # The file-format constants come from the module the command and the hook both use, so fixtures
 # match the files production writes.
-sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, PROJECT_CONFIG_DIR  # noqa: E402
 
 # Derived from the shipped default, so changing the default updates the expectation too.

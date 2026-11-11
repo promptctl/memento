@@ -5,22 +5,14 @@ repository the inherited environment names, and keeps the settings `git -c` carr
 Run with: python3 git_at.test.py
 """
 
-import atexit
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 
-SCRATCH = tempfile.mkdtemp(prefix="git-at-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so the
-# repositories it sets up are its own though it runs from a git hook, and each case adds only what
-# it inherits.
-path = os.environ["PATH"]
-os.environ.clear()
-os.environ.update(PATH=path, HOME=SCRATCH)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hermetic  # noqa: E402
+
+SCRATCH = hermetic.home("git-at-test-")
 from git_at import git_at  # noqa: E402
 
 failures = []

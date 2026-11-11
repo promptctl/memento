@@ -7,27 +7,18 @@ with real processes appending at once.
 Run with: python3 journal.test.py
 """
 
-import atexit
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-SCRATCH = Path(tempfile.mkdtemp(prefix="journal-test-"))
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, set before
-# the journal is imported, so every git command run here, its own or `origin`'s in this process, is
-# given that alone, and a path the journal derives from the home lands in scratch. A git hook's
-# environment names its repository in GIT_DIR, and a git command that inherited it would act on that
-# repository.
-path = os.environ["PATH"]
-os.environ.clear()
-os.environ.update(PATH=path, HOME=str(SCRATCH))
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+SCRATCH = Path(hermetic.home("journal-test-"))
 import journal  # noqa: E402
 from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Refused,  # noqa: E402
                      Unreadable, Wake, chain, closed, entries, entry_of, having, inside, line_of,

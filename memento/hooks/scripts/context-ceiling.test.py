@@ -5,32 +5,29 @@ Each case feeds a synthetic transcript and the payload Claude Code delivers to t
 subprocess, then asserts the JSON it emits. Run with `python3 context-ceiling.test.py`.
 """
 
-import atexit
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
 
-# One scratch root for every mkdtemp() below, removed on exit - each call still gets its own
-# subdirectory, but the suite no longer abandons one per case in the system temp dir.
-SCRATCH = tempfile.mkdtemp(prefix="context-ceiling-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The hooks install memento's cc-candybar plugin under XDG_DATA_HOME; every child this suite runs
-# inherits a scratch one, so no run reaches the plugin root of the machine it runs on.
-os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
+HERE = os.path.dirname(os.path.abspath(__file__))
+HOOK = os.path.join(HERE, "context-ceiling.py")
+PLUGIN = os.path.dirname(os.path.dirname(HERE))
+LIB = os.path.join(PLUGIN, "lib")
+sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+# One scratch root for every mkdtemp() below - each call still gets its own subdirectory, but the
+# suite abandons none per case in the system temp dir.
+SCRATCH = hermetic.home("context-ceiling-test-")
 
 
 def scratch_dir():
     return tempfile.mkdtemp(dir=SCRATCH)
 
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-HOOK = os.path.join(HERE, "context-ceiling.py")
-PLUGIN = os.path.dirname(os.path.dirname(HERE))
-LIB = os.path.join(PLUGIN, "lib")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
 JOURNAL = os.path.join(PLUGIN, "skills", "journal", "bin", "journal")
@@ -42,7 +39,6 @@ OVER, UNDER = TEST_CEILING + 20_000, TEST_CEILING - 60_000
 SESSION = "s-1"
 # The file names come from the module the hook itself reads them from, so a fixture here cannot
 # drift from the files the hook looks for. [LAW:one-source-of-truth]
-sys.path.insert(0, LIB)
 from ceiling_config import CONFIG_NAME, DEFAULT_CEILING, GRACE  # noqa: E402
 
 CLEAR_HOOK = os.path.join(HERE, "clear-session-ceiling.py")
@@ -99,9 +95,8 @@ def run(records, event="Stop", stop_hook_active=False,
         project=None, config_home=None, xdg=None, extra_env=None,
         session=SESSION):
     """Invoke the hook as Claude Code does and return (exit code, parsed stdout, stderr). Every
-    config layer is rooted in scratch space and ambient ones (CLAUDE_PROJECT_DIR, XDG_CONFIG_HOME)
-    are stripped, so a developer's own config cannot decide a test. user_conf=None writes no user
-    layer, so the case reaches the shipped default."""
+    config layer is rooted in scratch space. user_conf=None writes no user layer, so the case
+    reaches the shipped default."""
     handle = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
     handle.write("".join(json.dumps(r) + "\n" for r in records))
     handle.close()
@@ -115,9 +110,7 @@ def run(records, event="Stop", stop_hook_active=False,
         write_conf(os.path.join(home, "sessions", session, CONFIG_NAME), session_conf)
     if project_conf is not None:
         write_conf(os.path.join(project, ".promptctl", CONFIG_NAME), project_conf)
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env["MEMENTO_CEILING_LOG"] = log.name
+    env = dict(os.environ, MEMENTO_CEILING_LOG=log.name)
     # xdg drives the shipped path construction rather than overriding it, which is the only
     # way to exercise where the config really lives without reading the developer's own.
     if xdg is None:
@@ -311,9 +304,8 @@ check("a session layer written mid-session raises the ceiling on the very next s
 def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None, log=None):
     """Invoke the SessionStart hook as Claude Code does on /clear, logging to `log` or to a scratch
     log. Returns (exit code, stderr)."""
-    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env.update({"MEMENTO_CONFIG_HOME": home,
-                "MEMENTO_CEILING_LOG": log or os.path.join(scratch_dir(), "log")})
+    env = dict(os.environ, MEMENTO_CONFIG_HOME=home,
+               MEMENTO_CEILING_LOG=log or os.path.join(scratch_dir(), "log"))
     payload = raw if raw is not None else json.dumps(
         {"session_id": session, "hook_event_name": event, "source": source, "cwd": home})
     done = subprocess.run([sys.executable, CLEAR_HOOK], text=True, capture_output=True, env=env,
@@ -510,9 +502,8 @@ check("a transcript with no assistant record reads as zero", code == 0 and out i
 
 # --- wiring --------------------------------------------------------------------------------
 
-isolated = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
-isolated["MEMENTO_CONFIG_HOME"] = scratch_dir()
-isolated["MEMENTO_CEILING_LOG"] = os.path.join(scratch_dir(), "log")
+isolated = dict(os.environ, MEMENTO_CONFIG_HOME=scratch_dir(),
+                MEMENTO_CEILING_LOG=os.path.join(scratch_dir(), "log"))
 done = subprocess.run([sys.executable, HOOK], input="{}", text=True, capture_output=True,
                       env=isolated)
 check("a payload with no event fails loudly", done.returncode == 1, str(done)[:200])

@@ -6,21 +6,20 @@ scratch config directory, and the script form runs once as the launcher runs it.
 Run with: python3 transcript.test.py
 """
 
-import atexit
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
+import hermetic  # noqa: E402
+
+SCRATCH = hermetic.home("transcript-test-")
 import transcript  # noqa: E402
 from transcript import Settings, Unrecorded, recorded_settings  # noqa: E402
 
-SCRATCH = tempfile.mkdtemp(prefix="transcript-test-")
-atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 SESSION = "5f0c2b1e-8d3a-4c6f-9e7b-1a2d3c4e5f60"
 failures = []
 

@@ -40,6 +40,9 @@ HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "hyphenate-handoff.py")
 WAKE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "journal-wake.py")
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
+import hermetic  # noqa: E402
+
+hermetic.home("finalize-session-test-")
 from journal import Close, Summary, chain, entries  # noqa: E402
 
 REAL_DIRS = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -723,7 +726,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     os.mkdir(verbs)
     os.symlink(HOST_SHIM, os.path.join(verbs, host_argv[0]))
     pidfile = os.path.join(workdir, "root.pid")
-    home = os.path.join(workdir, "home") if config_unset else os.environ.get("HOME", workdir)
+    home = os.path.join(workdir, "home") if config_unset else os.environ["HOME"]
     config_dir = os.path.join(home, ".claude") if config_unset else os.path.join(workdir, "config")
     write_transcripts(config_dir, transcripts)
     tmux_state = os.path.join(workdir, "tmux")
@@ -2011,7 +2014,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": os.environ["HOME"],
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_STATE": tmux_state,
@@ -2209,7 +2212,7 @@ def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
-        "HOME": os.environ.get("HOME", workdir),
+        "HOME": os.environ["HOME"],
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_PANE_TEXT": pane_text,
