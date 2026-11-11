@@ -461,8 +461,8 @@ also publishes the session's status for cc-candybar through `candybar.py`. `jour
 writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
 `journal` command is the command line of. The ceiling hook and the `finalize-session`
 launcher both read a session's transcript through `transcript.py`, the launcher posts into
-a Remote Control session through `remote_control.py`, and it reads the id to `claude stop` a
-daemon-hosted session by through `background_session.py`; `script.py` runs those three as the
+a Remote Control session through `remote_control.py`, and it reads a daemon-hosted session's
+background session id, and stops it, through `background_session.py`; `script.py` runs those three as the
 commands the launcher calls.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of

@@ -1173,10 +1173,10 @@ check("a hosted session is retired through `claude stop` of the id the session l
 for name, case, reason in (
         ("does not name it", dict(agents="[]"), "holds 0 background sessions"),
         ("cannot be read", dict(agents="Error: daemon not running"), "not JSON"),
-        ("fails", dict(agents_status=1), "agents --json' failed")):
+        ("fails", dict(agents_status=1), "agents --json' exited 1")):
     done = run(depth=2, rehost_at=2, claude_at=1, panes=None, **case)
     check(f"a hosted session whose session listing {name} is refused, since a signal would have it respawned",
-          done.returncode == REFUSED_RC and reason in done.stderr and "would respawn it if it were signalled" in done.stderr
+          done.returncode == REFUSED_RC and reason in done.stderr and "a daemon respawns one that is signalled" in done.stderr
           and "[dry-run] transport=" not in done.stdout, f"out={done.stdout!r} err={done.stderr!r}")
 
 # A daemon host is a pane boundary: a hosted session must not deliver into a pane
@@ -1858,7 +1858,7 @@ done = hosted_taken.result()
 check("a hosted session that hands off is stopped through its daemon once the launcher returns, never signalled",
       "handoff delivered" in done.stdout and done.returncode == 128 + signal.SIGUSR1
       and done.stop_log == f"stop {BACKGROUND_ID}\n" and "terminated" not in done.worker_log
-      and f"stopped by its daemon (background session {BACKGROUND_ID})" in done.worker_log,
+      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude" in done.worker_log,
       detail(done) + f" stop_log={done.stop_log!r}")
 
 
@@ -2063,11 +2063,12 @@ check("a session retired by signal is never stopped through a daemon",
 retired, done = stopped.result()
 check("a background session is retired by its daemon's stop, not by a signal",
       done.verdict == "taken\n" and done.victim_signal == signal.SIGUSR1
-      and f"old claude {done.args[13]} stopped by its daemon (background session {BACKGROUND_ID})" in done.stdout,
+      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude {done.args[13]} no longer runs" in done.stdout,
       worker_detail(done))
 retired, done = stop_refused.result()
 check("a stop the daemon refuses leaves the old process unsignalled, and the log says it is still live",
-      not retired and "ERROR: the daemon did not stop background session ffffffff: No job matching" in done.stdout
+      not retired and "ERROR: the daemon did not stop background session ffffffff:" in done.stdout
+      and "stop ffffffff' exited 1: No job matching ffffffff" in done.stdout
       and "still live beside its successor" in done.stdout, worker_detail(done))
 retired, done = stop_leaves.result()
 check("a stop the daemon accepts that leaves the process running is never escalated to a signal",

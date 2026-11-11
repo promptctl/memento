@@ -285,12 +285,12 @@ _retire() { # <pid> <identity captured at launch>
 _stop_background() {
   local said
   log "asking the daemon to stop background session $2 (old claude $3)"
-  if ! said=$("$1" stop "$2" 2>&1); then
+  if ! said=$(python3 -I "$BACKGROUND" stop "$1" "$2" 2>&1); then
     log "ERROR: the daemon did not stop background session $2: $said. Old claude $3 is still live beside its successor; stop it with: claude stop $2"
   elif ! _await_exit "$3" "$4"; then
     log "ERROR: the daemon accepted the stop of background session $2 ($said), but old claude $3 still runs 10s later, beside its successor; stop it with: claude stop $2"
   else
-    log "old claude $3 stopped by its daemon (background session $2)"
+    log "the daemon stopped background session $2, and old claude $3 no longer runs"
   fi
 }
 
@@ -695,11 +695,8 @@ case "$MODE" in
       # claude another claude's tool call started, which no daemon lists, in the safe direction.
       RETIREMENT=(signal)
       if [[ "$KIND" == hosted ]]; then
-        HOSTED_BY="detached transport: this session is hosted by claude process $HOST_PID, so it is retired through \`claude stop\`: a daemon would respawn it if it were signalled"
-        AGENTS=$("$CLAUDE_BIN" agents --json) \
-          || _refuse "$HOSTED_BY, and '$CLAUDE_BIN agents --json' failed, so the id to stop it by cannot be read"
-        BACKGROUND_ID=$(python3 -I "$BACKGROUND" id "$CLAUDE_CODE_SESSION_ID" <<<"$AGENTS") \
-          || _refuse "$HOSTED_BY, and the session listing gives no background session id to stop it by"
+        BACKGROUND_ID=$(python3 -I "$BACKGROUND" id "$CLAUDE_BIN" "$CLAUDE_CODE_SESSION_ID") \
+          || _refuse "detached transport: this session is hosted by claude process $HOST_PID, which is no remote-control server, so it is taken for a daemon's background session, retired through \`claude stop\` since a daemon respawns one that is signalled, and the daemon's session listing gives no id to stop it by"
         RETIREMENT=(stop "$CLAUDE_BIN" "$BACKGROUND_ID")
       fi
       CWD=$(pwd -P)
