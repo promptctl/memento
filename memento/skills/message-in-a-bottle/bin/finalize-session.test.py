@@ -954,18 +954,23 @@ check("an ordinary message is still recorded",
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # The handoff names the session that wrote it, so the next agent can read that
-# transcript back. Without an id the handoff still goes, and says the id is unknown.
+# transcript back, on the line above the path, which stays last. Every real handoff
+# has an id, so the order is checked here. Without one the handoff still goes, and
+# says the id is missing.
 SESSION_ID = "0f3c9a52-7d1e-4b6a-9c28-5e4d3b2a1f07"
 done, bodies = argv_case("a handoff", session_id=SESSION_ID)
-check("the handoff names the outgoing session's id",
-      done.returncode == 0 and len(bodies) == 1
-      and f"Sent from Claude Code session {SESSION_ID}." in bodies[0],
+tail = bodies[0].splitlines()[-2:] if len(bodies) == 1 else []
+check("the handoff names the outgoing session's id on the line above the path",
+      done.returncode == 0 and len(tail) == 2
+      and tail[0].startswith(f"Sent from Claude Code session {SESSION_ID}; its transcript")
+      and tail[1].startswith("This handoff verbatim on disk: "),
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
-done, bodies = argv_case("a handoff")
-check("a session with no id in its environment still hands off, saying the id is unknown",
-      done.returncode == 0 and len(bodies) == 1
-      and "CLAUDE_CODE_SESSION_ID was unset" in bodies[0],
-      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+for absent in (None, ""):
+    done, bodies = argv_case("a handoff", session_id=absent)
+    check(f"a session id of {absent!r} still hands off, saying the id is missing",
+          done.returncode == 0 and len(bodies) == 1
+          and "id was not in the environment (CLAUDE_CODE_SESSION_ID unset or empty)." in bodies[0],
+          f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # --- resolution through a real ancestry -----------------------------------
 
