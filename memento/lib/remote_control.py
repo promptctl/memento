@@ -403,8 +403,8 @@ def newest_stamp(session, head):
             seq, payload = parsed(session.id, event)
             if seq >= before:
                 raise Refused(f"session {session.id}'s log gave event {seq} reading back from {before}")
-            if aim(payload):
-                return aim(payload)
+            if stamp := aim(payload):
+                return stamp
             before = seq
         if not more:
             return None
@@ -424,23 +424,28 @@ def retry(attempt, timeout, clock=time.monotonic, sleep=time.sleep):
         interval = min(interval * 2, POLL_CEILING_SECONDS)
 
 
-def head(session, timeout, note, clock=time.monotonic, sleep=time.sleep):
-    """The sequence number of the last event in the session's log. A read that fails in passing is noted and
-    tried again, and the last such failure is raised at the timeout; a refusal propagates."""
+def retried(call, timeout, note, doing, clock=time.monotonic, sleep=time.sleep):
+    """What `call()` returns. A call that fails in passing is noted as `doing` and made again, and the last
+    such failure is raised at the timeout; a refusal propagates."""
     failed = []
 
     def attempt():
         try:
-            return session.head()
+            return [call()]
         except Transient as error:
             failed.append(error)
-            note(f"reading the log's head failed, retrying: {error}")
+            note(f"{doing} failed, retrying: {error}")
             return None
 
-    seq = retry(attempt, timeout, clock, sleep)
-    if seq is None:
+    done = retry(attempt, timeout, clock, sleep)
+    if done is None:
         raise failed[-1]
-    return seq
+    return done[0]
+
+
+def head(session, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """The sequence number of the last event in the session's log (`retried`)."""
+    return retried(session.head, timeout, note, "reading the log's head", clock, sleep)
 
 
 def read(log, note):
@@ -482,20 +487,11 @@ def interrupt(session, prompts, timeout, note, clock=time.monotonic, sleep=time.
     sent again as the same event until one is answered within `timeout`: it names one turn that is
     already stopping, so a second copy stops nothing new, and the server drops a repeated uuid anyway.
     A prompt is never sent again (`post`), since a repeated /clear could land behind the handoff."""
-    event, failed = interrupt_event(prompts), []
-
-    def attempt():
-        try:
-            return session.post(event)
-        except Transient as error:
-            failed.append(error)
-            note(f"posting the interrupt got no clear answer, sending it again: {error}")
-            return None
-
-    seq = retry(attempt, timeout, clock, sleep)
-    if seq is None:
-        raise Refused(f"no answer to the interrupt within {timeout:g}s: {failed[-1]}")
-    return seq
+    event = interrupt_event(prompts)
+    try:
+        return retried(lambda: session.post(event), timeout, note, "posting the interrupt", clock, sleep)
+    except Transient as error:
+        raise Refused(f"no answer to the interrupt within {timeout:g}s: {error}") from None
 
 
 def stopping_asking_turn(session, log, reset_timeout, note):
@@ -519,26 +515,15 @@ def stopping_asking_turn(session, log, reset_timeout, note):
             note(f"ERROR: the asking turn was not interrupted ({error}), so a goal can hold it working "
                  f"until its block cap before the /clear")
 
-    failed = []
-
-    def read_back():
-        try:
-            return [newest_stamp(session, log.cursor)]
-        except Transient as error:
-            failed.append(error)
-            note(f"reading the log back for the asking turn's prompts failed, retrying: {error}")
-            return None
-
     try:
-        found = retry(read_back, reset_timeout)
-        if found is None:
-            raise Refused(f"no answer within {reset_timeout:g}s: {failed[-1]}")
-    except Refused as error:
-        found = [None]
+        stamp = retried(lambda: newest_stamp(session, log.cursor), reset_timeout, note,
+                        "reading the log back for the asking turn's prompts")
+    except (Refused, Transient) as error:
+        stamp = None
         note(f"ERROR: the log could not be read back for the asking turn's prompts ({error}); it is "
              f"interrupted only if the forward read meets a stamp after the head")
-    if found[0]:
-        aim_at(found[0])
+    if stamp:
+        aim_at(stamp)
 
     def ended(log):
         for stamp in log.asking_stamps:
@@ -556,21 +541,20 @@ def published_goal(directory, session_id):
 
 class Publication:
     """The carried goal, published under `path` while the handoff's first turn runs.
-    [LAW:one-source-of-truth] One process owns it at a time, and it moves only by rename(2) within the
-    handoff directory, which has one winner. The publisher holds an flock on it for its life, which is how
+    [LAW:one-source-of-truth] One process owns it at a time: a claim renames the name away within the
+    handoff directory and its publisher removes it, and of the two only one finds it there. The publisher holds an flock on it for its life, which is how
     a claim tells a live publisher from a dead one: a process's locks go when it does."""
 
     def __init__(self, path, held):
         self.path, self.held = path, held
 
     def take_back(self):
-        """True when the goal is still this worker's, now taken back; False when a close-out claimed it."""
-        mine = f"{self.path}.{os.getpid()}"
+        """True when the goal is still this worker's, now taken back; False when a close-out claimed it.
+        Removing the name has one winner against a claim's rename of it, as renames do."""
         try:
-            os.rename(self.path, mine)
+            os.remove(self.path)
         except FileNotFoundError:
             return False
-        os.remove(mine)
         return True
 
 
@@ -685,23 +669,27 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
         if not goal:
             return
         settle(idle_after(seq), idle_timeout, "the carried goal", "the handoff's turn did not end")
+        if not publication.take_back():
+            note(f"the carried goal {CLAIMED}")
+            return
+        publication = None
+        send(f"/goal {goal}", "the carried goal")
     except Withheld as error:
         what, why = error.args
         raise Withheld(what, why + gone(goal, publication)) from None
-    if publication.take_back():
-        send(f"/goal {goal}", "the carried goal")
-    else:
-        note("the carried goal went to the close-out that ran in the handoff's turn, which carries it on")
+
+
+CLAIMED = "went to the close-out that claimed it, which carries it on"
 
 
 def gone(goal, publication):
-    """Where the carried goal went when a delivery stopped short, taking it back first if it was published:
-    to the human the ERROR tells, or to a close-out that claimed it."""
+    """Where the carried goal went when a delivery stopped short, taking it back first if it is still
+    published: to the human the ERROR tells, or to a close-out that claimed it."""
     if not goal:
         return ""
     if publication is None or publication.take_back():
         return f". The carried goal was NOT set; deliver it by hand once the session is up: /goal {goal}"
-    return ". The carried goal went to the close-out that ran in the handoff's turn, which carries it on"
+    return f". The carried goal {CLAIMED}"
 
 
 def _note(line):

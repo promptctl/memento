@@ -47,6 +47,11 @@ class Rewrite(unittest.TestCase):
     def test_other_commands_are_left_alone(self):
         self.assertEqual(rewritten("echo git"), "echo git")
 
+    def test_what_comes_before_the_launcher_is_left_alone(self):
+        self.assertEqual(rewritten("/x/journal summary --file /tmp/git-summary.md && /git/bin/finalize-session 'git'"),
+                         "/x/journal summary --file /tmp/git-summary.md && /git/bin/finalize-session 'g-i-t'")
+        self.assertEqual(rewritten("git log --grep finalize-session"), "git log --grep finalize-session")
+
     def test_a_rewrite_returns_the_other_fields_unchanged(self):
         given = {"command": "finalize-session 'git'", "timeout": 30000,
                  "description": "Close out", "run_in_background": False}

@@ -461,6 +461,28 @@ thread.join(10)
 check("and is posted once it has", session.prompts()[-1] == "/goal the tests pass" and session.posts[-1][1],
       session.posts)
 
+
+class RefusesGoal:
+    """A session that refuses the /goal prompt."""
+    def __init__(self, log):
+        self.log, self.id = log, log.id
+
+    def __getattr__(self, name):
+        return getattr(self.log, name)
+
+    def post(self, event):
+        if str(event["payload"].get("message", {}).get("content", "")).startswith("/goal"):
+            raise Refused("POST answered HTTP 403: forbidden")
+        return self.log.post(event)
+
+
+session, head = fresh()
+session.end_turn()
+withheld, _ = run_deliver(RefusesGoal(session), head, goal="the tests pass")
+check("a goal taken back whose post is refused is given to the human to set by hand",
+      withheld[0] == "the carried goal" and "HTTP 403" in withheld[1] and "/goal the tests pass" in withheld[1]
+      and claimed(session) == "", withheld)
+
 class Unanswered:
     """A session whose first `failing` prompts get no clear answer; `lands` says whether each still
     reaches the log. It records the uuid of every prompt it is sent."""
