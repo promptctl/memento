@@ -20,7 +20,9 @@ A short one-line note goes as one quoted argument; any other goes in a file, as 
 this section explains. The journal stamps each entry itself with the UTC time, the session
 id, the working directory and the branch checked out there, so leave those out. It prints
 nothing and exits 0. Empty text or an empty file is refused, as are text and `--file`
-together: exit 2, nothing written. A file that cannot be read is exit 1 with the reason.
+together, and a note over 20,000 characters: exit 2, nothing written. A note is a few
+paragraphs, so a log or a transcript stays in a file of its own and the note names that
+file. A file that cannot be read is exit 1 with the reason.
 
 Worth a note is whatever ends with this session and cannot be recovered from the code, the
 diff, the ticket or the handoff: a decision and the reason for it, an approach tried and

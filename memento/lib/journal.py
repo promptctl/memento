@@ -24,6 +24,9 @@ JOURNAL = Path(os.environ.get("MEMENTO_JOURNAL")
 # A summary is what later sessions read back, RECALLED of them at a time, so its size is the read's.
 SUMMARY_CAP = 1200
 RECALLED = 5
+# A note is prose a person reads. Every read parses the whole record and no entry ever leaves it,
+# so the cap is what keeps a log or a transcript out.
+NOTE_CAP = 20_000
 
 # When, by which session, and where an entry was written. `session` is None where the writer's
 # environment named none, and `branch` is None where git names none for `cwd`.
@@ -54,9 +57,6 @@ KINDS = {shape.kind: shape for shape in (Wake, Note, Close)}
 # Every name a `FIELD=TEXT` filter may use.
 FIELDS = ("kind", *dict.fromkeys(field for shape in KINDS.values() for field in shape._fields))
 
-# One session's stretch of a chain: its entries are those it wrote at positions [since, until).
-Hop = collections.namedtuple("Hop", "session since until")
-
 
 class Refused(Exception):
     """Text the journal does not take; the message says why."""
@@ -66,34 +66,51 @@ class Unreadable(Exception):
     """A line of the record is not an entry; the message names the file and line."""
 
 
-def _said(text, what):
-    stripped = text.strip()
-    if not stripped:
+def _said(text, what, cap, instead):
+    """A note's or a summary's text as the journal keeps it, without its surrounding whitespace.
+
+    [LAW:single-enforcer] Every writer's text passes here, so this is where it is held to a size:
+    not empty, and at most `cap` characters. `instead` says where longer text belongs."""
+    kept = text.strip()
+    if not kept:
         raise Refused(f"{what} is empty, so there is nothing to record.")
-    return stripped
+    if len(kept) > cap:
+        raise Refused(f"{what} is {len(kept):,} characters and the most it may be is {cap:,}. "
+                      f"{instead}")
+    return kept
+
+
+def _named(handoff):
+    """A handoff file's path as the journal keeps it. A wake is joined to the close-out before it
+    by this path alone, so it is the file's whole name: a relative path names a different file from
+    each directory, and an empty one would join every session that gave none."""
+    if not os.path.isabs(handoff):
+        raise Refused(f"the handoff path {handoff!r} is not absolute. A wake finds the close-out "
+                      f"before it by this path, so give the handoff file's full path.")
+    return handoff
 
 
 def noted(origin, text):
-    """A note entry for this text. Raises Refused for text that is empty."""
-    return Note(*origin, _said(text, "the note"))
+    """A note entry for this text. Raises Refused for text that is empty or over NOTE_CAP."""
+    return Note(*origin, _said(text, "the note", NOTE_CAP,
+                               "Leave a log or a transcript in a file of its own, and name that "
+                               "file in the note."))
 
 
 def closed(origin, handoff, summary):
-    """A close entry for the handoff a session wrote.
-
-    [LAW:single-enforcer] Every close-out's summary passes here, so this is where it is held to a
-    size later sessions can read back: not empty, and at most SUMMARY_CAP characters."""
-    kept = _said(summary, "the summary")
-    if len(kept) > SUMMARY_CAP:
-        raise Refused(f"the summary is {len(kept):,} characters and the most it may be is "
-                      f"{SUMMARY_CAP:,}. Say what the session did and what came of it in a few "
-                      f"sentences; the detail belongs in notes.")
-    return Close(*origin, handoff, kept)
+    """A close entry for the handoff a session wrote. Raises Refused for a handoff path that is not
+    absolute, and for a summary that is empty or over SUMMARY_CAP, the size later sessions read
+    back."""
+    return Close(*origin, _named(handoff),
+                 _said(summary, "the summary", SUMMARY_CAP,
+                       "Say what the session did and what came of it in a few sentences; the "
+                       "detail belongs in notes."))
 
 
 def woke(origin, handoff):
-    """A wake entry for the handoff a session started from."""
-    return Wake(*origin, handoff)
+    """A wake entry for the handoff a session started from. Raises Refused for a handoff path that
+    is not absolute."""
+    return Wake(*origin, _named(handoff))
 
 
 def branch_at(cwd):
@@ -139,11 +156,17 @@ def record(entry, path):
     """Appends one entry to the record.
 
     Sessions append concurrently, so the line goes in whole under an exclusive lock, and `entries`
-    reads under a shared one."""
+    reads under a shared one.
+
+    [LAW:single-enforcer] This is the only writer, so it is where an entry is given a line of its
+    own: after a last line left unterminated, by a hand edit or a writer killed mid-line, the entry
+    starts a new line instead of joining that one."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "ab") as handle:
+    with open(path, "a+b") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
-        handle.write((line_of(entry) + "\n").encode())
+        handle.seek(max(handle.seek(0, os.SEEK_END) - 1, 0))
+        opening = b"" if handle.read(1) in (b"", b"\n") else b"\n"
+        handle.write(opening + line_of(entry).encode() + b"\n")
 
 
 def entries(path):
@@ -173,36 +196,38 @@ def _latest(entries, before, wanted):
 def chain(entries, session):
     """Follows a session's chain of handoffs back through the record.
 
-    Returns the hops, newest first, and a sentence saying why the chain goes no further. Each hop
-    but the newest ends at the close-out whose handoff woke the hop after it. A hop is found by
-    position, not by session id alone: the session's latest wake before the hop that follows, then
-    the latest close before that wake naming the same handoff. Each step lands earlier in the
+    Returns the positions of the close-outs that link the chain, nearest first, and a sentence
+    saying why the chain goes no further. A link is found by position, not by session id alone: the
+    session's latest wake before the link that follows, then the latest close before that wake
+    naming the same handoff, and on from the session that wrote it. Each step lands earlier in the
     record, so the walk ends even where a session id survived a reset or a handoff was delivered
     twice."""
-    hops, until = [], len(entries)
+    links, until = [], len(entries)
     while True:
         woken = _latest(entries, until,
                         lambda entry: isinstance(entry, Wake) and entry.session == session)
         if woken is None:
-            return hops + [Hop(session, 0, until)], f"session {session} did not wake from a handoff."
-        hops.append(Hop(session, woken, until))
+            return links, f"session {session} did not wake from a handoff."
         handoff = entries[woken].handoff
         wrote = _latest(entries, woken,
                         lambda entry: isinstance(entry, Close) and entry.handoff == handoff)
         if wrote is None:
-            return hops, (f"session {session} woke from {handoff}, which no journaled close-out "
-                          f"wrote.")
+            return links, (f"session {session} woke from {handoff}, which no journaled close-out "
+                           f"wrote.")
+        links.append(wrote)
         session, until = entries[wrote].session, wrote + 1
         if session is None:
-            return hops + [Hop(None, wrote, until)], ("the earliest close-out shown names no "
-                                                      "session, so the chain cannot be followed "
-                                                      "past it.")
+            return links, ("the earliest close-out shown names no session, so the chain cannot be "
+                           "followed past it.")
 
 
-def inside(entries, hops):
-    """The positions of the entries the hops cover, in record order."""
-    return sorted(at for hop in hops for at in range(hop.since, hop.until)
-                  if entries[at].session == hop.session)
+def inside(entries, session, links):
+    """The positions of a chain's entries, in record order: every entry written by the session the
+    chain starts from or by a session that wrote one of its links, wherever in the record it lies.
+    A link that names no session is in the chain alone, since an absent session is nobody whose
+    other entries could be told from anyone else's."""
+    sessions = {session, *(entries[at].session for at in links)} - {None}
+    return [at for at, entry in enumerate(entries) if entry.session in sessions or at in links]
 
 
 def having(entry, field, text):
@@ -224,9 +249,8 @@ def recalled(entries, session):
     """What a session may read of its own history, as lines: the summaries of the close-outs that
     link its chain, the nearest RECALLED of them, oldest first, then how many earlier ones there are
     or why there are none. Never a note."""
-    hops, end = chain(entries, session)
-    links = [entries[hop.until - 1] for hop in hops[1:]]
-    near = links[:RECALLED][::-1]
+    links, end = chain(entries, session)
+    near = [entries[at] for at in links[:RECALLED]][::-1]
     earlier = len(links) - len(near)
     return [line for close in near
             for line in (f"{close.ts}  {_where(close)}", "  " + _indented(close.summary, 2), "")
@@ -236,6 +260,6 @@ def recalled(entries, session):
 
 def shown(entry):
     """One entry in full, as the user reads it: its origin on one line, then each field of its kind."""
-    return "\n".join([f"{entry.ts}  {entry.kind}  {entry.session}  {_where(entry)}"]
+    return "\n".join([f"{entry.ts}  {entry.kind}  {entry.session or '(no session)'}  {_where(entry)}"]
                      + [f"  {field}: {_indented(getattr(entry, field), 4)}"
                         for field in entry._fields[len(Origin._fields):]])

@@ -7,6 +7,7 @@ this runs the real command as a subprocess against a scratch journal. Run with: 
 import atexit
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
-from journal import SUMMARY_CAP, Close, Note, Origin, entries, record, woke  # noqa: E402
+from journal import SUMMARY_CAP, Close, Note, Origin, entries, noted, record, woke  # noqa: E402
 
 failures = []
 
@@ -64,6 +65,12 @@ done = run(journal, "note", "several", "words", "unquoted")
 check("a note given as several words is one note",
       done.returncode == 0 and entries(journal)[-1].text == "several words unquoted", done)
 
+# A note's words share the command line with its options, and a note may open with a dash.
+for text in ("-h flag breaks the build", "--fi=nal answer", "--help me decide"):
+    done = run(journal, "note", text)
+    check(f"a note that opens with {text.split()[0]} is recorded as text, not read as an option",
+          done.returncode == 0 and done.stdout == "" and entries(journal)[-1].text == text, done)
+
 # Text that Claude Code's worktree guard refuses in a command reaches the journal in a file.
 guarded = "Ran git pull --rebase, then bash -n on the launcher.\nIt didn't help: `sh` isn't $SHELL."
 (SCRATCH / "note.md").write_text(guarded)
@@ -95,6 +102,11 @@ for name, argv in (("an empty note", ("note", "  ")),
                    ("a note whose file is empty", ("note", "--file", str(SCRATCH / "empty.md"))),
                    ("a note given both as words and as a file",
                     ("note", "words", "--file", str(SCRATCH / "note.md"))),
+                   ("a note given as words and as a file with no name",
+                    ("note", "words", "--file", "")),
+                   ("a one-word note that reads as an option", ("note", "-x")),
+                   ("a close-out with no handoff path",
+                    ("close", "--handoff", "", "--summary", "did it")),
                    ("an empty summary", ("close", "--handoff", "/h.md", "--summary", "")),
                    ("a summary over the cap",
                     ("close", "--handoff", "/h.md", "--summary", "x" * (SUMMARY_CAP + 1))),
@@ -145,6 +157,10 @@ done = run(journal, "show", "--chain", "session-nobody")
 check("show --chain of a session the journal has never seen says so instead of printing nothing",
       done.returncode == 0 and done.stdout == "The chain goes no further: session session-nobody "
                                               "did not wake from a handoff.\n", done)
+done = run(journal, "show", "--chain", "")
+check("show --chain of an empty session id shows no entry, where it showed the whole journal",
+      done.returncode == 0 and done.stdout.startswith("The chain goes no further: ")
+      and len(done.stdout.splitlines()) == 1, done)
 done = run(journal, "show", "kind=note", "text=dead end")
 check("each FIELD=TEXT narrows the entries shown",
       done.returncode == 0 and "a dead end worth keeping" in done.stdout
@@ -152,6 +168,22 @@ check("each FIELD=TEXT narrows the entries shown",
 done = run(scratch_journal(), "show")
 check("show of a journal nobody has written to prints nothing and exits 0",
       done.returncode == 0 and done.stdout == "", done)
+
+# A reader that stops early: `show` prints the whole record, so `show | head` is its ordinary use.
+long = scratch_journal()
+for n in range(200):
+    record(noted(Origin("2026-11-10T00:00:00Z", "session-A", "/work", None), f"{n} " + "x" * 1000),
+           long)
+env = dict(os.environ, MEMENTO_JOURNAL=str(long))
+showing = subprocess.Popen([sys.executable, CLI, "show"], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=env)
+first = showing.stdout.readline()
+showing.stdout.close()
+complaint = showing.stderr.read()
+showing.stderr.close()
+check("show ends without complaint when its reader stops reading, as cat does",
+      showing.wait() == -signal.SIGPIPE and complaint == b"" and first.endswith(b"/work\n"),
+      (showing.returncode, complaint, first))
 
 # --- a journal that cannot be read or written ----------------------------------------------------
 
@@ -168,7 +200,8 @@ done = run(blocked / "journal.jsonl", "note", "nowhere to go")
 check("a journal that cannot be written exits 1 with the reason",
       done.returncode == 1 and done.stderr.startswith("journal: "), done)
 journal = scratch_journal()
-for name, path in (("is not there", SCRATCH / "absent.md"), ("is not text", SCRATCH / "bytes.md")):
+for name, path in (("is not there", SCRATCH / "absent.md"), ("is not text", SCRATCH / "bytes.md"),
+                   ("has no name", "")):
     (SCRATCH / "bytes.md").write_bytes(b"\xff\xfe")
     done = run(journal, "note", "--file", str(path))
     check(f"a note whose file {name} exits 1 with the reason and writes nothing",

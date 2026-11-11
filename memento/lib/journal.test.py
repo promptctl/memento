@@ -18,9 +18,9 @@ from pathlib import Path
 LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import journal  # noqa: E402
-from journal import (RECALLED, SUMMARY_CAP, Close, Hop, Note, Origin, Refused, Unreadable,  # noqa: E402
-                     Wake, chain, closed, entries, entry_of, having, inside, line_of, noted, origin,
-                     recalled, record, shown, woke)
+from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Refused,  # noqa: E402
+                     Unreadable, Wake, chain, closed, entries, entry_of, having, inside, line_of,
+                     noted, origin, recalled, record, shown, woke)
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="journal-test-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
@@ -49,6 +49,11 @@ def handed(sessions):
     return kept
 
 
+def chained(kept, session):
+    """The entries `show --chain` keeps for a session."""
+    return [kept[at] for at in inside(kept, session, chain(kept, session)[0])]
+
+
 def refusal(build, *args):
     try:
         build(*args)
@@ -68,10 +73,10 @@ def unreadable(read, *args):
 # --- the chain ---------------------------------------------------------------------------------
 
 kept = handed("ABC")[:-2]  # C has woken and written nothing since.
-hops, end = chain(kept, "C")
+links, end = chain(kept, "C")
 check("a chain is followed from a session back through each handoff to the session that began it",
-      [hop.session for hop in hops] == ["C", "B", "A"] and "A did not wake from a handoff" in end,
-      (hops, end))
+      [kept[at].summary for at in links] == ["did B", "did A"]
+      and "A did not wake from a handoff" in end, (links, end))
 lines = recalled(kept, "C")
 check("recall prints the earlier sessions' summaries, oldest first",
       [line.strip() for line in lines if line.startswith("  ")] == ["did A", "did B"], lines)
@@ -107,13 +112,12 @@ check(f"recall shows the nearest {RECALLED} close-outs and counts the rest",
 # A session id that survives a reset: S closes out, and the session woken by that handoff is S again.
 kept = [noted(by("S"), "before"), closed(by("S"), "/handoffs/1.md", "did the first stretch"),
         woke(by("S"), "/handoffs/1.md"), noted(by("S"), "after")]
-hops, end = chain(kept, "S")
-check("a session id that survives a reset is two hops, split at its wake",
-      hops == [Hop("S", 2, 4), Hop("S", 0, 2)], hops)
-check("and it recalls its own earlier close-out once",
+check("a session id that survives a reset recalls its own earlier close-out once",
       recalled(kept, "S")[1:] == ["  did the first stretch", "",
                                   "Nothing earlier: session S did not wake from a handoff."],
       recalled(kept, "S"))
+check("and its chain is everything it wrote on both sides of the reset", chained(kept, "S") == kept,
+      chained(kept, "S"))
 
 # A close-out whose transport refused, then the retry: two closes, and the successor woke from the second.
 kept = [closed(by("A"), "/handoffs/1.md", "first try"), closed(by("A"), "/handoffs/2.md", "the retry"),
@@ -143,9 +147,29 @@ check("of two close-outs naming one handoff, the one nearest before the wake is 
 # --- what show keeps ----------------------------------------------------------------------------
 
 kept = handed("AB") + [noted(by("elsewhere"), "another agent's note")]
-positions = inside(kept, chain(kept, "B")[0])
 check("a chain's entries are every entry its sessions wrote, and no other session's",
-      [kept[at] for at in positions] == kept[:-1], positions)
+      chained(kept, "B") == kept[:-1], chained(kept, "B"))
+check("a session the record has never seen has no entries",
+      chained(kept, "nobody") == [], chained(kept, "nobody"))
+
+# What a session wrote lies anywhere in the record, not only between its wake and its close-out.
+kept = [noted(by("B"), "before either handoff"), closed(by("X"), "/handoffs/9.md", "did X"),
+        noted(by("B"), "before the pasted handoff"), woke(by("B"), "/handoffs/9.md"),
+        noted(by("B"), "after")]
+check("a session woken mid-life keeps what it wrote before that wake", chained(kept, "B") == kept,
+      chained(kept, "B"))
+kept = [closed(by("A"), "/handoffs/1.md", "did A"), woke(by("B"), "/handoffs/1.md"),
+        noted(by("B"), "between"), woke(by("B"), "/handoffs/1.md"), noted(by("B"), "after")]
+check("a handoff delivered twice to one session keeps both wakes and the note between",
+      chained(kept, "B") == kept, chained(kept, "B"))
+kept = [closed(by("A"), "/handoffs/1.md", "did A"), noted(by("A"), "an afterthought"),
+        woke(by("B"), "/handoffs/1.md")]
+check("a note written after the close-out and before the successor woke is kept",
+      chained(kept, "B") == kept, chained(kept, "B"))
+kept = [noted(by(None), "nobody's note"), closed(by(None), "/handoffs/1.md", "did it unnamed"),
+        woke(by("B"), "/handoffs/1.md")]
+check("a close-out that names no session is in the chain alone, with no other unnamed entry",
+      chained(kept, "B") == kept[1:], chained(kept, "B"))
 note = noted(by("A"), "the parser\nloses a byte")
 check("a field filter keeps an entry whose field contains the text",
       having(note, "text", "loses") and having(note, "kind", "note") and having(note, "session", "A"))
@@ -159,6 +183,9 @@ check("not even the empty text, which every value an entry does have contains",
 check("an entry is shown with its origin and each field of its kind, later lines indented",
       shown(note) == "2026-11-10T00:00:00Z  note  A  /work  (trunk)\n"
                      "  text: the parser\n    loses a byte", shown(note))
+check("an entry that names no session is shown as naming none, not as a session called None",
+      shown(noted(by(None), "n")).startswith("2026-11-10T00:00:00Z  note  (no session)  /work"),
+      shown(noted(by(None), "n")))
 
 # --- what the journal takes ---------------------------------------------------------------------
 
@@ -171,6 +198,15 @@ check("a summary at the cap is taken",
       closed(by("A"), "/h.md", "x" * SUMMARY_CAP).summary == "x" * SUMMARY_CAP)
 check("text is kept without its surrounding whitespace",
       closed(by("A"), "/h.md", "\n did it \n").summary == "did it")
+check("a note over its cap is refused, with the cap named",
+      f"{NOTE_CAP:,}" in (refusal(noted, by("A"), "x" * (NOTE_CAP + 1)) or ""))
+check("a note at its cap is taken", noted(by("A"), "x" * NOTE_CAP).text == "x" * NOTE_CAP)
+# A wake finds its close-out by the handoff's path alone, so the path is the file's whole name.
+for name, path in (("no", ""), ("a relative", "handoffs/1.md")):
+    check(f"a close-out with {name} handoff path is refused",
+          "not absolute" in (refusal(closed, by("A"), path, "did it") or ""))
+    check(f"a wake with {name} handoff path is refused",
+          "not absolute" in (refusal(woke, by("A"), path) or ""))
 
 # --- an entry and its line ----------------------------------------------------------------------
 
@@ -204,6 +240,13 @@ for entry in written:
 check("the record reads back whole, in the order it was written", entries(kept_at) == written,
       entries(kept_at))
 
+# A record whose last line lost its newline: a hand edit, or a writer killed mid-line.
+cut = SCRATCH / "cut.jsonl"
+cut.write_bytes(kept_at.read_bytes().rstrip(b"\n"))
+record(written[0], cut)
+check("an entry appended after an unterminated line starts a line of its own",
+      entries(cut) == written + written[:1], unreadable(entries, cut))
+
 for name, tail in (("is not JSON", b'{"kind": "note"\n'), ("is not text", b"\xff\xfe\n")):
     spoiled = SCRATCH / f"spoiled-{len(tail)}.jsonl"
     shutil.copy(kept_at, spoiled)
@@ -213,13 +256,13 @@ for name, tail in (("is not JSON", b'{"kind": "note"\n'), ("is not text", b"\xff
     check(f"a line that {name} is named by file and line",
           f"{spoiled} line 4 is not a journal entry" in wrong, wrong)
 
-# Real processes appending long lines at once.
+# Real processes appending at once, each line the longest a note makes.
 directory = SCRATCH / "crowd.jsonl"
 WRITERS, EACH = 8, 40
 appending = ("import sys; sys.path.insert(0, sys.argv[1]); import journal; from pathlib import Path\n"
              "for n in range(int(sys.argv[4])):\n"
              "    journal.record(journal.noted(journal.Origin('2026-11-10T00:00:00Z', sys.argv[3],"
-             " '/work', None), f'{n} ' + 'x' * 70_000), Path(sys.argv[2]))\n")
+             " '/work', None), f'{n} '.ljust(journal.NOTE_CAP, 'x')), Path(sys.argv[2]))\n")
 crowd = [subprocess.Popen([sys.executable, "-c", appending, LIB, str(directory), f"writer-{n}",
                            str(EACH)]) for n in range(WRITERS)]
 exits = [writer.wait() for writer in crowd]

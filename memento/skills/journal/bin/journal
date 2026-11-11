@@ -10,6 +10,7 @@ to recall for; 2 the command line does not parse or its text is refused, and not
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -42,9 +43,10 @@ def note(args):
     """The note is the words on the command line or the contents of `--file`. A file is how text
     reaches the journal as written when Claude Code's worktree guard, which reads a command's text
     and not a file's, would refuse the command that carried it."""
-    if args.file and args.text:
+    if args.file is not None and args.text:
         raise Refused("the note is given both as words and as --file. Give it one way.")
-    text = Path(args.file).read_text(encoding="utf-8") if args.file else " ".join(args.text)
+    text = (" ".join(args.text) if args.file is None
+            else Path(args.file).read_text(encoding="utf-8"))
     record(noted(here(), text), JOURNAL)
 
 
@@ -65,9 +67,10 @@ def show(args):
     journal has never seen says so instead of printing nothing."""
     kept = entries(JOURNAL)
     positions, ending = range(len(kept)), []
-    if args.chain:
-        hops, end = chain(kept, args.chain)
-        positions, ending = inside(kept, hops), [f"The chain goes no further: {end}"]
+    if args.chain is not None:
+        links, end = chain(kept, args.chain)
+        positions = inside(kept, args.chain, links)
+        ending = [f"The chain goes no further: {end}"]
     for line in [shown(kept[at]) for at in positions
                  if all(having(kept[at], field, text) for field, text in args.having)] + ending:
         print(line)
@@ -76,7 +79,11 @@ def show(args):
 parser = argparse.ArgumentParser(
     prog="journal", description="Deposit in the journal, and read a session's history back.")
 commands = parser.add_subparsers(dest="command", required=True)
-noting = commands.add_parser("note", help="record a note for this session")
+# A note's words share the command line with its options, so `note` has no short option and takes
+# none abbreviated: a note that opens with `-h` or `--fi=` is text.
+noting = commands.add_parser("note", help="record a note for this session", add_help=False,
+                             allow_abbrev=False)
+noting.add_argument("--help", action="help", help="show this help message and exit")
 noting.add_argument("text", nargs="*", help="the note; quote it as one argument")
 noting.add_argument("--file", metavar="PATH", help="read the note from this file instead")
 noting.set_defaults(run=note)
@@ -101,6 +108,9 @@ showing.add_argument("having", nargs="*", type=field_and_text, metavar="FIELD=TE
 showing.set_defaults(run=show)
 
 args = parser.parse_args()
+# `show` prints the whole record, so a reader that stops early (`head`, a pager) ends this command as
+# it ends `cat`: by SIGPIPE, and not as a journal that could not be read.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 try:
     args.run(args)
 except Refused as refusal:
