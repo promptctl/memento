@@ -15,7 +15,7 @@ import sys
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
-from ceiling_log import hook_payload, log, reason_of  # noqa: E402
+from ceiling_log import run  # noqa: E402
 from journal import JOURNAL, Refused, origin, record, woke  # noqa: E402
 
 # The first line `finalize-session` frames a handoff with, and the opening of its last.
@@ -43,26 +43,24 @@ def handoff_named(prompt):
     return last[len(NAMING):] if text.startswith(OPENING) and last.startswith(NAMING) else None
 
 
-hook = None
-try:
-    hook = hook_payload("journal-wake", "UserPromptSubmit")
+def journal_wake(hook, facts):
+    """Journals the wake the prompt is, if it is a handoff, and returns the run's verdict."""
     handoff = handoff_named(hook["prompt"])
-    # [LAW:nothing-unseen] A prompt that names a handoff's file and is not a handoff quotes one, or
-    # is one in a wrapping this does not know, which ends its chain: the log tells it from a prompt
-    # that names none.
-    verdict = "not a handoff" + (", though it names a handoff's file" if NAMING in hook["prompt"]
-                                 else "")
-    if handoff is not None:
-        # The path is recorded as the handoff gives it: a wake finds its close-out by this text.
-        # [LAW:single-enforcer] Whether it is a path the journal keeps is `woke`'s to say, and its
-        # refusal is worded for a person, so it is the hook's error with no traceback around it.
-        try:
-            wake = woke(origin(hook["session_id"], hook["cwd"]), handoff)
-        except Refused as refusal:
-            sys.exit(f"memento journal-wake: {refusal}")
-        record(wake, JOURNAL)
-        verdict = f"woke from {handoff}"
-except (Exception, SystemExit) as unresolved:
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}")
-    raise
-log(hook, verdict)
+    if handoff is None:
+        # [LAW:nothing-unseen] A prompt that names a handoff's file and is not a handoff quotes
+        # one, or is one in a wrapping this does not know, which ends its chain: the log tells it
+        # from a prompt that names none.
+        return "not a handoff" + (", though it names a handoff's file" if NAMING in hook["prompt"]
+                                  else "")
+    # The path is recorded as the handoff gives it: a wake finds its close-out by this text.
+    # [LAW:single-enforcer] Whether it is a path the journal keeps is `woke`'s to say, and its
+    # refusal is worded for a person, so it is the hook's error with no traceback around it.
+    try:
+        wake = woke(origin(hook["session_id"], hook["cwd"]), handoff)
+    except Refused as refusal:
+        sys.exit(f"memento journal-wake: {refusal}")
+    record(wake, JOURNAL)
+    return f"woke from {handoff}"
+
+
+run("journal-wake", "UserPromptSubmit", journal_wake)
