@@ -64,6 +64,17 @@ done = run(journal, "note", "several", "words", "unquoted")
 check("a note given as several words is one note",
       done.returncode == 0 and entries(journal)[-1].text == "several words unquoted", done)
 
+# Text that Claude Code's worktree guard refuses in a command reaches the journal in a file.
+guarded = "Ran git pull --rebase, then bash -n on the launcher.\nIt didn't help: `sh` isn't $SHELL."
+(SCRATCH / "note.md").write_text(guarded)
+done = run(journal, "note", "--file", str(SCRATCH / "note.md"))
+check("a note given as a file is recorded as it was written",
+      done.returncode == 0 and entries(journal)[-1].text == guarded, (done, entries(journal)[-1]))
+done = run(journal, "show", "text=git pull")
+check("and is found by the words in it",
+      done.returncode == 0 and "  text: Ran git pull --rebase, then bash -n" in done.stdout
+      and "didn't help" in done.stdout and "several words" not in done.stdout, done)
+
 done = run(journal, "close", "--handoff", "/handoffs/1.md", "--summary=- shipped the parser")
 last = entries(journal)[-1]
 check("close records the handoff written and the summary, which may open with a dash",
@@ -78,7 +89,12 @@ check("a note from an environment that names no session is kept, with the sessio
 # --- text the journal does not take --------------------------------------------------------------
 
 journal = scratch_journal()
+(SCRATCH / "empty.md").write_text("\n")
 for name, argv in (("an empty note", ("note", "  ")),
+                   ("no note at all", ("note",)),
+                   ("a note whose file is empty", ("note", "--file", str(SCRATCH / "empty.md"))),
+                   ("a note given both as words and as a file",
+                    ("note", "words", "--file", str(SCRATCH / "note.md"))),
                    ("an empty summary", ("close", "--handoff", "/h.md", "--summary", "")),
                    ("a summary over the cap",
                     ("close", "--handoff", "/h.md", "--summary", "x" * (SUMMARY_CAP + 1))),
@@ -145,6 +161,13 @@ blocked.write_text("")
 done = run(blocked / "journal.jsonl", "note", "nowhere to go")
 check("a journal that cannot be written exits 1 with the reason",
       done.returncode == 1 and done.stderr.startswith("journal: "), done)
+journal = scratch_journal()
+for name, path in (("is not there", SCRATCH / "absent.md"), ("is not text", SCRATCH / "bytes.md")):
+    (SCRATCH / "bytes.md").write_bytes(b"\xff\xfe")
+    done = run(journal, "note", "--file", str(path))
+    check(f"a note whose file {name} exits 1 with the reason and writes nothing",
+          done.returncode == 1 and done.stderr.startswith("journal: ") and not journal.exists(),
+          done)
 
 check("the skill that documents it names it",
       "bin/journal" in open(os.path.join(os.path.dirname(HERE), "SKILL.md")).read())

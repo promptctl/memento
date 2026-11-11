@@ -180,7 +180,11 @@ for entry in (woke(by("A"), "/handoffs/a b.md"), noted(by(None), awkward),
 for name, line in (("is not JSON", "{"), ("is not an object", "[1]"),
                    ("names no kind", '{"ts": "t"}'), ("names an unknown kind", '{"kind": "nap"}'),
                    ("lacks a field of its kind", line_of(noted(by("A"), "n")).replace('"text"', '"words"')),
-                   ("carries a field its kind has not", line_of(woke(by("A"), "/h"))[:-1] + ', "text": "x"}')):
+                   ("carries a field its kind has not", line_of(woke(by("A"), "/h"))[:-1] + ', "text": "x"}'),
+                   ("holds a number where text belongs",
+                    line_of(noted(by("A"), "n")).replace('"text": "n"', '"text": 7')),
+                   ("names no directory",
+                    line_of(noted(by("A"), "n")).replace('"cwd": "/work"', '"cwd": null'))):
     check(f"a line that {name} is not an entry", unreadable(entry_of, line) is not None, line)
 
 # --- the record on disk -------------------------------------------------------------------------

@@ -3,14 +3,15 @@
 
 The entries, the record and the chain live in `lib/journal.py`; this is the command line over them.
 `note` and `close` append for the calling session, `recall` prints what that session may read of its
-predecessors, and `show` prints the record for the user. Exit codes: 0 done; 1 the journal cannot be
-read or written, with the reason; 2 the command line does not parse or its text is refused, and
-nothing was written.
+predecessors, and `show` prints the record for the user. Exit codes: 0 done; 1 it could not be done,
+with the reason: the journal or a note's file cannot be read or written, or `recall` has no session
+to recall for; 2 the command line does not parse or its text is refused, and nothing was written.
 """
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
@@ -38,7 +39,13 @@ def here():
 
 
 def note(args):
-    record(noted(here(), " ".join(args.text)), JOURNAL)
+    """The note is the words on the command line or the contents of `--file`. A file is how text
+    reaches the journal as written when Claude Code's worktree guard, which reads a command's text
+    and not a file's, would refuse the command that carried it."""
+    if args.file and args.text:
+        raise Refused("the note is given both as words and as --file. Give it one way.")
+    text = Path(args.file).read_text(encoding="utf-8") if args.file else " ".join(args.text)
+    record(noted(here(), text), JOURNAL)
 
 
 def close(args):
@@ -65,7 +72,8 @@ parser = argparse.ArgumentParser(
     prog="journal", description="Deposit in the journal, and read a session's history back.")
 commands = parser.add_subparsers(dest="command", required=True)
 noting = commands.add_parser("note", help="record a note for this session")
-noting.add_argument("text", nargs="+", help="the note; quote it as one argument")
+noting.add_argument("text", nargs="*", help="the note; quote it as one argument")
+noting.add_argument("--file", metavar="PATH", help="read the note from this file instead")
 noting.set_defaults(run=note)
 closing = commands.add_parser(
     "close", help="record this session's close-out; finalize-session runs this")
@@ -92,5 +100,5 @@ try:
     args.run(args)
 except Refused as refusal:
     parser.error(str(refusal))
-except (Unreadable, OSError) as failure:
+except (Unreadable, OSError, UnicodeError) as failure:
     sys.exit(f"journal: {failure}")

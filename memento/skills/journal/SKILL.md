@@ -10,15 +10,17 @@ keeps the rest. Writing to it is free; reading from it is small on purpose.
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal note '<text>'
+${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal note --file <path>
 ${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal recall
 ```
 
 ## `note` deposits what the reset would lose
 
-Pass the text as one quoted argument; it may span several lines. The journal stamps each
-entry itself with the UTC time, the session id, the working directory and the branch checked
-out there, so leave those out. It prints nothing and exits 0. Empty text is refused: exit 2,
-nothing written.
+A short one-line note goes as one quoted argument; any other goes in a file, as the end of
+this section explains. The journal stamps each entry itself with the UTC time, the session
+id, the working directory and the branch checked out there, so leave those out. It prints
+nothing and exits 0. Empty text or an empty file is refused, as are text and `--file`
+together: exit 2, nothing written. A file that cannot be read is exit 1 with the reason.
 
 Worth a note is whatever ends with this session and cannot be recovered from the code, the
 diff, the ticket or the handoff: a decision and the reason for it, an approach tried and
@@ -32,10 +34,15 @@ what the diff already says is not, and neither is a progress update.
 No agent reads a note back. Notes are for the user, so one costs nobody tokens later: when
 in doubt, deposit.
 
-A hook rewrites the command before it runs, so the note is stored with git, the names of
-shells and a few commands like them spelled out in hyphens (`g-i-t`, `b-a-s-h`); Claude
-Code's worktree guard refuses a command whose text names them. Write the note normally. The
-spelling is expected, not something to fix.
+Claude Code's worktree guard reads the text of a Bash command, not files, and refuses a
+command it cannot verify when that text names git or a shell (bash, sh, zsh and the like).
+A one-line single-quoted note generally passes even so. A note of several lines, one that
+needs an apostrophe or other quoting, or one the guard refused goes in a file: create it
+with the Write tool outside the repository (under `/tmp`, say), since a heredoc or `echo`
+puts the same text back into a command, and pass `--file <path>`. The journal stores the
+file's contents as written, minus surrounding whitespace, and does not delete the file.
+Don't respell a word (`g-i-t`, "the version-control tool") to get past the guard: the user
+finds notes by searching for their words, and a respelled word is one they will not find.
 
 ## `recall` is the whole of what you read
 

@@ -28,20 +28,8 @@ class HyphenateHandoff(unittest.TestCase):
         once = rewritten("finalize-session 'git'")
         self.assertEqual(rewritten(once), once)
 
-    def test_banned_words_in_a_journal_note_are_spelled_out(self):
-        self.assertEqual(rewritten("/plugin/skills/journal/bin/journal note 'git pull, then bash -n'"),
-                         "/plugin/skills/journal/bin/journal note 'g-i-t pull, then b-a-s-h -n'")
-        self.assertEqual(rewritten("\"$ROOT/skills/journal/bin/journal\" note 'git'"),
-                         "\"$ROOT/skills/journal/bin/journal\" note 'g-i-t'")
-
-    def test_a_journal_verb_that_takes_no_prose_is_left_alone(self):
-        self.assertEqual(rewritten("/plugin/skills/journal/bin/journal show text=git"),
-                         "/plugin/skills/journal/bin/journal show text=git")
-
     def test_other_commands_are_left_alone(self):
         self.assertEqual(rewritten("echo git"), "echo git")
-        self.assertEqual(rewritten("git add memento/skills/journal/bin/journal notes.md"),
-                         "git add memento/skills/journal/bin/journal notes.md")
 
 
 if __name__ == "__main__":

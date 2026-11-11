@@ -28,6 +28,7 @@ RECALLED = 5
 # When, by which session, and where an entry was written. `session` is None where the writer's
 # environment named none, and `branch` is None where git names none for `cwd`.
 Origin = collections.namedtuple("Origin", "ts session cwd branch")
+ABSENT = ("session", "branch")
 
 
 # [LAW:types-are-the-program] An entry is one of these three and carries exactly its kind's fields.
@@ -121,10 +122,15 @@ def entry_of(line):
     """The entry one line of the record holds.
 
     [LAW:parse-dont-validate] A line comes back as a Wake, Note or Close, or this raises: a kind
-    that is not one of the three, or keys that are not exactly that kind's fields."""
+    that is not one of the three, keys that are not exactly that kind's fields, or a value that is
+    not text where only `session` and `branch` may be absent instead."""
     try:
         fields = json.loads(line)
-        return KINDS[fields.pop("kind")](**fields)
+        entry = KINDS[fields.pop("kind")](**fields)
+        for field, value in entry._asdict().items():
+            if not (isinstance(value, str) or value is None and field in ABSENT):
+                raise TypeError(f"{field} is {value!r}, which is not text")
+        return entry
     except (ValueError, KeyError, TypeError, AttributeError) as wrong:
         raise Unreadable(f"{type(wrong).__name__}: {wrong}") from wrong
 
