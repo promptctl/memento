@@ -5,11 +5,11 @@ session has a beginning, a middle, and an end, and the ends are where work gets 
 a PR review half-addressed, a session that hits the context limit and forgets what it
 was doing.
 
-`memento` gives you three skills you invoke by hand: work a PR review to clean, write a
-handoff for the next session, move the context ceiling for this session or its project.
-It also ships one hook, which takes the handoff skill and makes it mandatory — past a
-token ceiling, a session cannot end its turn until it has closed out: written the handoff
-and reset.
+`memento` gives you four skills you invoke by hand: work a PR review to clean, write a
+handoff for the next session, keep a journal of what each session did, move the context
+ceiling for this session or its project. Its hooks take the handoff skill and make it
+mandatory — past a token ceiling, a session cannot end its turn until it has closed out:
+written the handoff and reset — and journal which handoff each session woke from.
 
 ## Install
 
@@ -49,27 +49,29 @@ and the close-out has exactly one name: `memento:message-in-a-bottle`.
 **`address-pr-reviews`** — works a PR's review feedback to clean. Each round: fetch
 every open finding, post a plan on each thread, implement, push (which re-runs the
 reviewer), resolve the threads that are genuinely fixed, dismiss the reviewer's now-stale
-change request. Repeat until a fetch returns nothing. Disagreeing is a first-class
+change request. Repeat until a fetch reports `done`: the head is the commit the review
+covered and nothing is unresolved. An empty fetch after a push is not that, since nobody
+has reviewed the new head yet. Disagreeing is a first-class
 outcome — push back with reasoning rather than complying with a wrong finding.
 
 The review backend is pluggable. `memento/skills/address-pr-reviews/provider.json` names
 the active provider (the `PR_REVIEW_PROVIDER` environment variable overrides it), and each
-provider is a Python module declaring a `CAPABILITIES` dict that says which operations
-it supports. Two ship today:
+provider is a Python module whose `Provider` class declares a `CAPABILITIES` dict that
+says which operations it supports. Two ship today:
 
 | Provider | What it is | Notes |
 | --- | --- | --- |
 | `action` (default) | the `brandon-fryslie/coding-agent-review` GitHub Action | posts a blocking review; findings are resolvable threads |
 | `local` | stub for a locally-running agent | raises `NotImplementedError` — not usable yet |
 
-The contract for writing a fourth is in
+The contract for writing another is in
 `memento/skills/address-pr-reviews/PROVIDER_CONTRACT.md`.
 
 **`message-in-a-bottle`** — writes the message a future session wakes up with. You run
 it at the end of a unit of work (PR merged, ticket closed, task delivered) or when the
 context is running out. It calls
 `memento/skills/message-in-a-bottle/bin/finalize-session`, which records the handoff to
-disk and schedules a delayed handoff into your own session: the session resets, and the
+disk and delivers it past a reset: the session resets, and the
 message you wrote arrives as the next agent's opening prompt. Every run resets; a handoff
 hands off.
 
@@ -87,7 +89,8 @@ With no message it hands off `/next`. The next session starts blank on every tra
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run. `--model` and `--effort` start
 the next session on that model or effort level; omit them and the transport decides: a tmux reset keeps the live
-session's model and effort, a relaunch carries the old `--model` and drops `--effort`.
+session's model and effort, a relaunch keeps the effort the session's transcript records
+last and names no model, so the next session starts on your default one.
 
 `--help` prints a usage block and exits 0 recording nothing, and any other two-dash
 word it does not know is refused — named on stderr, exit 2, no handoff written —
@@ -98,8 +101,10 @@ word, whatever comes after it: `finalize-session -- --already-fixed see PR 123`.
 
 The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
-window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
-or journaling anything.
+window. The first two are scheduled and the launcher returns at once. The detached one
+waits up to 30s for the new session to take the message before it answers, so a Bash call
+that runs it needs a timeout of 60s or more. Prefix `FINALIZE_DRY_RUN=1` to see which one
+it would choose without scheduling or journaling anything.
 
 **`ceiling`** — moves the context ceiling, for the session running right now or for its
 whole project: off, up or down by a signed amount, or pinned to a number. It calls
@@ -425,25 +430,29 @@ memento/hooks/scripts/context-ceiling.py
 memento/hooks/scripts/clear-session-ceiling.py
 memento/hooks/scripts/session-status.py
 memento/hooks/scripts/journal-wake.py
+memento/hooks/scripts/hyphenate-handoff.py
 memento/cc-candybar/plugin.json5
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
 memento/lib/journal.py
+memento/lib/transcript.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
 memento/skills/ceiling/
 memento/skills/journal/
 ```
 
-`memento/lib/` is the one thing several parts of the plugin share: the hooks and
+`memento/lib/` is the one thing several parts of the plugin share: the three ceiling hooks
+(`context-ceiling.py`, `clear-session-ceiling.py`, `session-status.py`) and
 `memento/skills/ceiling/bin/ceiling` all read the config layers through
 `ceiling_config.py`, so the program that gates a session on its ceiling and the program
-that moves one cannot disagree about the file format or about which layer wins, and both
+that moves one cannot disagree about the file format or about which layer wins, and those
 hooks write the ceiling log through `ceiling_log.py`, so their lines read alike. Each of them
 also publishes the session's status for cc-candybar through `candybar.py`. `journal-wake.py`
 writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
-`journal` command is the command line of.
+`journal` command is the command line of. The ceiling hook and the `finalize-session`
+launcher both read a session's transcript through `transcript.py`.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the
