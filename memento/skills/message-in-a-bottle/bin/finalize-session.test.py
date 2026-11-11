@@ -741,13 +741,14 @@ check("the tmux-absent PATH can still run the launcher",
 
 
 
-def argv_case(*args, path_prefix=""):
+def argv_case(*args, path_prefix="", session_id=None):
     """Run the launcher with these args against a handoff directory of its own.
 
     Returns (completed process, list of handoff bodies written). Bodies are returned
     rather than filenames, since the checks concern what a handoff says. The run is
     dry, and `path_prefix` is prepended to the fixture PATH, never substituted for
-    it, so a missing transport cannot masquerade as an argv refusal.
+    it, so a missing transport cannot masquerade as an argv refusal. `session_id` is
+    the $CLAUDE_CODE_SESSION_ID the launcher sees, absent by default.
     """
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
@@ -759,12 +760,15 @@ def argv_case(*args, path_prefix=""):
     with open(rootfile, "w") as handle:
         handle.write(str(os.getpid()))
     under_claude = [CLAUDE_BIN, "-c", 'export CLAUDE_PID=$$; "$@"; exit $?', "wrap"]
+    env = {"PATH": path, "HOME": workdir, "TMPDIR": workdir,
+           "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
+           "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"}
+    if session_id is not None:
+        env["CLAUDE_CODE_SESSION_ID"] = session_id
     try:
         done = subprocess.run(
             [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
-            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
-                 "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
+            env=env)
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
@@ -948,6 +952,21 @@ done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The handoff names the session that wrote it, so the next agent can read that
+# transcript back, on the line above the path, which stays last. Without an id the
+# handoff still goes, and that line names the variable it was looked for in. The
+# checks hold the line's place and content, not its wording.
+for session_id, expected, what in (
+        (SESSION_ID, SESSION_ID, "names the outgoing session's id"),
+        (None, "CLAUDE_CODE_SESSION_ID", "with no session id still hands off, naming the variable"),
+        ("", "CLAUDE_CODE_SESSION_ID", "with an empty session id still hands off, naming the variable")):
+    done, bodies = argv_case("a handoff", session_id=session_id)
+    tail = bodies[0].splitlines()[-2:] if len(bodies) == 1 else []
+    check(f"the handoff {what} on the line above the path",
+          done.returncode == 0 and len(tail) == 2 and expected in tail[0]
+          and tail[1].startswith("This handoff verbatim on disk: "),
+          f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # --- resolution through a real ancestry -----------------------------------
 
