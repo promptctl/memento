@@ -657,7 +657,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
         successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
-        bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None):
+        bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None, tmux_fail=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -695,6 +695,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     and the fixture daemon's `claude stop` of that id ends the deepest planted claude: `done.stop_log`
     lists the stops asked for. `agents` is the listing's text instead, and `agents_status` the exit
     status of `claude agents --json`.
+
+    Every case's `done.tmux_log` lists the tmux calls made, and `tmux_fail` names one tmux subcommand to
+    fail. A real run on the tmux transport schedules the tmux worker, which acts only after its delay, so
+    `done.tmux_log` is the launcher's own calls, and the worker is killed before the case ends.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     if host_argv is None:
@@ -760,9 +764,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                 handle.write(LOGIN)
     if not config_unset:
         env["CLAUDE_CONFIG_DIR"] = config_dir
+    tmuxlog = os.path.join(workdir, "tmux.log")
+    env["FIXTURE_TMUX_LOG"] = tmuxlog
+    if tmux_fail is not None:
+        env["FIXTURE_TMUX_FAIL"] = tmux_fail
     if successor is not None:
-        env.update(FIXTURE_SUCCESSOR=successor, FIXTURE_TMUX_STATE=tmux_state,
-                   FIXTURE_TMUX_LOG=os.path.join(workdir, "tmux.log"), NEST_LINGER="20",
+        env.update(FIXTURE_SUCCESSOR=successor, FIXTURE_TMUX_STATE=tmux_state, NEST_LINGER="20",
                    MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
     if server_config_dir is not None:
         env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
@@ -829,6 +836,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                                   text=True, capture_output=True, env=env, timeout=120)
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
+        else:
+            done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+            # The tmux worker's arguments hold the handoff's path, in this case's own handoff directory.
+            subprocess.run(["pkill", "-KILL", "-f", f"[-]-worker .*{env['MEMENTO_HANDOFF_DIR']}"],
+                           capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
         # The chain's top pid, read before the workdir is removed. It is both the pane
@@ -996,7 +1008,50 @@ check("a tempfile it cannot make after the handoff is written says where the han
       done.returncode == REFUSED_RC and len(recorded) == 1
       and os.path.join(logfail_dir, recorded[0]) in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+body = open(os.path.join(logfail_dir, recorded[0])).read() if recorded else ""
+check("a handoff that carries no goal names none", "carries the goal" not in body, f"body={body!r}")
+# The session's own goal is cleared only after every step that can refuse.
+check("and a close-out refused before its worker types nothing into its pane",
+      "send-keys" not in done.tmux_log, f"tmux_log={done.tmux_log!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
+
+# The handoff is the one text a successor's first turn always holds, so it names the carried goal and the
+# flag that passes it on, quoted so that running the line as written gives back the condition whole.
+CARRIED_GOAL = "it's \"done\" when $HOME has no `stray` files"
+goal_dir = tempfile.mkdtemp(prefix="finalize-goal.")
+done = run(dry_run="", log_mktemp_fails=True, handoff_dir=goal_dir, launcher_flags=("--goal", CARRIED_GOAL))
+recorded = sorted(os.listdir(goal_dir))
+body = open(os.path.join(goal_dir, recorded[0])).read() if recorded else ""
+passed_on = body.rpartition("finalize-session --goal ")[2].partition("\n")[0]
+echoed = subprocess.run(["/bin/bash", "-c", f"printf %s {passed_on}"], capture_output=True, text=True,
+                        env={"PATH": REAL_DIRS, "HOME": "/nonexistent"}).stdout
+check("a handoff carrying a goal names it, and the --goal line gives it back whole",
+      f"This session carries the goal: {CARRIED_GOAL}\n" in body and echoed == CARRIED_GOAL,
+      f"body={body!r} passed_on={passed_on!r} echoed={echoed!r}")
+check("and the handoff's path is still its last line",
+      body.endswith(f"This handoff verbatim on disk: {os.path.join(goal_dir, recorded[0])}"), f"body={body!r}")
+shutil.rmtree(goal_dir, ignore_errors=True)
+
+# On the tmux transport the close-out ends its own session's goal, by typing the immediate `/goal clear`
+# into its own pane, every time: whether a goal holds the session is the session's state, not the flag.
+CLEARS = ["send-keys -t %99 C-u", "send-keys -t %99 -l /goal clear", "send-keys -t %99 Enter"]
+for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with --goal")):
+    done = run(dry_run="", launcher_flags=flags)
+    check(f"a tmux close-out {name} clears its own goal before its worker acts",
+          done.returncode == 0 and done.tmux_log.splitlines() == CLEARS,
+          f"rc={done.returncode} err={done.stderr!r} tmux_log={done.tmux_log!r}")
+
+# The worker types into the same pane, so a pane the clear cannot reach refuses the handoff.
+done = run(dry_run="", tmux_fail="send-keys")
+check("a clear that cannot be typed refuses the handoff and says where it is",
+      done.returncode == REFUSED_RC and "cannot type /goal clear into pane %99" in done.stderr
+      and "verbatim on disk" not in done.stdout and "/handoffs/" in done.stderr,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+done = run()
+check("a dry run says it would clear the goal and types nothing",
+      "[dry-run] would type /goal clear into %99" in done.stdout and done.tmux_log == "",
+      f"out={done.stdout!r} tmux_log={done.tmux_log!r}")
 
 # A give-up path with no explicit guard: the detached transport reads its working
 # directory with a bare command substitution, so an unlinked cwd exits on that
@@ -1994,8 +2049,8 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
 with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     same_pid = pool.submit(worker_case, "match")
     reused_pid = pool.submit(worker_case, "reused")
-    # The goal delivery is staged to fail at its first tmux call, which under the
-    # worker's `set -euo pipefail` aborts the script on the spot.
+    goal_lands = pool.submit(worker_case, "match", goal="ship the thing")
+    # The goal delivery is staged to fail mid-way, at the buffer it pastes from.
     goal_fails = pool.submit(worker_case, "match", goal="ship the thing", fail_on="load-buffer")
     spawn_fails = pool.submit(worker_case, "match", fail_on="new-session")
     # A victim that ignores TERM, which is the only way to reach the KILL escalation.
@@ -2026,11 +2081,24 @@ check("a pid reissued to another process during the wait is not signalled",
 check("and the worker says why it left that pid alone",
       "not the process captured at launch" in done.stdout, worker_detail(done))
 
-# Ordering, not a guard, protects the single-live-agent guarantee: the goal delivery
-# below retirement is optional and fallible, and `set -e` aborts on its failure.
-# Retirement runs first, so the abort has nothing left to suppress.
+# The goal goes in while the successor's first turn runs, before the retirement, which takes up to ~20s
+# through a daemon: after it, the goal could land in a successor that has already handed off.
+def before_retirement(log, line):
+    return line in log and "terminated" in log and log.index(line) < log.index("terminated")
+
+
+retired, done = goal_lands.result()
+check("the detached worker types the carried goal before it retires the old process",
+      retired and "paste-buffer" in done.tmux_log and before_retirement(done.stdout, "re-establishing carried goal"),
+      worker_detail(done) + f" tmux_log={done.tmux_log!r}")
+
+# A goal delivery that fails is logged and handled, so the retirement after it still runs.
 retired, done = goal_fails.result()
 check("a failed goal delivery cannot leave the old process alive", retired, worker_detail(done))
+check("and the failure is logged, with the goal to deliver by hand, not passed off as delivered",
+      before_retirement(done.stdout, "ERROR: could not re-establish the carried goal")
+      and "/goal ship the thing" in done.stdout and "paste-buffer" not in done.tmux_log,
+      worker_detail(done) + f" tmux_log={done.tmux_log!r}")
 
 # A successor that cannot be spawned at all. The old process is the only agent, so it
 # must still run, and the launcher is told so.
