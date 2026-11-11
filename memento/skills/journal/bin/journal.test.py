@@ -15,11 +15,12 @@ from pathlib import Path
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="journal-cli-test-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite keeps PATH of the environment it runs in and nothing else, so every command run here is
-# given that and what its case sets. A git hook's environment names its repository in GIT_DIR, and a
-# git command that inherited it would act on that repository.
-for name in set(os.environ) - {"PATH"}:
-    del os.environ[name]
+# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so every
+# command run here is given that and what its case sets. A git hook's environment names its
+# repository in GIT_DIR, and a git command that inherited it would act on that repository.
+path = os.environ["PATH"]
+os.environ.clear()
+os.environ.update(PATH=path, HOME=str(SCRATCH))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")

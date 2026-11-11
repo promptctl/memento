@@ -16,14 +16,14 @@ import tempfile
 
 SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-# The suite keeps PATH of the environment it runs in and nothing else, so no developer's settings
-# reach a test, and every command run here is given that and what its case sets. A git hook's
-# environment names its repository in GIT_DIR, and a git command that inherited it would act on that
-# repository.
-for name in set(os.environ) - {"PATH"}:
-    del os.environ[name]
-# Gives every child a scratch XDG_DATA_HOME, so the plugin install never touches the real one.
-os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
+# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so no
+# developer's settings reach a test, every path derived from the home - the plugin install's among
+# them - lands in scratch, and every command run here is given that and what its case sets. A git
+# hook's environment names its repository in GIT_DIR, and a git command that inherited it would act
+# on that repository.
+path = os.environ["PATH"]
+os.environ.clear()
+os.environ.update(PATH=path, HOME=SCRATCH)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "ceiling")
