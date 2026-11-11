@@ -173,6 +173,8 @@ NEST = r"""#!/bin/bash
 # pid to $NEST_PUBLISH_PID; the pane fixtures are written against it.
 set -uo pipefail
 depth="$1"; shift
+# A planted claude's own arguments follow its depth (see below); the claude drops them here.
+if [ -n "${NEST_CLAUDE_SKIP:-}" ]; then shift "$NEST_CLAUDE_SKIP"; unset NEST_CLAUDE_SKIP; fi
 self="${NEST_SELF:-$0}"
 if [ -n "${NEST_PUBLISH_PID:-}" ]; then
   printf '%s' "$$" > "$NEST_PUBLISH_PID"
@@ -189,21 +191,32 @@ fi
 # last one planted (the deepest) goes to $NEST_RECORD_CLAUDE, so a case can name
 # the exact claude it expects the launcher to pick, and with $NEST_EXPORT_CLAUDE_PID
 # it is exported as $CLAUDE_PID, what Claude Code hands every tool call.
+# $NEST_CLAUDE_ARGV, one argument a line, is in every planted claude's argv after its
+# depth, as a claude `claude remote-control` spawned holds its session's URL there.
 case " ${NEST_CLAUDE_AT:-} " in
   *" $depth "*)
     NEST_CLAUDE_AT=" $NEST_CLAUDE_AT "; NEST_CLAUDE_AT="${NEST_CLAUDE_AT// $depth / }"
     export NEST_CLAUDE_AT
     [ -n "${NEST_RECORD_CLAUDE:-}" ] && printf '%s' "$$" > "$NEST_RECORD_CLAUDE"
     [ -n "${NEST_EXPORT_CLAUDE_PID:-}" ] && export CLAUDE_PID=$$
-    exec "$NEST_CLAUDE_BIN" "$self" "$depth" "$@" ;;
+    own=()
+    [ -n "${NEST_CLAUDE_ARGV:-}" ] && while IFS= read -r word; do own+=("$word"); done <<<"$NEST_CLAUDE_ARGV"
+    export NEST_CLAUDE_SKIP=${#own[@]}
+    exec "$NEST_CLAUDE_BIN" "$self" "$depth" ${own[@]+"${own[@]}"} "$@" ;;
 esac
 if [ "$depth" -gt 0 ]; then
   if [ "${NEST_REHOST_AT:-}" = "$depth" ]; then
     unset NEST_REHOST_AT
-    # A host hop: the claude shim stands in for `claude daemon run --bg-pty-host`,
-    # run by the executable $NEST_HOST_BIN names, a claude by default, so a case can
-    # plant a host whose executable is named tmux instead.
-    (exec "$NEST_HOST_BIN" "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
+    # A host hop: the claude shim stands in for the host, a daemon by default, run by
+    # the executable $NEST_HOST_BIN names, a claude by default, so a case can plant a
+    # host whose executable is named tmux instead. Its argv after the executable is
+    # $NEST_HOST_ARGV, one argument a line, then `--` and the rest of the chain. bash
+    # runs the first argument as its script, found in $NEST_VERBS where it names the
+    # shim, so a host's argv can open with a subcommand, as `claude remote-control`'s
+    # does, or with a node install's script.
+    host=()
+    while IFS= read -r word; do host+=("$word"); done <<<"$NEST_HOST_ARGV"
+    (export NEST_CWD="$PWD"; cd "$NEST_VERBS" && exec "$NEST_HOST_BIN" "${host[@]}" -- "$self" $((depth - 1)) "$@")
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
@@ -228,6 +241,9 @@ CLAUDE = r"""#!/bin/bash
 # hosts is not displayed by any pane above it, and by default inherits none of
 # tmux's environment - stripped here for real, not simulated.
 set -uo pipefail
+# The host hop ran this from the directory that names it; the chain goes on where it was.
+cd "$NEST_CWD" || exit 2
+unset NEST_CWD
 while [ "${1:-}" != "--" ]; do
   [ $# -gt 0 ] || { echo "claude shim: no -- separator" >&2; exit 2; }
   shift
@@ -323,7 +339,7 @@ exec sleep 120
 
 FIXTURES = tempfile.mkdtemp(prefix="finalize-fixtures.")
 install(FIXTURES, "tmux", TMUX)
-install(FIXTURES, "claude", CLAUDE)
+HOST_SHIM = install(FIXTURES, "claude", CLAUDE)
 NEST_BIN = install(FIXTURES, "nest", NEST)
 PS_DIR = os.path.join(FIXTURES, "ps")
 os.mkdir(PS_DIR)
@@ -337,6 +353,33 @@ install(ITERM_BIN, "osascript", "#!/bin/bash\necho 3.6.0\n")
 SUCCESSOR_DIR = os.path.join(FIXTURES, "successor")
 os.mkdir(SUCCESSOR_DIR)
 SUCCESSOR_BIN = install(SUCCESSOR_DIR, "claude", SUCCESSOR)
+
+# A Remote Control session's login and session server. `security` answers the keychain read with a
+# login, so the poster finds one on macOS, and the same login is written as .credentials.json where it
+# looks elsewhere. The session server is the shared fake (lib/fake_session_server.py), whose session id
+# chooses how the session behaves, so each case differs only in the id it hands the launcher.
+sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "lib"))
+import fake_session_server  # noqa: E402
+
+KEYCHAIN_DIR = os.path.join(FIXTURES, "keychain")
+os.mkdir(KEYCHAIN_DIR)
+LOGIN = '{"claudeAiOauth": {"accessToken": "%s"}}' % fake_session_server.TOKEN
+install(KEYCHAIN_DIR, "security", f"#!/bin/bash\nprintf '%s' '{LOGIN}'\n")
+SESSION_SERVER = fake_session_server.serve()
+# A host's argv after its executable: what `claude daemon run` and `claude remote-control` run with.
+DAEMON_ARGV = ["claude", "daemon", "run", "--bg-pty-host"]
+SERVER_ARGV = ["remote-control", "--spawn", "worktree", "--name", "memento"]
+
+
+def session_url(id):
+    """The URL a remote-control server starts a session's claude with, on the fake session server."""
+    return f"{SESSION_SERVER}/v1/code/sessions/{id}"
+
+
+def spawned_argv(id):
+    """The arguments a remote-control server starts a session's claude with, as 2.1.299's does."""
+    return ["--print", "--sdk-url", session_url(id), "--session-id", id, "--input-format", "stream-json",
+            f"--resume={session_url(id)}"]
 
 
 def exe(name):
@@ -542,6 +585,19 @@ def settle_detached(done, workdir, tmux_state):
         pass
 
 
+def settle_remote(done, url):
+    """After a real remote-control run: the remote worker's log, read once the worker has exited, so the
+    case sees every post it made. The worker is known by the session it posts to, which each case names
+    uniquely: its files are mktemp's, which on macOS sit outside the case's TMPDIR."""
+    def worker_running():
+        rows = subprocess.run(["/bin/ps", "-eo", "args="], capture_output=True, text=True).stdout
+        return any(f"--remote-worker {url} " in row for row in rows.split("\n"))
+
+    wait_for(lambda: not worker_running(), 30)
+    logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
+    done.worker_log = open(logged).read() if logged and os.path.exists(logged) else ""
+
+
 def summarize(journal, text, session_id=SESSION_ID):
     """Records a summary in `journal` as an agent does ahead of the launcher: written to a file, and
     given to the journal's command by path. A `session_id` of None records it with no session."""
@@ -563,7 +619,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
-        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False):
+        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
+        bridge=None, host_argv=None, claude_argv=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -589,8 +646,22 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     `config_unset` leaves the session's unset, so its config is $HOME/.claude under a
     HOME of the case's own. `kill_launcher_tree` kills the launcher and everything
     below it once the successor exists, as Claude Code kills a stopped Bash call.
+
+    `host_argv` is a host hop's argv after its executable, a daemon's by default, and `claude_argv` the
+    arguments every planted claude holds. `bridge` is a Remote Control session id: the host is a
+    `claude remote-control` server and the session's claude holds the arguments it starts one with,
+    unless the case names others; the environment is the one Claude Code gives such a session; and the
+    login and session server fixtures stand in for the keychain and the server. With the dry run off, the
+    remote worker the launcher starts is waited out before the case ends, and `done.worker_log` is its log.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
+    if host_argv is None:
+        host_argv = DAEMON_ARGV if bridge is None else SERVER_ARGV
+    if claude_argv is None:
+        claude_argv = [] if bridge is None else spawned_argv(bridge)
+    verbs = os.path.join(workdir, "verbs")
+    os.mkdir(verbs)
+    os.symlink(HOST_SHIM, os.path.join(verbs, host_argv[0]))
     pidfile = os.path.join(workdir, "root.pid")
     home = os.path.join(workdir, "home") if config_unset else os.environ.get("HOME", workdir)
     config_dir = os.path.join(home, ".claude") if config_unset else os.path.join(workdir, "config")
@@ -633,7 +704,18 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         "NEST_RECORD_CLAUDE": os.path.join(workdir, "claude.pid"),
         "NEST_CLAUDE_BIN": claude_bin,
         "NEST_HOST_BIN": host_bin,
+        "NEST_HOST_ARGV": "\n".join(host_argv),
+        "NEST_VERBS": verbs,
+        "NEST_CLAUDE_ARGV": "\n".join(claude_argv),
     }
+    if bridge is not None:
+        env["PATH"] = KEYCHAIN_DIR + ":" + env["PATH"]
+        env.update(CLAUDE_CODE_ENVIRONMENT_KIND="bridge", MEMENTO_RESET_TIMEOUT_SECONDS="2",
+                   MEMENTO_IDLE_TIMEOUT_SECONDS="2")
+        if not config_unset:
+            os.makedirs(config_dir, exist_ok=True)
+            with open(os.path.join(config_dir, ".credentials.json"), "w") as handle:
+                handle.write(LOGIN)
     if not config_unset:
         env["CLAUDE_CONFIG_DIR"] = config_dir
     if successor is not None:
@@ -700,6 +782,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                                   text=True, capture_output=True, env=env, timeout=120)
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
+        if bridge is not None and not env["FINALIZE_DRY_RUN"]:
+            settle_remote(done, session_url(bridge))
         # The chain's top pid, read before the workdir is removed. It is both the pane
         # fixtures' ROOTPID and the planted claude, so assertions can name the exact
         # process the launcher picked.
@@ -1145,6 +1229,125 @@ check("a walk that ends at its hop bound confines the session",
       ancestry(done).startswith("confined, the walk ended at its 16-hop bound")
       and picked(done) == DETACHED,
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+
+# --- a session `claude remote-control` spawned ----------------------------------
+# The server is the host: the session's claude is a `--print` child directly below it, whose input is
+# the server's pipe, and whose argv holds the session's URL. Claude Code also marks its environment
+# with the bridge kind, which is inherited and so decides nothing. The chain is pane shell, the server,
+# the session's claude, shell. Each argv is the vector its process runs with, so a prompt is one
+# argument however it reads.
+
+
+def remote_picked(done):
+    """The session URL the launcher would post to, or None when it picked another transport."""
+    for line in done.stdout.splitlines():
+        if line.startswith("[dry-run] transport=remote-control session="):
+            return line.split("session=", 1)[1].split(" ", 1)[0]
+    return None
+
+
+HOSTED = dict(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST)
+for name, bin_, host in (("", CLAUDE_BIN, SERVER_ARGV), (" by a node install", NODE_BIN, ["cli.js"] + SERVER_ARGV)):
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets01", host_bin=bin_, host_argv=host)
+    check(f"a session a remote-control server{name} spawned posts to its own session, not a pane or a relaunch",
+          remote_picked(done) == session_url("cse_resets01") and ancestry(done).startswith("hosted, "),
+          f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+check("and reads the log's head before it returns, in a dry run too",
+      "log_head=" in done.stdout and fake_session_server.REQUESTS.get("cse_resets01"), done.stdout)
+# The controls: a host whose first argument is no `remote-control`. A daemon started from a
+# remote-control session's shell passes the bridge kind down, and a session's claude may hold a
+# spawned claude's arguments, so neither makes it a remote-control session. Nor does a claude whose
+# prompt holds the word, as one a tool call started with that prompt does.
+for name, host in (("a daemon host's session", DAEMON_ARGV),
+                   ("a session hosted by a claude whose prompt holds remote-control",
+                    ["fix the remote-control transport"])):
+    done = run(**HOSTED, bridge="cse_quoted01", host_argv=host)
+    check(f"{name} is relaunched in a detached window, though it holds a session's --sdk-url",
+          picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
+          f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# Nothing but a host's argv and its own is read, so a pane's claude or one further below another
+# claude is never posted to, whatever it holds.
+done = run(bridge="cse_quoted02")
+check("a pane's session that holds a session's --sdk-url is cleared in its pane, never posted to",
+      picked(done) == "%99" and remote_picked(done) is None, f"out={done.stdout!r} err={done.stderr!r}")
+done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
+check("a claude started inside a remote-control session never posts to that session",
+      remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, ")
+      and "another claude (process " in ancestry(done) and "is further up" in ancestry(done),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A remote-control server's child that names no session is reached by no transport, and a relaunch
+# would take it from the server. A prompt that quotes the flag is one argument, not the flag.
+for name, own in (("names no session", ["--print"]),
+                  ("only quotes one in a prompt", ["--print", f"see --sdk-url {session_url('cse_resets05')}"])):
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets05", claude_argv=own)
+    check(f"a remote-control server's session whose argv {name} refuses",
+          done.returncode == REFUSED_RC and "cannot tell which Remote Control session" in done.stderr
+          and "gives []" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets03", launcher_flags=("--goal", "the tests pass"))
+check("the dry run carries the goal it would post",
+      "[dry-run] carried goal: the tests pass" in done.stdout, f"out={done.stdout!r}")
+
+# The real path, against the fake session server. The session reads a prompt posted mid-turn as text,
+# handed to the running turn at its next tool call, so every slash command is posted only once the log
+# shows the session idle.
+
+
+def requests(session):
+    """What the session server received, as (method, path, Authorization)."""
+    return [received[:3] for received in fake_session_server.REQUESTS.get(session, [])]
+
+
+def posted(session):
+    log = fake_session_server.LOGS.get(session)
+    return log.prompts() if log else []
+
+
+handoffs = tempfile.mkdtemp(prefix="finalize-remote.")
+try:
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets04", dry_run="", handoff_dir=handoffs,
+               message="carry this forward", launcher_flags=("--goal", "the tests pass", "--effort", "high"))
+    seen = requests("cse_resets04")
+    written = [open(os.path.join(handoffs, name)).read() for name in os.listdir(handoffs)]
+    check("the launcher reads the log's head and schedules the handoff for the turn's end",
+          done.returncode == 0
+          and f"handoff scheduled → remote-control session {session_url('cse_resets04')}" in done.stdout
+          and seen and "sort_order=desc" in seen[0][1],
+          f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} seen={seen!r}")
+    check("then posts /clear, the setting, the handoff from its file, and the goal, in that order",
+          posted("cse_resets04") == ["/clear", "/effort high", written[0] if written else None,
+                                     "/goal the tests pass"], f"seen={seen!r} log={done.worker_log!r}")
+    check("each to a session the log shows idle",
+          all(idle for _, idle in fake_session_server.LOGS["cse_resets04"].posts),
+          fake_session_server.LOGS["cse_resets04"].posts)
+    check("every request carries the stored login",
+          {auth for _, _, auth in seen} == {f"Bearer {fake_session_server.TOKEN}"}, seen)
+finally:
+    shutil.rmtree(handoffs, ignore_errors=True)
+
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_flaky01", dry_run="")
+check("a read of the log that gets no answer is retried, and the handoff still lands",
+      posted("cse_flaky01")[:1] == ["/clear"] and len(posted("cse_flaky01")) == 2
+      and "HTTP 502" in done.worker_log and "retrying" in done.worker_log,
+      f"seen={requests('cse_flaky01')!r} log={done.worker_log!r}")
+
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_busy01", dry_run="")
+check("an asking turn the log never ends gets no /clear, which it would read as text",
+      done.returncode == 0 and posted("cse_busy01") == [], f"seen={requests('cse_busy01')!r} out={done.stdout!r}")
+check("and the worker's log says the /clear was not posted and where the handoff is kept",
+      "the /clear was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_stalls01", dry_run="")
+check("a reset the log never records holds the handoff back, so it never lands in the old conversation",
+      done.returncode == 0 and posted("cse_stalls01") == ["/clear"], f"seen={requests('cse_stalls01')!r}")
+check("and the worker's log says the handoff was not posted and where it is kept",
+      "the handoff was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_refuses01", dry_run="")
+check("a session whose log refuses the login refuses the handoff in front of the agent, naming the answer",
+      done.returncode == REFUSED_RC and "HTTP 403" in done.stderr and "fixture refuses" in done.stderr
+      and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
+check("and nothing is posted to it", posted("cse_refuses01") == [], requests("cse_refuses01"))
+
 
 # --- no pane to be had, but tmux still gives a transport --------------------
 # Refusing a pane is still correct, but it does not mean refusing to deliver: the

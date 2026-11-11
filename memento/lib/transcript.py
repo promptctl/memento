@@ -14,11 +14,9 @@ Either prints why it cannot answer on stderr and exits 2.
 
 import collections
 import glob
-import inspect
 import json
 import os
 import sys
-import traceback
 
 TAIL_CHUNK = 256 * 1024
 # The values `claude --permission-mode` accepts. `default` is absent from `claude --help` and still
@@ -147,25 +145,8 @@ def _prompted(config_dir, session_id, needle):
 COMMANDS = {"flags": _flags, "prompted": _prompted}
 
 
-def _parameters(command):
-    return list(inspect.signature(command).parameters)
-
-
 if __name__ == "__main__":
-    # [LAW:one-source-of-truth] Each command's signature is both its arity and its usage line.
-    command, arguments = COMMANDS.get(sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
-    if command is None or len(arguments) != len(_parameters(command)):
-        print("usage: " + " | ".join(
-            f"transcript.py {name} " + " ".join(f"<{p.replace('_', ' ')}>" for p in _parameters(fn))
-            for name, fn in COMMANDS.items()), file=sys.stderr)
-        sys.exit(2)
-    try:
-        sys.exit(command(*arguments))
-    except (Unrecorded, OSError) as error:
-        print(error, file=sys.stderr)
-        sys.exit(2)
-    # Python exits 1 on an uncaught exception, which `prompted` would read as not yet, so a reader
-    # that crashes on a record it cannot read says so with 2 and the traceback.
-    except Exception:
-        traceback.print_exc()
-        sys.exit(2)
+    # -I keeps this file's directory off the path; lib/script.py is beside it.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import script
+    script.run(COMMANDS, Unrecorded)

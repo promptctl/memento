@@ -103,7 +103,10 @@ The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. The first two are scheduled and the launcher returns at once. The detached one
 waits up to 30s for the new session to take the message before it answers, so a Bash call
-that runs it needs a timeout of 60s or more. Prefix `FINALIZE_DRY_RUN=1` to see which one
+that runs it needs a timeout of 60s or more. A session `claude remote-control` spawned is
+reached through the session server instead: once the turn ends, a worker posts `/clear` and
+then the message into it, as claude.ai does, under your claude.ai login, and the launcher
+returns at once. Prefix `FINALIZE_DRY_RUN=1` to see which one
 it would choose without scheduling or journaling anything.
 
 **`ceiling`** — moves the context ceiling, for the session running right now or for its
