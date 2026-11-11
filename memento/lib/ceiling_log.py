@@ -71,6 +71,14 @@ def _kept(tail):
     return DROPPED + (tail[newline + 1:] if newline >= 0 else b"")
 
 
+def _one_line(text):
+    """`text` with a backslash and every character `str.isprintable` rejects (a line break, a
+    control, a lone surrogate) written as its Python backslash escape, so it holds no line break
+    and encodes to UTF-8."""
+    return "".join(char if char.isprintable() and char != "\\"
+                   else char.encode("unicode_escape").decode() for char in text)
+
+
 def _write(name, hook, verdict, fields):
     """Appends one line with the time, session, event, the `key=value` fields, and the verdict,
     first rewriting a log over the cap to what it `_kept`.
@@ -79,8 +87,10 @@ def _write(name, hook, verdict, fields):
     the hook."""
     fields = {"session": str(hook.get("session_id"))[:8], "event": hook.get("hook_event_name"),
               **fields}
-    line = (f"{datetime.now().isoformat(timespec='seconds')} "
-            f"{' '.join(f'{key}={value}' for key, value in fields.items())} -> {verdict}\n")
+    # [LAW:single-enforcer] the whole line is escaped, not each value, so no field or verdict a
+    # hook adds can break the one line per run that a grep for a session relies on.
+    line = _one_line(f"{datetime.now().isoformat(timespec='seconds')} "
+                     f"{' '.join(f'{key}={value}' for key, value in fields.items())} -> {verdict}")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         # [LAW:no-ambient-temporal-coupling] every write is made under the lock, so the end of the
@@ -100,6 +110,6 @@ def _write(name, hook, verdict, fields):
                 handle.seek(0)
                 handle.write(rewritten)
                 handle.truncate()
-            handle.write(line.encode(errors="backslashreplace"))
+            handle.write(f"{line}\n".encode())
     except OSError as failure:
         print(f"memento {name}: cannot write {LOG_FILE}: {failure}", file=sys.stderr)

@@ -108,7 +108,29 @@ for raw in ("42", "[]", "not json at all"):
           "and no fields", raised is not None and calls == [] and len(lines) == 1
           and " session=None event=None -> stopped: " in lines[0], (raised, calls, lines))
 
-full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+
+def fails_on_a_multiline_message(hook, facts):
+    facts["reply"] = "first\r\nsecond"
+    facts["path"] = "C:\\new"
+    facts["home"] = "/Users/zoë"
+    raise ValueError("cannot read\nthe transcript")
+
+
+raised, lines, _ = ran(fails_on_a_multiline_message)
+written = ceiling_log.LOG_FILE.read_bytes()
+check("a run whose fields and stopped reason carry line breaks logs one line, read either as bytes "
+      "split on newline or as text split on every line break, with each break escaped, a backslash "
+      "doubled, and printable non-ASCII kept as written",
+      len(lines) == 1 and written.count(b"\n") == 1 and written.endswith(b"\n")
+      and lines[0].endswith(" reply=first\\r\\nsecond path=C:\\\\new home=/Users/zoë "
+                            "-> stopped: ValueError: cannot read\\nthe transcript"), (lines, written))
+
+raised, lines, _ = ran(lambda hook, facts: "allow\u2028under\x1b[0m")
+check("a verdict carrying a line separator or a control character logs one line, both escaped",
+      raised is None and len(lines) == 1 and lines[0].endswith(" -> allow\\u2028under\\x1b[0m"),
+      (raised, lines))
+
+full =Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
 seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
 full.write_text("".join(f"{line}\n" for line in seeded))
 ran(decided, log=full)
