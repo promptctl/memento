@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,11 @@ LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
 LOG_CAP = 2_000_000
 DROPPED = f"[older lines dropped at {LOG_CAP} bytes]\n".encode()
+# A control (every line break but two is one), the line and paragraph separators, and a lone
+# surrogate, which UTF-8 cannot encode. A space or format character other than ASCII's - a narrow
+# no-break space in a macOS screenshot's name, a zero-width joiner - is none of these, so a path
+# holding one is logged as written and a grep for the path finds it.
+ESCAPED = frozenset({"Cc", "Zl", "Zp", "Cs"})
 
 
 def run(name, event, work, every_line=lambda hook: {}):
@@ -72,11 +78,11 @@ def _kept(tail):
 
 
 def _one_line(text):
-    """`text` with a backslash and every character `str.isprintable` rejects (a line break, a
-    control, a lone surrogate) written as its Python backslash escape, so it holds no line break
-    and encodes to UTF-8."""
-    return "".join(char if char.isprintable() and char != "\\"
-                   else char.encode("unicode_escape").decode() for char in text)
+    """`text` with a backslash and every character in an `ESCAPED` category written as its Python
+    backslash escape, so it holds no line break and encodes to UTF-8."""
+    return "".join(char.encode("unicode_escape").decode()
+                   if char == "\\" or unicodedata.category(char) in ESCAPED else char
+                   for char in text)
 
 
 def _write(name, hook, verdict, fields):

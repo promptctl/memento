@@ -45,7 +45,7 @@ def ran(work, payload=PAYLOAD, every_line=lambda hook: {}, log=None):
             run("test hook", "Stop", work, every_line=every_line)
         except (Exception, SystemExit) as failure:
             raised = failure
-    lines = ceiling_log.LOG_FILE.read_text().splitlines() if log is None else []
+    lines = ceiling_log.LOG_FILE.read_text(encoding="utf-8").splitlines() if log is None else []
     return raised, lines, stderr.getvalue()
 
 
@@ -113,6 +113,7 @@ def fails_on_a_multiline_message(hook, facts):
     facts["reply"] = "first\r\nsecond"
     facts["path"] = "C:\\new"
     facts["home"] = "/Users/zoë"
+    facts["shot"] = "Shot 10.00\u202fAM \U0001f468\u200d\U0001f469.png"
     raise ValueError("cannot read\nthe transcript")
 
 
@@ -120,9 +121,12 @@ raised, lines, _ = ran(fails_on_a_multiline_message)
 written = ceiling_log.LOG_FILE.read_bytes()
 check("a run whose fields and stopped reason carry line breaks logs one line, read either as bytes "
       "split on newline or as text split on every line break, with each break escaped, a backslash "
-      "doubled, and printable non-ASCII kept as written",
-      len(lines) == 1 and written.count(b"\n") == 1 and written.endswith(b"\n")
+      "doubled, and non-ASCII that breaks no line, a narrow no-break space and a zero-width joiner "
+      "among it, kept as written; the failure is re-raised",
+      isinstance(raised, ValueError) and len(lines) == 1 and written.count(b"\n") == 1
+      and written.endswith(b"\n")
       and lines[0].endswith(" reply=first\\r\\nsecond path=C:\\\\new home=/Users/zoë "
+                            "shot=Shot 10.00\u202fAM \U0001f468\u200d\U0001f469.png "
                             "-> stopped: ValueError: cannot read\\nthe transcript"), (lines, written))
 
 raised, lines, _ = ran(lambda hook, facts: "allow\u2028under\x1b[0m")
@@ -130,7 +134,7 @@ check("a verdict carrying a line separator or a control character logs one line,
       raised is None and len(lines) == 1 and lines[0].endswith(" -> allow\\u2028under\\x1b[0m"),
       (raised, lines))
 
-full =Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
 seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
 full.write_text("".join(f"{line}\n" for line in seeded))
 ran(decided, log=full)
