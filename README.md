@@ -112,6 +112,38 @@ command ends by printing the ceiling in force for this session, the ceiling a ne
 here would get, and the file behind each layer, so the command's own output is the
 confirmation that the write took.
 
+**`journal`** — keeps what a handoff leaves behind. A handoff carries the next step and
+nothing of what came before it, so what a session did and why is gone a reset or two later.
+The journal is an append-only record of it, written through
+`memento/skills/journal/bin/journal`.
+
+```bash
+journal note '<text>'
+journal recall
+journal show [--chain SESSION] [FIELD=TEXT ...]
+journal close --handoff <path> --summary '<text>'
+```
+
+An entry is a wake (the handoff a session started from), a note (text it chose to deposit),
+or a close (the handoff it wrote, with a summary of what it did, at most 1,200 characters),
+and each records the time, the session id, the working directory and the branch checked out
+there. Session ids change at nearly every reset, so a session's history is its chain of
+handoffs: its wake names a handoff, the close that wrote that handoff names the session
+before, and so on back.
+
+Writing is open and reading is narrow. `note` is for an agent to use freely. `recall` is all
+an agent reads back: the summaries of the nearest five close-outs in its own chain, oldest
+first, and never a note, so looking back costs about 6,000 characters at most. `show` is for
+you: every entry in full, `--chain <session id>` keeping one session's chain, and each
+`FIELD=TEXT` keeping the entries whose field contains the text, as in
+`journal show kind=note text=parser`. The fields are `kind`, `ts`, `session`, `cwd`,
+`branch`, `handoff`, `text` and `summary`.
+
+The record is `~/.claude/memento/journal.jsonl`, one JSON object per line;
+`MEMENTO_JOURNAL` names another file. Claude Code's worktree guard refuses some commands
+whose text names git or a shell, so the hook that spells those words out in a handoff
+(`g-i-t`) does the same for a `journal note` command, and a note is stored that way.
+
 ## The context ceiling
 
 What makes the close-out fire without being asked is
@@ -366,9 +398,11 @@ memento/cc-candybar/plugin.json5
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
+memento/lib/journal.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
 memento/skills/ceiling/
+memento/skills/journal/
 ```
 
 `memento/lib/` is the one thing several parts of the plugin share: the hooks and

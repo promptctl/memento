@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Writes to the journal and reads it back: a session's notes and close-out, and its chain's history.
+
+The entries, the record and the chain live in `lib/journal.py`; this is the command line over them.
+`note` and `close` append for the calling session, `recall` prints what that session may read of its
+predecessors, and `show` prints the record for the user. Exit codes: 0 done; 1 the journal cannot be
+read or written, with the reason; 2 the command line does not parse or its text is refused, and
+nothing was written.
+"""
+
+import argparse
+import os
+import sys
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+# A plugin is a directory rather than an installed package, so the path comes before the import.
+sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
+from journal import (FIELDS, JOURNAL, RECALLED, SUMMARY_CAP, Refused, Unreadable,  # noqa: E402
+                     chain, closed, entries, having, inside, noted, origin, recalled, record, shown)
+
+SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+
+
+def field_and_text(written):
+    """One `FIELD=TEXT` filter as its two parts. The field is one an entry can have."""
+    field, given, text = written.partition("=")
+    if not given or field not in FIELDS:
+        raise argparse.ArgumentTypeError(f"{written!r} should read FIELD=TEXT, where FIELD is one "
+                                         f"of: {' '.join(FIELDS)}")
+    return field, text
+
+
+def here():
+    """The origin of an entry this command writes: the calling session, if the environment names
+    one, and the directory it is working in."""
+    return origin(os.environ.get(SESSION_VARIABLE), os.getcwd())
+
+
+def note(args):
+    record(noted(here(), " ".join(args.text)), JOURNAL)
+
+
+def close(args):
+    record(closed(here(), args.handoff, args.summary), JOURNAL)
+
+
+def recall(args):
+    session = os.environ.get(SESSION_VARIABLE)
+    if not session:
+        sys.exit(f"journal: {SESSION_VARIABLE} is not set, so there is no session whose history "
+                 f"to recall. Run it from inside a Claude Code session.")
+    print("\n".join(recalled(entries(JOURNAL), session)))
+
+
+def show(args):
+    kept = entries(JOURNAL)
+    positions = inside(kept, chain(kept, args.chain)[0]) if args.chain else range(len(kept))
+    for entry in (kept[at] for at in positions):
+        if all(having(entry, field, text) for field, text in args.having):
+            print(shown(entry))
+
+
+parser = argparse.ArgumentParser(
+    prog="journal", description="Deposit in the journal, and read a session's history back.")
+commands = parser.add_subparsers(dest="command", required=True)
+noting = commands.add_parser("note", help="record a note for this session")
+noting.add_argument("text", nargs="+", help="the note; quote it as one argument")
+noting.set_defaults(run=note)
+closing = commands.add_parser(
+    "close", help="record this session's close-out; finalize-session runs this")
+closing.add_argument("--handoff", required=True, metavar="PATH",
+                     help="the handoff file this close-out writes")
+closing.add_argument("--summary", required=True, metavar="TEXT",
+                     help=f"what the session did and what came of it, at most {SUMMARY_CAP:,} "
+                          f"characters")
+closing.set_defaults(run=close)
+commands.add_parser(
+    "recall", help=f"print the close-out summaries of up to {RECALLED} sessions before this one "
+                   f"in its chain of handoffs").set_defaults(run=recall)
+showing = commands.add_parser("show", help="print the journal's entries, oldest first")
+showing.add_argument("--chain", metavar="SESSION",
+                     help="only the entries of this session and of the sessions its chain of "
+                          "handoffs leads back through")
+showing.add_argument("having", nargs="*", type=field_and_text, metavar="FIELD=TEXT",
+                     help="only entries that have FIELD with TEXT in it; FIELD is one of: "
+                          + " ".join(FIELDS))
+showing.set_defaults(run=show)
+
+args = parser.parse_args()
+try:
+    args.run(args)
+except Refused as refusal:
+    parser.error(str(refusal))
+except (Unreadable, OSError) as failure:
+    sys.exit(f"journal: {failure}")
