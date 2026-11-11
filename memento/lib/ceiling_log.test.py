@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for a hook's run: what `run` logs for a run that succeeds, one that fails partway, one given
-a payload for another event, and one whose log cannot be written. Every case runs in process, with
-its payload on a stdin built here and its log in a scratch directory.
+a payload for another event, one whose log is over its cap, and one whose log cannot be written.
+Every case runs in process, with its payload on a stdin built here and its log in a scratch
+directory.
 
 Run with: python3 ceiling_log.test.py
 """
@@ -106,6 +107,67 @@ for raw in ("42", "[]", "not json at all"):
     check(f"stdin {raw!r}, which is no JSON object, stops the run and is logged with no session "
           "and no fields", raised is not None and calls == [] and len(lines) == 1
           and " session=None event=None -> stopped: " in lines[0], (raised, calls, lines))
+
+full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
+full.write_text("".join(f"{line}\n" for line in seeded))
+ran(decided, log=full)
+lines = full.read_text().splitlines()
+newest = lines[1:-1]
+check("a log over the cap, written once more, says older lines were dropped, then holds its newest "
+      "lines whole, as many as fit in half the cap with it, and the new line",
+      lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
+      and newest == seeded[-len(newest):]
+      and ceiling_log.LOG_CAP // 2 - len(seeded[0]) - 1 < sum(len(line) + 1 for line in lines[:-1])
+      <= ceiling_log.LOG_CAP // 2
+      and lines[-1].endswith(" -> allow-under"), (lines[:2], lines[-2:], full.stat().st_size))
+
+full.write_text(full.read_text() + "".join(f"{line}\n" for line in seeded))
+ran(decided, log=full)
+lines = full.read_text().splitlines()
+check("a log over the cap a second time holds one dropped-lines line, at its top",
+      [n for n, line in enumerate(lines) if line.startswith("[older lines dropped")] == [0],
+      lines[:2])
+
+unended = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+unended.write_text("x" * (ceiling_log.LOG_CAP + 1))
+ran(decided, log=unended)
+lines = unended.read_text().splitlines()
+check("a log over the cap with no line ending in its newest half keeps none of it",
+      len(lines) == 2 and lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
+      and not lines[1].startswith("x") and lines[1].endswith(" -> allow-under"),
+      [line[:60] for line in lines])
+
+brim = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 94 - 1)]
+body = "".join(f"{line}\n" for line in brim)
+brimful = "p" * (ceiling_log.LOG_CAP - len(body)) + "\n" + body
+cut = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+cut.write_text(brimful)
+ran(decided, log=cut)
+written = cut.read_text()
+rewritten = written[:written.rstrip("\n").rfind("\n") + 1]
+killed = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+killed.write_text(rewritten + brimful[len(rewritten):])
+ran(decided, log=killed)
+lines = killed.read_text().splitlines()
+newest = lines[1:-1]
+check("a log one byte over the cap whose rewrite was killed before the cut, written once more, "
+      "holds its newest lines whole and once, and the new line",
+      lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
+      and newest == brim[-len(newest):] and lines[-1].endswith(" -> allow-under"),
+      (len(brimful), lines[:2], [line for line in newest if line not in brim][:2]))
+
+under = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+under.write_text("an older line\n")
+ran(decided, log=under)
+lines = under.read_text().splitlines()
+check("a log under the cap is appended to and otherwise left as it was",
+      len(lines) == 2 and lines[0] == "an older line" and lines[1].endswith(" -> allow-under"), lines)
+
+raised, lines, _ = ran(decided, payload='{"session_id": "\\ud800abcdefgh", "hook_event_name": "Stop"}')
+check("a payload holding a code point that cannot be encoded is logged with it escaped, and the run "
+      "completes", raised is None and len(lines) == 1 and " session=\\ud800abcdefg " in lines[0],
+      (raised, lines))
 
 blocker = SCRATCH / "a file"
 blocker.write_text("")

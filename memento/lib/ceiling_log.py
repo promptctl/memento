@@ -17,6 +17,7 @@ from pathlib import Path
 LOG_FILE = Path(os.environ.get("MEMENTO_CEILING_LOG")
                 or Path.home() / ".claude" / "memento" / "context-ceiling.log")
 LOG_CAP = 2_000_000
+DROPPED = f"[older lines dropped at {LOG_CAP} bytes]\n".encode()
 
 
 def run(name, event, work, every_line=lambda hook: {}):
@@ -63,8 +64,16 @@ def reason_of(failure):
             else f"{type(failure).__name__}: {failure}")
 
 
+def _kept(tail):
+    """What a log over the cap keeps, given its newest bytes: the `DROPPED` line, then the whole
+    lines that end in `tail` after its first byte, none when no line ends there."""
+    newline = tail.find(b"\n")
+    return DROPPED + (tail[newline + 1:] if newline >= 0 else b"")
+
+
 def _write(name, hook, verdict, fields):
-    """Appends one line with the time, session, event, the `key=value` fields, and the verdict.
+    """Appends one line with the time, session, event, the `key=value` fields, and the verdict,
+    first rewriting a log over the cap to what it `_kept`.
 
     A write failure is printed to stderr, naming the hook, and not raised, so logging cannot disable
     the hook."""
@@ -74,11 +83,23 @@ def _write(name, hook, verdict, fields):
             f"{' '.join(f'{key}={value}' for key, value in fields.items())} -> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with LOG_FILE.open("a") as handle:
+        # [LAW:no-ambient-temporal-coupling] every write is made under the lock, so the end of the
+        # log is where the last holder left it; opened without O_APPEND so it can be rewritten in
+        # place, never moved into place: a hook waiting on the lock holds this inode, and would
+        # append to an unlinked file.
+        with open(os.open(LOG_FILE, os.O_RDWR | os.O_CREAT, 0o666), "r+b") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
-            if os.fstat(handle.fileno()).st_size > LOG_CAP:
-                handle.truncate(0)
-                handle.write(f"[truncated at {LOG_CAP} bytes]\n")
-            handle.write(line)
+            if handle.seek(0, os.SEEK_END) > LOG_CAP:
+                # The rewritten log, its DROPPED line included, fits in half the cap, so the log is
+                # rewritten once per half-cap of new lines, not on every line once it sits at the
+                # cap. It is written over the log's start and the log is cut after: a hook killed
+                # between the two leaves a log still over the cap, whose newest half the rewrite
+                # cannot have reached, for the next write to keep whole.
+                handle.seek(len(DROPPED) - LOG_CAP // 2 - 1, os.SEEK_END)
+                rewritten = _kept(handle.read())
+                handle.seek(0)
+                handle.write(rewritten)
+                handle.truncate()
+            handle.write(line.encode(errors="backslashreplace"))
     except OSError as failure:
         print(f"memento {name}: cannot write {LOG_FILE}: {failure}", file=sys.stderr)
