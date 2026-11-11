@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for a hook's run: what `run` logs for a run that succeeds, one that fails partway, one given
-a payload for another event, and one whose log cannot be written. Every case runs in process, with
-its payload on a stdin built here and its log in a scratch directory.
+a payload for another event, one whose log is over its cap, and one whose log cannot be written.
+Every case runs in process, with its payload on a stdin built here and its log in a scratch
+directory.
 
 Run with: python3 ceiling_log.test.py
 """
@@ -106,6 +107,33 @@ for raw in ("42", "[]", "not json at all"):
     check(f"stdin {raw!r}, which is no JSON object, stops the run and is logged with no session "
           "and no fields", raised is not None and calls == [] and len(lines) == 1
           and " session=None event=None -> stopped: " in lines[0], (raised, calls, lines))
+
+full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
+full.write_text("".join(f"{line}\n" for line in seeded))
+ran(decided, log=full)
+lines = full.read_text().splitlines()
+newest = lines[1:-1]
+check("a log over the cap, written once more, says older lines were dropped, then holds its newest "
+      "lines whole and the new line, and is under the cap",
+      lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
+      and newest and newest == seeded[-len(newest):] and len(newest) < len(seeded)
+      and lines[-1].endswith(" -> allow-under")
+      and full.stat().st_size < ceiling_log.LOG_CAP, (lines[:2], lines[-2:], full.stat().st_size))
+
+full.write_text(full.read_text() + "".join(f"{line}\n" for line in seeded))
+ran(decided, log=full)
+lines = full.read_text().splitlines()
+check("a log over the cap a second time holds one dropped-lines line, at its top",
+      [n for n, line in enumerate(lines) if line.startswith("[older lines dropped")] == [0],
+      lines[:2])
+
+under = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+under.write_text("an older line\n")
+ran(decided, log=under)
+lines = under.read_text().splitlines()
+check("a log under the cap is appended to and otherwise left as it was",
+      len(lines) == 2 and lines[0] == "an older line" and lines[1].endswith(" -> allow-under"), lines)
 
 blocker = SCRATCH / "a file"
 blocker.write_text("")
