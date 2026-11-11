@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER = os.path.join(HERE, "finalize-session")
@@ -38,6 +39,7 @@ JOURNAL_BIN = os.path.join(PLUGIN_ROOT, "skills", "journal", "bin")
 JOURNAL_CLI = os.path.join(JOURNAL_BIN, "journal")
 HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "close-out-call.py")
 WAKE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "journal-wake.py")
+FENCE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "handed-off.py")
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 import hermetic  # noqa: E402
@@ -475,13 +477,13 @@ def answer(effort):
 BYPASS_HIGH = [prompt("bypassPermissions"), answer("high")]
 
 
-def write_transcripts(config_dir, transcripts):
+def write_transcripts(config_dir, transcripts, session_id):
     """One transcript per entry, each a list of records, in its own project slug, as Claude Code
     keeps them under `<config dir>/projects/<slug>/<session id>.jsonl`."""
     for slug, records in enumerate(transcripts):
         project = os.path.join(config_dir, "projects", f"-case-{slug}")
         os.makedirs(project)
-        with open(os.path.join(project, SESSION_ID + ".jsonl"), "w") as handle:
+        with open(os.path.join(project, session_id + ".jsonl"), "w") as handle:
             handle.writelines(json.dumps(record) + "\n" for record in records)
 
 # A `readlink` that removes a directory on its first call, then behaves normally.
@@ -594,6 +596,15 @@ def descendants(root):
     return found
 
 
+def fenced(session_id, home=HOME):
+    """The reason the handed-off hook denies a tool call of `session_id` with, under `home`, or None where
+    it lets the call through. The fence is asked the way a session meets it, through the hook."""
+    result = subprocess.run([FENCE_HOOK], input=json.dumps({"session_id": session_id, "tool_name": "Bash"}),
+                            capture_output=True, text=True, check=True,
+                            env={"PATH": os.environ["PATH"], "HOME": home})
+    return json.loads(result.stdout)["hookSpecificOutput"]["permissionDecisionReason"] if result.stdout else None
+
+
 def wait_for(condition, seconds):
     deadline = time.time() + seconds
     while not condition() and time.time() < deadline:
@@ -679,7 +690,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
         successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
         bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None, tmux_fail=None,
-        osascript_status=None):
+        osascript_status=None, fence_blocked=False):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -723,6 +734,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     `done.tmux_log` is the launcher's own calls, and the worker is killed before the case ends.
     `done.osascript_log` is the AppleScript the launcher wrote to iTerm2 sessions, and `osascript_status`
     the status those writes exit with. A real run on the iTerm2 transport has its worker killed the same way.
+
+    `fence_blocked` runs the case under a HOME of its own where a file stands in the way of the handed-off
+    records, so the worker's mark fails; `done.home` is the HOME the case ran under.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     if host_argv is None:
@@ -733,9 +747,14 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     os.mkdir(verbs)
     os.symlink(HOST_SHIM, os.path.join(verbs, host_argv[0]))
     pidfile = os.path.join(workdir, "root.pid")
-    home = os.path.join(workdir, "home") if config_unset else HOME
+    home = os.path.join(workdir, "home") if config_unset or fence_blocked else HOME
+    if fence_blocked:
+        os.makedirs(os.path.join(home, ".claude", "memento"))
+        open(os.path.join(home, ".claude", "memento", "handed-off"), "w").close()
     config_dir = os.path.join(home, ".claude") if config_unset else os.path.join(workdir, "config")
-    write_transcripts(config_dir, transcripts)
+    # A case with no session id still leaves its session's transcripts, under the suite's id, which the
+    # launcher is then never told.
+    write_transcripts(config_dir, transcripts, SESSION_ID if session_id is None else session_id)
     tmux_state = os.path.join(workdir, "tmux")
     # The tmux-absent case uses NO_TMUX_BIN in place of FIXTURES and REAL_DIRS: it must
     # not include REAL_DIRS, since that is where a packaged tmux would be found.
@@ -864,6 +883,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         else:
             done = subprocess.run(argv,
                                   text=True, capture_output=True, env=env, timeout=120)
+        done.home = home
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
         else:
@@ -1952,13 +1972,16 @@ DID = "- Ran git pull --rebase, then bash -n on the launcher.\n\nIt holds: `sh` 
 taken_dir = tempfile.mkdtemp(prefix="finalize-taken.")
 taken_handoffs = os.path.join(taken_dir, "handoffs")
 taken_journal = os.path.join(taken_dir, "journal.jsonl")
+# The cases that read the fence have session ids of their own, since the records share this suite's HOME.
+taken_session, silent_session = str(uuid.uuid4()), str(uuid.uuid4())
 
 # Each case waits out a successor's answer and, when it is refused, the old process's
 # linger, so they run concurrently. Each owns its workdir, successor and old process.
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     taken = pool.submit(run, panes=None, successor="records", handoff_dir=taken_handoffs,
-                        journal=taken_journal, summary=f"\n{DID}\n\n\n")
-    silent = pool.submit(run, panes=None, successor="silent")
+                        journal=taken_journal, summary=f"\n{DID}\n\n\n", session_id=taken_session)
+    silent = pool.submit(run, panes=None, successor="silent", session_id=silent_session)
+    fence_blocked = pool.submit(run, panes=None, successor="records", fence_blocked=True)
     other = pool.submit(run, panes=None, successor="other")
     dies = pool.submit(run, panes=None, successor="dies")
     killed = pool.submit(run, panes=None, successor="killed")
@@ -1986,7 +2009,7 @@ kept = entries(taken_journal)
 check("and the journal holds one close-out for it, naming the handoff it wrote and holding the "
       "summary its session recorded, as written",
       len(written) == 1 and [type(entry) for entry in kept] == [Summary, Close]
-      and (kept[1].session, kept[1].handoff, kept[1].summary) == (SESSION_ID, written[0], DID),
+      and (kept[1].session, kept[1].handoff, kept[1].summary) == (taken_session, written[0], DID),
       f"written={written!r} journal={kept!r}")
 shutil.rmtree(taken_dir, ignore_errors=True)
 check("and the worker retires the old process once the launcher has returned",
@@ -1994,6 +2017,8 @@ check("and the worker retires the old process once the launcher has returned",
 check("the successor's screen never shows the boot banner, and it still counts as taken",
       "fixture successor" in done.pane and "Claude Code v" not in done.pane and done.retired,
       f"pane={done.pane!r} " + detail(done))
+check("and the fence its worker put up once the successor took the message is down once it is retired",
+      f"session {taken_session} fenced" in done.worker_log and fenced(taken_session) is None, detail(done))
 
 for future, name, reason in ((silent, "records nothing", f"was not taken within {READY_TIMEOUT}s"),
                              (other, "records a different prompt", f"was not taken within {READY_TIMEOUT}s"),
@@ -2007,6 +2032,15 @@ for future, name, reason in ((silent, "records nothing", f"was not taken within 
           "kill-session" in done.tmux_log and not done.retired, detail(done))
 done = silent.result()
 check("the refusal carries the successor's last screen", "fixture successor" in done.stderr, detail(done))
+check("and a session whose handoff is refused keeps the work, so its tool calls are never fenced",
+      "fenced" not in done.worker_log and fenced(silent_session) is None, detail(done))
+done = fence_blocked.result()
+check("a session that cannot be fenced once its successor took the message is still delivered, and told on "
+      "stderr that its tool calls still run and the successor holds the work",
+      done.returncode != REFUSED_RC and "handoff delivered" in done.stdout
+      and "WARNING: this session could not be fenced off from the work" in done.stderr
+      and "do nothing more" in done.stderr and fenced(SESSION_ID, done.home) is None and done.retired,
+      detail(done))
 done = dies.result()
 check("a successor that exits at boot is refused with its last words, by its exit rather than the timeout",
       "unknown option '--bogus'" in done.stderr, detail(done))
@@ -2043,6 +2077,29 @@ check("a hosted session that hands off is stopped through its daemon once the la
 IGNORES_TERM = ["/bin/bash", "-c", 'trap "" TERM; while :; do sleep 1; done']
 
 
+# A python3 that runs the real one and, once a handed_off.py mark has been made, SIGKILLs the detached
+# worker above it, as a worker that dies between its mark and its verdict. The `$(...)` that runs the mark
+# is a fork of the worker holding the same argv, so every such ancestor is killed, the outermost first,
+# leaving the worker no moment to go on past its mark.
+MARK_KILLS_BIN = os.path.join(FIXTURES, "mark-kills")
+os.mkdir(MARK_KILLS_BIN)
+install(MARK_KILLS_BIN, "python3", f"""#!/bin/bash
+{shlex.quote(shutil.which("python3"))} "$@"
+status=$?
+case " $* " in
+  *" handed_off.py mark "*|*"/handed_off.py mark "*)
+    workers=""
+    pid=$PPID
+    while [ "$pid" -gt 1 ]; do
+      case "$(ps -o args= -p "$pid")" in *--detached-worker*) workers="$pid $workers" ;; esac
+      pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+    done
+    for worker in $workers; do kill -KILL "$worker"; done ;;
+esac
+exit $status
+""")
+
+
 def identity_of(pid):
     # `$(...)` strips trailing newlines and nothing else; matching that exactly
     # matters, because the whole check is a string comparison against it.
@@ -2051,8 +2108,15 @@ def identity_of(pid):
 
 
 def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), successor="records",
-                hold_launcher=False, retirement=("signal",), stop_leaves=False):
+                hold_launcher=False, retirement=("signal",), stop_leaves=False, unsignallable=False,
+                kill_after_mark=False):
     """Run one detached worker over a real process standing in for the old claude.
+
+    The old session has an id of its own, and `done.fence` is the handed-off hook's answer for it once the
+    worker has exited (the deny reason, or None), with `done.fence_while_held` its answer while a held
+    launcher lives. `unsignallable` makes the old claude pid 1, which no signal from this suite reaches, so
+    the worker cannot retire it; the victim is then left alone. `kill_after_mark` has the worker SIGKILLed
+    right after its mark.
 
     Returns (retired, done): whether the victim was signalled, and the worker's
     result, where `done.tmux_log` lists every tmux argv the worker issued and
@@ -2066,9 +2130,17 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     running. The victim is reaped the moment it exits, as a claude is by the process that
     started it, so ps never shows it lingering as a zombie.
     """
-    proc = subprocess.Popen(list(victim), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    threading.Thread(target=proc.wait, daemon=True).start()
-    real = identity_of(proc.pid)
+    if unsignallable:
+        # Run as root, the worker's signals would reach pid 1.
+        assert os.geteuid() != 0, "the unsignallable victim is pid 1, which root could signal"
+        proc = None
+        victim_pid = 1
+    else:
+        proc = subprocess.Popen(list(victim), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        threading.Thread(target=proc.wait, daemon=True).start()
+        victim_pid = proc.pid
+    old_session = str(uuid.uuid4())
+    real = identity_of(victim_pid)
     if identity == "match":
         ident = real
     else:
@@ -2094,7 +2166,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     tmux_state = os.path.join(workdir, "tmux")
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
-        "PATH": ":".join([FIXTURES, REAL_DIRS]),
+        "PATH": ":".join([MARK_KILLS_BIN] * kill_after_mark + [FIXTURES, REAL_DIRS]),
         "HOME": HOME,
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
@@ -2104,7 +2176,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         "FIXTURE_BACKGROUND_PID": os.path.join(workdir, "victim.pid"),
     }
     with open(env["FIXTURE_BACKGROUND_PID"], "w") as handle:
-        handle.write(str(proc.pid))
+        handle.write(str(victim_pid))
     if stop_leaves:
         env["FIXTURE_STOP_LEAVES"] = "1"
     if fail_on is not None:
@@ -2116,7 +2188,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         worker = subprocess.Popen(
             ["/bin/bash", "-c", f'exec 3>&{verdict_write}; exec {verdict_write}>&-; exec "$@"', "bash",
              LAUNCHER, "--detached-worker", "fixture-session", workdir, relaunch, config, successor_id,
-             msgfile, goalfile, str(proc.pid), ident, str(launcher.pid), launcher_ident,
+             msgfile, goalfile, str(victim_pid), ident, old_session, str(launcher.pid), launcher_ident,
              *retirement],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, pass_fds=(verdict_write,))
         os.close(verdict_write)
@@ -2126,29 +2198,36 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         verdict_box = {}
         reader = threading.Thread(target=lambda: verdict_box.update(text=os.fdopen(verdict_read).read()), daemon=True)
         reader.start()
-        survived_launcher = None
+        survived_launcher = fence_while_held = None
         if hold_launcher:
             reader.join(40)
             time.sleep(1.5)
             survived_launcher = proc.poll() is None
+            fence_while_held = fenced(old_session)
             launcher.kill()
             launcher.wait()
         out, err = worker.communicate(timeout=180)
         reader.join(5)
         done = subprocess.CompletedProcess(worker.args, worker.returncode, out, err)
-        try:
-            proc.wait(timeout=5)
-            retired = True
-        except subprocess.TimeoutExpired:
+        if proc is None:
             retired = False
+        else:
+            try:
+                proc.wait(timeout=5)
+                retired = True
+            except subprocess.TimeoutExpired:
+                retired = False
         done.victim_signal = -proc.returncode if retired and proc.returncode < 0 else None
         done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         done.verdict = verdict_box.get("text", "(the pipe was still held open after the worker exited)")
         done.survived_launcher = survived_launcher
+        done.fence_while_held = fence_while_held
+        done.fence = fenced(old_session)
         return retired, done
     finally:
-        proc.kill()
-        proc.wait()
+        if proc is not None:
+            proc.kill()
+            proc.wait()
         launcher.kill()
         launcher.wait()
         try:
@@ -2161,7 +2240,32 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+def iterm_worker_case(goal):
+    """Run one iTerm2 worker whose old claude is pid 1, which no signal from this suite reaches, so it
+    survives its retirement. `done.osascript_log` is every script the worker wrote to iTerm2."""
+    assert os.geteuid() != 0, "the unsignallable victim is pid 1, which root could signal"
+    workdir = tempfile.mkdtemp(prefix="finalize-iterm-worker.")
+    try:
+        msgfile, goalfile = os.path.join(workdir, "msg"), os.path.join(workdir, "goal")
+        with open(msgfile, "w") as handle:
+            handle.write("handoff")
+        with open(goalfile, "w") as handle:
+            handle.write(goal)
+        osascriptlog = os.path.join(workdir, "osascript.log")
+        done = subprocess.run(
+            [LAUNCHER, "--iterm-worker", "5C2E7B1A-0D4F-4E8B-9A3C-6F1D2E7B8A90", "1", identity_of(1),
+             msgfile, goalfile, "claude --session-id 0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f", workdir,
+             "0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f"],
+            text=True, capture_output=True, timeout=90,
+            env={"PATH": ":".join([ITERM_BIN, FIXTURES, REAL_DIRS]), "HOME": HOME, "TMPDIR": workdir,
+                 "FIXTURE_OSASCRIPT_LOG": osascriptlog})
+        done.osascript_log = open(osascriptlog).read() if os.path.exists(osascriptlog) else ""
+        return done
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     same_pid = pool.submit(worker_case, "match")
     reused_pid = pool.submit(worker_case, "reused")
     goal_lands = pool.submit(worker_case, "match", goal="ship the thing")
@@ -2177,6 +2281,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                               stop_leaves=True)
     no_retirement = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM))
     stop_after_gone = pool.submit(worker_case, "reused", retirement=("stop", HOST_SHIM, BACKGROUND_ID))
+    unsignallable = pool.submit(worker_case, "match", unsignallable=True)
+    mark_killed = pool.submit(worker_case, "match", kill_after_mark=True)
+    iterm_unsignallable = pool.submit(iterm_worker_case, goal="ship the thing")
 
 
 def worker_detail(done):
@@ -2234,8 +2341,8 @@ check("a process that refuses TERM is still retired, by escalation to KILL",
 check("and the escalation says so, rather than the pid quietly disappearing",
       "survived TERM; sending KILL" in done.stdout, worker_detail(done))
 
-# The old process's claude would tear down the launcher's Bash call when it dies, so
-# the worker retires it only once the launcher has returned.
+# The worker retires the old process only once the launcher has returned, so the call's result
+# reaches the old session's transcript; the fence, not the timing, keeps that session from acting.
 retired, done = launcher_held.result()
 check("the worker does not retire the old process while the launcher is still running",
       done.survived_launcher is True and retired, worker_detail(done))
@@ -2266,6 +2373,43 @@ retired, done = no_retirement.result()
 check("a retirement the worker cannot parse is refused before anything is started",
       done.returncode == 2 and "retirement is 'signal' or 'stop <claude>" in done.stderr
       and done.tmux_log == "" and not retired, worker_detail(done) + f" tmux_log={done.tmux_log!r}")
+
+# The fence: once the successor has taken the message, the old session's tool calls are denied until its
+# retirement is checked, and a session that may still run stays fenced.
+SUCCESSOR_NAMED = "its successor is session 0b6f2d1e-7c3a-4e9b-8d5f-2a1c3e4b5d6f, in detached tmux window"
+retired, done = launcher_held.result()
+check("while the launcher's call still runs, the old session is already fenced, the deny naming its successor",
+      done.fence_while_held is not None and SUCCESSOR_NAMED in done.fence_while_held, worker_detail(done))
+for future, name in ((same_pid, "a signal"), (stopped, "its daemon's stop")):
+    retired, done = future.result()
+    check(f"and the fence comes down once the old session is retired, by {name}",
+          retired and done.fence is None, worker_detail(done))
+for future, name in ((stop_refused, "the daemon refuses the stop"),
+                     (stop_leaves, "the daemon's stop leaves it running")):
+    retired, done = future.result()
+    check(f"a session that may still run stays fenced when {name}",
+          not retired and done.fence is not None and "stays fenced" in done.stdout, worker_detail(done))
+retired, done = spawn_fails.result()
+check("a handoff refused before any take leaves the session unfenced, since it keeps the work",
+      done.fence is None and "fenced" not in done.stdout, worker_detail(done))
+retired, done = unsignallable.result()
+check("an old process that survives KILL is reported as surviving, never as terminated, and stays fenced",
+      done.verdict == "taken\n" and "ERROR: old claude 1 survived KILL" in done.stdout
+      and "old claude 1 terminated" not in done.stdout and done.fence is not None
+      and "stays fenced" in done.stdout, worker_detail(done))
+retired, done = mark_killed.result()
+check("a worker that dies between its mark and its verdict leaves no verdict, and a fence naming the successor "
+      "that took the message",
+      done.verdict == "" and done.fence is not None and SUCCESSOR_NAMED in done.fence, worker_detail(done))
+
+# The iTerm2 worker types its relaunch into the session its old claude ran in, so a claude that survives
+# would read the line as a prompt.
+done = iterm_unsignallable.result()
+check("an iTerm2 worker whose old claude survives KILL sends no relaunch, and says so, naming the goal",
+      done.returncode == 1 and done.osascript_log == ""
+      and "ERROR: old claude 1 survived KILL" in done.stdout and "the relaunch was NOT sent" in done.stdout
+      and "carried goal NOT delivered: /goal ship the thing" in done.stdout,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} osascript={done.osascript_log!r}")
 
 
 # ---------------------------------------------------------------------------
