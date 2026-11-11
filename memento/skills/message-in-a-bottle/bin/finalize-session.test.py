@@ -109,7 +109,9 @@ case "${1:-}" in
     # `buffer: <its text>` after its argv, so a case sees what a paste typed.
     # The tmux WORKER resets a pane that already exists and runs nothing in it, so its
     # cases state what that pane shows: $FIXTURE_TMUX_PANE_TEXT, when set, is what
-    # capture-pane prints.
+    # capture-pane prints. A /clear pasted while $FIXTURE_TMUX_CLEAR_ENTRY names the pane
+    # claude's registry entry runs, as Claude Code runs it: the entry is rewritten to
+    # $FIXTURE_TMUX_CLEARED_TEXT.
     sub="$1"
     if [ "${FIXTURE_TMUX_FAIL:-}" = "$sub" ]; then
       echo "fixture tmux: failing '$sub' on request" >&2
@@ -158,7 +160,11 @@ case "${1:-}" in
         printf '%s\n' "$line" ;;
       load-buffer)
         if [ "${!#}" = - ]; then
-          printf 'buffer: %s\n' "$(cat)" >> "${FIXTURE_TMUX_LOG:-/dev/null}"
+          text=$(cat)
+          printf 'buffer: %s\n' "$text" >> "${FIXTURE_TMUX_LOG:-/dev/null}"
+          if [ "$text" = /clear ] && [ -n "${FIXTURE_TMUX_CLEAR_ENTRY:-}" ]; then
+            printf '%s' "$FIXTURE_TMUX_CLEARED_TEXT" > "$FIXTURE_TMUX_CLEAR_ENTRY"
+          fi
         fi ;;
       capture-pane)
         if [ -n "${FIXTURE_TMUX_PANE_TEXT+set}" ]; then
@@ -884,6 +890,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             done = subprocess.run(argv,
                                   text=True, capture_output=True, env=env, timeout=120)
         done.home = home
+        done.config_dir = config_dir
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
         else:
@@ -896,6 +903,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             worker_re = f"[-]-(iterm-)?worker .*{env['MEMENTO_HANDOFF_DIR'].replace('.', '[.]')}"
             if re.search(r"handoff scheduled → (tmux|iTerm2) ", done.stdout):
                 wait_for(lambda: subprocess.run(["pgrep", "-f", worker_re], capture_output=True).returncode == 0, 10)
+            done.worker_argv = subprocess.run(["pgrep", "-lf", worker_re], capture_output=True, text=True).stdout
             subprocess.run(["pkill", "-KILL", "-f", worker_re], capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
@@ -1082,6 +1090,18 @@ for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with
     check(f"a tmux close-out {name} clears its own goal before its worker acts",
           done.returncode == 0 and typed == CLEARS,
           f"rc={done.returncode} err={done.stderr!r} tmux_log={done.tmux_log!r}")
+
+# The worker sees the reset as this session's claude leaving this session, in the registry under this
+# session's config dir, so the launcher hands it all three. With no session id a carried goal could never
+# be typed, so the close-out refuses rather than dropping it in a log the session never reads.
+done = run(dry_run="")
+check("a tmux close-out hands its worker the config dir, claude pid and session id it sees the reset by",
+      f" {done.config_dir} {done.root_pid} {SESSION_ID} " in done.worker_argv.rstrip("\n") + " ",
+      f"argv={done.worker_argv!r} config={done.config_dir} pid={done.root_pid}")
+done = run(session_id=None, launcher_flags=("--goal", "the tests pass"))
+check("a tmux close-out carrying a goal with no session id refuses, naming the variable",
+      done.returncode == REFUSED_RC and "$CLAUDE_CODE_SESSION_ID is unset" in done.stderr
+      and "carried goal would never be typed" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 
 # The worker types into the same pane, so a pane the clear cannot reach refuses the handoff.
 done = run(dry_run="", tmux_fail="send-keys")
@@ -2433,12 +2453,18 @@ check("an iTerm2 worker whose old claude survives KILL sends no relaunch, and sa
 # removes it, and that the message carries its own path.
 # ---------------------------------------------------------------------------
 
-def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
+RESET_ENTRY = '{"sessionId": "the-reset-session"}'
+
+
+def tmux_worker_case(cleared=RESET_ENTRY, registered=True, timeout="2", settings=(), goal=""):
     """Run one tmux worker and report what it did with the handoff.
 
-    Returns (done, whether the handoff file still exists, tmux log). `pane_text` is
-    what capture-pane shows, so a reset that never registers is a value, not a mode.
-    `goal` is the carried goal, "" for none.
+    Returns (done, whether the handoff file still exists, tmux log). The pane shows the
+    banner the old session drew at its start throughout, as a short session's pane does.
+    The pane's claude is registered in the old session when `registered`, and `cleared`
+    is its registry entry's text once the /clear runs, None for a /clear that never
+    does, so how the reset lands is a value, not a mode. `goal` is the carried goal, ""
+    for none.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     msgfile = os.path.join(workdir, "handoff.md")
@@ -2447,18 +2473,26 @@ def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
         handle.write("the whole handoff")
     with open(goalfile, "w") as handle:
         handle.write(goal)
+    config_dir = os.path.join(workdir, "config")
+    os.makedirs(os.path.join(config_dir, "sessions"))
+    entry = os.path.join(config_dir, "sessions", "4242.json")
+    if registered:
+        with open(entry, "w") as handle:
+            handle.write('{"sessionId": "the-old-session"}')
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
         "HOME": HOME,
         "TMPDIR": workdir,
         "FIXTURE_TMUX_LOG": tmuxlog,
-        "FIXTURE_TMUX_PANE_TEXT": pane_text,
+        "FIXTURE_TMUX_PANE_TEXT": " ▐▛███▜▌   Claude Code v2.1.299",
         "MEMENTO_RESET_TIMEOUT_SECONDS": timeout,
     }
+    if cleared is not None:
+        env.update(FIXTURE_TMUX_CLEAR_ENTRY=entry, FIXTURE_TMUX_CLEARED_TEXT=cleared)
     try:
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", msgfile, goalfile, *settings],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, "4242", "the-old-session", *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -2466,26 +2500,32 @@ def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-    registered = pool.submit(tmux_worker_case, "Claude Code v1.2.3")
-    never = pool.submit(tmux_worker_case, "still working on the previous turn")
-    goal_registered = pool.submit(tmux_worker_case, "Claude Code v1.2.3", goal="ship it")
-    goal_never = pool.submit(tmux_worker_case, "still working on the previous turn", goal="ship it")
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    registered = pool.submit(tmux_worker_case)
+    never = pool.submit(tmux_worker_case, cleared=None)
+    goal_registered = pool.submit(tmux_worker_case, goal="ship it")
+    goal_never = pool.submit(tmux_worker_case, cleared=None, goal="ship it")
+    goal_unregistered = pool.submit(tmux_worker_case, registered=False, cleared=None, goal="ship it")
+    goal_torn = pool.submit(tmux_worker_case, cleared='{"sessionId": "the-re', goal="ship it")
+    with_settings = pool.submit(tmux_worker_case, settings=("/model opus", "/effort high"))
 
 done, survived, log = registered.result()
 check("a reset the worker can see delivers the handoff",
       "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
+check("and is seen as the pane's claude moving to a new session",
+      "moved from session the-old-session to the-reset-session" in done.stdout, f"out={done.stdout!r}")
 check("and the handoff file outlives the worker that delivered it",
       survived, f"out={done.stdout!r}")
 
-# The reset can be typed while the agent is still mid-turn, so Claude queues it and the
-# banner may not appear within any fixed window. Tmux type-ahead preserves ordering, so
+# The reset can be typed while the agent is still mid-turn, so Claude queues it and it
+# may not land within any fixed window. Tmux type-ahead preserves ordering, so
 # the worker sends regardless and never deletes a handoff it could not confirm.
 done, survived, log = never.result()
 check("a reset the worker never sees still delivers the handoff",
       "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
 check("and says plainly that it could not confirm the reset",
-      "not observed" in done.stdout, f"out={done.stdout!r}")
+      "WARNING: not seen" in done.stdout and "did not leave session the-old-session within 2s" in done.stderr,
+      f"out={done.stdout!r} err={done.stderr!r}")
 check("and never claims the handoff was withheld",
       "NOT sent" not in done.stdout and "misfired" not in log,
       f"out={done.stdout!r} log={log!r}")
@@ -2499,19 +2539,31 @@ done, _, log = goal_registered.result()
 check("a reset the worker can see has the carried goal typed after the handoff",
       0 <= log.find("buffer: the whole handoff") < log.find("buffer: /goal ship it"),
       f"out={done.stdout!r} log={log!r}")
+# The pane shows the old session's banner the whole time, so a worker that read the screen
+# would take the reset as seen at its first poll and type the goal into the old context.
 done, _, log = goal_never.result()
-check("a reset the worker never sees has no goal typed, and the goal named to deliver by hand",
+check("a reset that never runs, under a banner on screen, has no goal typed, and the goal named to deliver by hand",
       "/goal" not in log and "carried goal NOT delivered" in done.stdout and "/goal ship it" in done.stdout,
       f"out={done.stdout!r} log={log!r}")
+done, _, log = goal_unregistered.result()
+check("a claude with no registry entry cannot have its reset seen: the reason is logged, the handoff sent, no goal typed",
+      "WARNING: not seen" in done.stdout and "no registry entry" in done.stderr
+      and "buffer: the whole handoff" in log and "/goal" not in log and "carried goal NOT delivered" in done.stdout,
+      f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
+done, _, log = goal_torn.result()
+check("an entry that stays unreadable after the /clear is not seen, and the last failed read is named",
+      "not seen" in done.stdout and "did not leave session the-old-session" in done.stderr
+      and "the last read failed" in done.stderr and "is not a JSON object" in done.stderr
+      and "/goal" not in log, f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
 
 # The requested model and effort are typed into the reset session before the handoff is
 # pasted, so the handoff's first turn already runs on them.
-done, _, log = tmux_worker_case("Claude Code v1.2.3", settings=("/model opus", "/effort high"))
+done, _, log = with_settings.result()
 model_at, effort_at, paste_at = (log.find(needle) for needle in
                                  ("buffer: /model opus", "buffer: /effort high", "buffer: the whole handoff"))
 check("the worker types the requested /model and /effort, in order, before the handoff",
       0 <= model_at < effort_at < paste_at, f"out={done.stdout!r} log={log!r}")
-done, _, log = tmux_worker_case("Claude Code v1.2.3")
+done, _, log = registered.result()
 check("with nothing requested the worker types no setting",
       "buffer: /model" not in log and "buffer: /effort" not in log and "buffer: the whole handoff" in log,
       f"out={done.stdout!r} log={log!r}")
