@@ -36,7 +36,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(H
 # launcher command, and the hook that journals the wake of a session a handoff reaches.
 JOURNAL_BIN = os.path.join(PLUGIN_ROOT, "skills", "journal", "bin")
 JOURNAL_CLI = os.path.join(JOURNAL_BIN, "journal")
-HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "hyphenate-handoff.py")
+HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "close-out-call.py")
 WAKE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "journal-wake.py")
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
@@ -401,6 +401,7 @@ SUCCESSOR_BIN = install(SUCCESSOR_DIR, "claude", SUCCESSOR)
 # chooses how the session behaves, so each case differs only in the id it hands the launcher.
 sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "lib"))
 import fake_session_server  # noqa: E402
+import remote_control  # noqa: E402
 
 KEYCHAIN_DIR = os.path.join(FIXTURES, "keychain")
 os.mkdir(KEYCHAIN_DIR)
@@ -531,6 +532,14 @@ for arg in "$@"; do
   esac
 done
 exec /usr/bin/mktemp "$@"
+''')
+# A python3 that makes the launcher's goal tempfile read-only as the launcher claims a published goal, so
+# the one step after the claim, writing the claimed goal, fails.
+NO_GOAL_REWRITE_BIN = os.path.join(FIXTURES, "nogoalrewrite")
+os.mkdir(NO_GOAL_REWRITE_BIN)
+install(NO_GOAL_REWRITE_BIN, "python3", '''#!/bin/bash
+[ "${3:-}" = claim ] && chmod 444 "${TMPDIR:-/tmp}"/finalize-goal.*
+exec /usr/bin/python3 "$@"
 ''')
 
 # A launcher whose working directory no longer exists, as after a removed worktree.
@@ -663,7 +672,7 @@ def summarize(journal, text, session_id=SESSION_ID):
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, journal=None, summary="handed off", dry_run="1",
-        log_mktemp_fails=False, cwd_gone=False, ps_fails=False,
+        log_mktemp_fails=False, goal_rewrite_fails=False, cwd_gone=False, ps_fails=False,
         self_dir_gone=False, via_link=False, claude_bin=CLAUDE_BIN, claude_pid=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
@@ -735,6 +744,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     path = [PS_DIR] + ([FIXTURES, REAL_DIRS] if tmux_on_path else [NO_TMUX_BIN])
     if log_mktemp_fails:
         path.insert(0, NO_LOGFILE_BIN)
+    if goal_rewrite_fails:
+        path.insert(0, NO_GOAL_REWRITE_BIN)
     # The launcher is invoked through a symlinked directory that the fixture `date`
     # deletes on its first call. The symlink is what disappears, not the script file,
     # so the launcher keeps running as it would in the field.
@@ -1477,8 +1488,11 @@ try:
           posted("cse_resets04") == ["/clear", "/effort high", written[0] if written else None,
                                      "/goal the tests pass"], f"seen={seen!r} log={done.worker_log!r}")
     check("each to a session the log shows idle",
-          all(idle for _, idle in fake_session_server.LOGS["cse_resets04"].posts),
+          all(idle for _, idle, _ in fake_session_server.LOGS["cse_resets04"].posts),
           fake_session_server.LOGS["cse_resets04"].posts)
+    check("after an interrupt aimed at the asking turn, which had ended, so it stopped nothing",
+          fake_session_server.LOGS["cse_resets04"].interrupts == [(("asking-turn",), None)],
+          fake_session_server.LOGS["cse_resets04"].interrupts)
     check("every request carries the stored login",
           {auth for _, _, auth in seen} == {f"Bearer {fake_session_server.TOKEN}"}, seen)
 finally:
@@ -1507,6 +1521,73 @@ check("a session whose log refuses the login refuses the handoff in front of the
       done.returncode == REFUSED_RC and "HTTP 403" in done.stderr and "fixture refuses" in done.stderr
       and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 check("and nothing is posted to it", posted("cse_refuses01") == [], requests("cse_refuses01"))
+
+done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_held01", dry_run="")
+check("an asking turn a goal holds is ended by an interrupt aimed at it, and the handoff lands",
+      done.returncode == 0 and fake_session_server.LOGS["cse_held01"].interrupts == [(("asking-turn",), ("asking-turn",))]
+      and posted("cse_held01")[:1] == ["/clear"] and len(posted("cse_held01")) == 2,
+      f"log={done.worker_log!r} interrupts={fake_session_server.LOGS['cse_held01'].interrupts!r}")
+
+# A goal an earlier handoff's worker published for the session, waiting to post it once the handoff's turn
+# ends, belongs to the successor once that turn closes out. The publication is held by this suite, so its
+# claim sees a live publisher.
+claims = tempfile.mkdtemp(prefix="finalize-claims.")
+try:
+    publication = remote_control.publish(claims, "cse_claims01", "the old goal")
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims01", dry_run="", handoff_dir=claims)
+    check("a close-out on a session with a published goal claims it and carries it on",
+          done.returncode == 0 and posted("cse_claims01")[-1:] == ["/goal the old goal"]
+          and not publication.take_back(lambda line: None), f"rc={done.returncode} err={done.stderr!r} log={done.worker_log!r}")
+    publication = remote_control.publish(claims, "cse_claims02", "the old goal")
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims02", dry_run="", handoff_dir=claims,
+               launcher_flags=("--goal", "the new goal"))
+    check("one with a goal of its own claims the published one and drops it, saying so",
+          done.returncode == 0 and "dropped for this close-out's own: /goal the old goal" in done.stdout
+          and posted("cse_claims02")[-1:] == ["/goal the new goal"] and not publication.take_back(lambda line: None),
+          f"out={done.stdout!r} log={done.worker_log!r}")
+    publication = remote_control.publish(claims, "cse_refuses02", "the old goal")
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_refuses02", dry_run="", handoff_dir=claims)
+    check("one refused before the claim leaves the published goal with its worker",
+          done.returncode == REFUSED_RC and publication.take_back(lambda line: None), f"rc={done.returncode} err={done.stderr!r}")
+    publication = remote_control.publish(claims, "cse_claims03", "the old goal")
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims03", dry_run="", handoff_dir=claims,
+               goal_rewrite_fails=True)
+    check("one whose step after the claim fails refuses, naming the claimed goal to set by hand",
+          done.returncode == REFUSED_RC and "/goal the old goal" in done.stderr and not publication.take_back(lambda line: None)
+          and posted("cse_claims03") == [], f"rc={done.returncode} err={done.stderr!r}")
+finally:
+    shutil.rmtree(claims, ignore_errors=True)
+
+# The worker's first post interrupts the asking turn, which would abort the launcher's Bash call were it
+# still running, so the worker posts nothing while the launcher lives.
+launcher = subprocess.Popen(["sleep", "30"])
+identity = subprocess.run(["ps", "-o", "lstart=,ucomm=", "-p", str(launcher.pid)],
+                          text=True, capture_output=True).stdout.rstrip("\n")
+waits = tempfile.mkdtemp(prefix="finalize-waits.")
+login_dir = os.path.join(waits, "config")
+os.mkdir(login_dir)
+with open(os.path.join(login_dir, ".credentials.json"), "w") as handle:
+    handle.write(LOGIN)
+for name, text in (("handoff.md", "the handoff"), ("goal", "")):
+    with open(os.path.join(waits, name), "w") as handle:
+        handle.write(text)
+waiting = fake_session_server.log_of("cse_waits01")
+worker = subprocess.Popen([LAUNCHER, "--remote-worker", session_url("cse_waits01"), str(waiting.head()),
+                           os.path.join(waits, "handoff.md"), os.path.join(waits, "goal"), str(launcher.pid), identity],
+                          env={**os.environ, "PATH": KEYCHAIN_DIR + ":" + REAL_DIRS, "CLAUDE_CONFIG_DIR": login_dir,
+                               "MEMENTO_IDLE_TIMEOUT_SECONDS": "5", "MEMENTO_RESET_TIMEOUT_SECONDS": "5"},
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(1.5)
+check("the remote worker posts nothing while the launcher that started it lives",
+      worker.poll() is None and not fake_session_server.REQUESTS.get("cse_waits01"),
+      fake_session_server.REQUESTS.get("cse_waits01"))
+launcher.kill()
+launcher.wait()
+worker.wait(30)
+check("and interrupts the asking turn once it has exited, then delivers",
+      waiting.interrupts == [(("asking-turn",), ("asking-turn",))] and waiting.prompts() == ["/clear", "the handoff"],
+      (waiting.interrupts, waiting.prompts()))
+shutil.rmtree(waits, ignore_errors=True)
 
 
 # --- no pane to be had, but tmux still gives a transport --------------------

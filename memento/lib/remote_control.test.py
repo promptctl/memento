@@ -211,6 +211,12 @@ class Recording:
             raise Transient("GET answered HTTP 502: bad gateway")
         return self.log.page(after)
 
+    def history(self, before):
+        return self.log.history(before)
+
+    def post(self, event):
+        return self.log.post(event)
+
 
 session, head = fresh()
 recording = Recording(session)
@@ -316,13 +322,19 @@ check("and one that keeps failing raises its last failure at the timeout",
 
 # --- a handoff's posts -----------------------------------------------------------
 
+HANDOFFS = tempfile.mkdtemp(prefix="remote-control-handoffs.")
+
 
 def run_deliver(session, head, goal="", settings=(), idle_timeout=10, reset_timeout=2):
     """Delivers into the session and returns (what was withheld and why, or None; the notes)."""
     notes = []
     error = raised(lambda: remote_control.deliver(session, Log(session, head), "the handoff", goal, settings,
-                                                  idle_timeout, reset_timeout, notes.append))
+                                                  idle_timeout, reset_timeout, notes.append, lambda: None, HANDOFFS))
     return (error.args if isinstance(error, Withheld) else error), notes
+
+
+def claimed(session):
+    return remote_control.claim(HANDOFFS, session.id, lambda line: None)
 
 
 session, head = fresh()
@@ -331,21 +343,110 @@ withheld, notes = run_deliver(session, head, goal="the tests pass", settings=("/
 check("a handoff posts /clear, each setting, the handoff, and the goal, in that order",
       withheld is None and session.prompts() == ["/clear", "/effort high", "the handoff", "/goal the tests pass"],
       (withheld, session.posts))
-check("each to an idle session", all(idle for _, idle in session.posts), session.posts)
+check("each to an idle session", all(idle for _, idle, _ in session.posts), session.posts)
 check("and notes each post with its sequence number",
       any(note.startswith("posted the /clear (log sequence ") for note in notes), notes)
+check("an asking turn that has already ended is still interrupted first, which stops nothing",
+      session.interrupts == [(("asking-turn",), None)], session.interrupts)
+check("and the goal it published is taken back, so no close-out can claim it after", claimed(session) == "")
+
+# The goal's Stop hook holds the turn that ran the close-out working at every stop, so it would go on
+# working in the old context until its block cap; an interrupt is the one way to end it from here.
+session, head = fresh(goal="the old goal")
+withheld, notes = run_deliver(session, head, goal="the tests pass")
+check("an asking turn a goal holds is ended by an interrupt aimed at its prompt, before the /clear",
+      withheld is None and session.interrupts == [(("asking-turn",), ("asking-turn",))]
+      and session.prompts() == ["/clear", "the handoff", "/goal the tests pass"],
+      (withheld, session.interrupts, notes))
+check("and the handoff's turn runs with no goal, the /clear having ended the old one",
+      session.turns[0] == ("the handoff", None), session.turns)
+
+session, _ = fresh(goal="the old goal")
+session.append(*[{"type": "assistant", "parent_tool_use_id": None}] * (3 * fake_session_server.PAGE))
+withheld, _ = run_deliver(session, session.head())
+check("its stamp is found reading back across several pages of the turn's later events",
+      withheld is None and session.interrupts == [(("asking-turn",), ("asking-turn",))], session.interrupts)
+
+session, head = fresh(stamped=False)
+withheld, _ = run_deliver(session, head)
+check("an asking turn no client prompt began is aimed at by the stamp before it, which it keeps as its own",
+      withheld is None and session.interrupts == [(("previous-turn",), ("previous-turn",))], session.interrupts)
+
+session, head = fresh(late=True)
+session.upload_stamp()
+withheld, _ = run_deliver(session, head)
+check("an asking turn whose stamp is uploaded after the head is aimed at once the forward read meets it",
+      withheld is None and session.interrupts == [(("asking-turn",), ("asking-turn",))], session.interrupts)
+
+prompts = tuple(f"p{n}" for n in range(12))
+check("an aim names the turn's own prompt and the newest it took in, at most AIM of them",
+      remote_control.aim(SessionLog.stamp(prompts)) == ("p0",) + prompts[-(remote_control.AIM - 1):])
+check("and a stamp is only a turn's top-level assistant event",
+      remote_control.aim({**SessionLog.stamp(prompts), "parent_tool_use_id": "toolu_1"}) is None
+      and remote_control.aim({"type": "user", "user_message_uuid": "p0"}) is None)
+
+
+class Interrupts:
+    """A session whose interrupts get the answer `answer(event)` gives: a sequence number, or it raises."""
+    def __init__(self, log, answer):
+        self.log, self.id, self.answer, self.sent = log, log.id, answer, []
+
+    def page(self, after):
+        return self.log.page(after)
+
+    def history(self, before):
+        return self.log.history(before)
+
+    def post(self, event):
+        if event["payload"]["type"] != "control_request":
+            return self.log.post(event)
+        self.sent.append(event["payload"]["uuid"])
+        return self.answer(event)
+
+
+def refused(event):
+    raise Refused("POST answered HTTP 403: fixture refuses")
+
 
 session, head = fresh()
-withheld, _ = run_deliver(session, head, idle_timeout=1)
-check("an asking turn that never ends gets no /clear, which it would read as text",
+session.end_turn()
+withheld, notes = run_deliver(Interrupts(session, refused), head)
+check("an interrupt that cannot be posted is an ERROR, and the handoff still goes in once the turn ends",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and any(note.startswith("ERROR: the asking turn was not interrupted") for note in notes), notes)
+
+session, head = fresh(goal="the old goal")
+lost = []
+
+
+def lost_once(event):
+    seq = session.post(event)
+    if not lost:
+        lost.append(event)
+        raise Transient("POST got no answer: timed out")
+    return seq
+
+
+interrupts = Interrupts(session, lost_once)
+withheld, notes = run_deliver(interrupts, head)
+check("an interrupt whose answer was lost is sent again as the same event, which the log holds once",
+      withheld is None and len(interrupts.sent) == 2 and len(set(interrupts.sent)) == 1
+      and session.interrupts == [(("asking-turn",), ("asking-turn",))], (interrupts.sent, session.interrupts))
+
+session, head = fresh(deaf=True)
+withheld, _ = run_deliver(session, head, goal="the tests pass", idle_timeout=1)
+check("an asking turn the interrupt does not stop gets no /clear, which it would read as text",
       session.prompts() == [] and withheld[0] == "the /clear" and "did not end" in withheld[1], withheld)
+check("and the goal it carried is named to set by hand", "/goal the tests pass" in withheld[1], withheld)
 
 session, head = fresh(resets=False)
 session.end_turn()
-withheld, _ = run_deliver(session, head, reset_timeout=1)
+withheld, _ = run_deliver(session, head, goal="the tests pass", reset_timeout=1)
 check("a reset the log never records holds the handoff back, so it never lands in the old conversation",
       session.prompts() == ["/clear"] and withheld[0] == "the handoff" and "conversation_reset" in withheld[1],
       withheld)
+check("and the goal it carried is given to the human to set by hand",
+      "NOT set" in withheld[1] and "/goal the tests pass" in withheld[1], withheld)
 
 session, head = fresh(holds=True)
 session.end_turn()
@@ -361,16 +462,47 @@ check("and is posted once it has", session.prompts()[-1] == "/goal the tests pas
       session.posts)
 
 
+class RefusesGoal:
+    """A session that refuses the /goal prompt."""
+    def __init__(self, log):
+        self.log, self.id = log, log.id
+
+    def __getattr__(self, name):
+        return getattr(self.log, name)
+
+    def post(self, event):
+        if str(event["payload"].get("message", {}).get("content", "")).startswith("/goal"):
+            raise Refused("POST answered HTTP 403: forbidden")
+        return self.log.post(event)
+
+
+session, head = fresh()
+session.end_turn()
+withheld, _ = run_deliver(RefusesGoal(session), head, goal="the tests pass")
+check("a goal taken back whose post is refused is given to the human to set by hand",
+      withheld[0] == "the carried goal" and "HTTP 403" in withheld[1] and "/goal the tests pass" in withheld[1]
+      and claimed(session) == "", withheld)
+
+session, _ = fresh()
+session.append({"type": "conversation_reset"}, {"type": "assistant", "parent_tool_use_id": None})
+check("a stamp from before the last conversation_reset is not read back as the asking turn's",
+      remote_control.newest_stamp(session, session.head()) is None)
+
 class Unanswered:
-    """A session whose first `failing` posts get no clear answer; `lands` says whether each still reaches
-    the log. It records the uuid of every post it is sent."""
+    """A session whose first `failing` prompts get no clear answer; `lands` says whether each still
+    reaches the log. It records the uuid of every prompt it is sent."""
     def __init__(self, log, lands, failing=1000):
         self.log, self.id, self.lands, self.failing, self.sent = log, log.id, lands, failing, []
 
     def page(self, after):
         return self.log.page(after)
 
+    def history(self, before):
+        return self.log.history(before)
+
     def post(self, event):
+        if event["payload"]["type"] != "user":
+            return self.log.post(event)
         self.sent.append(event["payload"]["uuid"])
         if not self.failing:
             return self.log.post(event)
@@ -387,58 +519,129 @@ withheld, notes = run_deliver(unanswered, head)
 check("a post whose answer was lost but which landed is found in the log by its uuid, and the handoff goes on",
       withheld is None and session.prompts() == ["/clear", "the handoff"] and len(unanswered.sent) == 2,
       (withheld, notes, unanswered.sent))
-# A /clear sent again could land after the handoff and wipe it, and nothing shows the server drops a
-# repeated uuid.
+# A /clear sent again could land after the handoff and wipe it.
 session, head = fresh()
 session.end_turn()
 unanswered = Unanswered(session, lands=False, failing=1)
 withheld, notes = run_deliver(unanswered, head, reset_timeout=1)
 check("one that got no clear answer and did not land is never sent again, and is withheld saying so",
-      session.prompts() == [] and unanswered.sent[:1] and len(unanswered.sent) == 1
+      session.prompts() == [] and len(unanswered.sent) == 1
       and withheld[0] == "the /clear" and "did not show the prompt within 1s" in withheld[1]
       and "timed out" in withheld[1], (withheld, unanswered.sent))
-session, head = fresh()
+session, head = fresh(deaf=True)
 withheld, _ = run_deliver(Recording(session, failing=range(1, 1000)), head, idle_timeout=1)
 check("a wait the log never answered says so, not only that the session did not change",
       withheld[0] == "the /clear" and "did not end" in withheld[1] and "unreachable" in withheld[1]
       and "HTTP 502" in withheld[1], withheld)
 
+# The handoff's first turn may close out in turn, before the goal is posted. The goal then belongs to the
+# successor that close-out starts; posted after it, it would start a turn in the context that handed off.
+session, head = fresh(holds=True)
+session.end_turn()
+result = []
+thread = threading.Thread(target=lambda: result.append(run_deliver(session, head, "the tests pass")))
+thread.start()
+wait_for(lambda: "the handoff" in session.prompts())
+check("a close-out in the handoff's turn claims the goal its worker published", claimed(session) == "the tests pass")
+check("which is then no longer there to claim", claimed(session) == "")
+session.end_turn()
+thread.join(10)
+withheld, notes = result[0]
+check("and the worker posts no goal into the context that handed off, saying where it went",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and any("went to the close-out" in note for note in notes), (withheld, notes))
+
+session, head = fresh(holds=True)
+session.end_turn()
+withheld, _ = run_deliver(session, head, goal="the tests pass", idle_timeout=1)
+check("a handoff's turn that never ends withholds the goal, giving it to the human to set by hand",
+      withheld[0] == "the carried goal" and "/goal the tests pass" in withheld[1], withheld)
+check("and takes it back, so a close-out run later claims nothing", claimed(session) == "")
+
+session, head = fresh(holds=True)
+session.end_turn()
+result = []
+thread = threading.Thread(target=lambda: result.append(run_deliver(session, head, "the tests pass", idle_timeout=2)))
+thread.start()
+wait_for(lambda: "the handoff" in session.prompts())
+claimed(session)
+thread.join(10)
+withheld, _ = result[0]
+check("but one a close-out claimed first is said to have gone to it, not handed to the human as well",
+      withheld[0] == "the carried goal" and "went to the close-out" in withheld[1] and "/goal" not in withheld[1],
+      withheld)
+
+notes = []
+publication = remote_control.publish(HANDOFFS, "cse_dead01", "the old goal")
+publication.held.close()
+check("a goal whose publisher is gone is dropped by its claim, saying so",
+      remote_control.claim(HANDOFFS, "cse_dead01", notes.append) == "" and "is gone" in notes[0]
+      and not os.listdir(HANDOFFS), (notes, os.listdir(HANDOFFS)))
+publication, rename = remote_control.publish(HANDOFFS, "cse_exits", "the tests pass"), os.rename
+
+
+def exiting_first(source, target):
+    """The publisher exits between the claim's test of its lock and the claim's rename."""
+    publication.held.close()
+    rename(source, target)
+
+
+os.rename = exiting_first
+try:
+    taken = remote_control.claim(HANDOFFS, "cse_exits", notes.append)
+finally:
+    os.rename = rename
+check("a goal whose publisher exits after the claim tested its lock is still claimed",
+      taken == "the tests pass" and not os.listdir(HANDOFFS), (taken, os.listdir(HANDOFFS)))
+publication, stuck = remote_control.publish(HANDOFFS, "cse_stuck", "the tests pass"), []
+os.chmod(HANDOFFS, 0o500)
+try:
+    kept = publication.take_back(stuck.append)
+finally:
+    os.chmod(HANDOFFS, 0o700)
+check("a published goal that cannot be removed is still the worker's, and a claim drops it as a dead publisher's",
+      kept and "could not be removed" in stuck[0]
+      and remote_control.claim(HANDOFFS, "cse_stuck", stuck.append) == "" and not os.listdir(HANDOFFS), stuck)
+remote_control.publish(HANDOFFS, "cse_dead02", "the old goal").held.close()
+publication = remote_control.publish(HANDOFFS, "cse_dead02", "the new goal")
+check("and one a live publisher replaced is claimed as live",
+      remote_control.claim(HANDOFFS, "cse_dead02", notes.append) == "the new goal"
+      and not publication.take_back(lambda line: None) and not os.listdir(HANDOFFS), os.listdir(HANDOFFS))
+
 # Two workers on one session: an earlier handoff's, waiting to post its carried goal once the handoff's
-# turn ends, and the next agent's, started from inside that turn, waiting to post /clear once it ends.
-# Both wait on the same `result`; whichever posted second would land in the first one's turn as text.
+# turn ends, and the next one's, from a close-out in that turn. The next one claims the goal, ends the
+# turn and posts its handoff and then the goal; the earlier one posts nothing into the turn it ended.
 session, head_a = fresh(holds=True)
 session.end_turn()
 contended = []
-LOCKS = tempfile.mkdtemp(prefix="remote-control-locks.")
 
 
 def worker(head, goal, handoff):
-    lock = remote_control.exclusive(LOCKS, session.id, contended.append)
+    held = []
     try:
-        remote_control.deliver(session, Log(session, head), handoff, goal, (), 30, 5, lambda line: None)
+        remote_control.deliver(session, Log(session, head), handoff, goal, (), 30, 5, lambda line: None,
+                               lambda: held.append(remote_control.exclusive(HANDOFFS, session.id, contended.append)),
+                               HANDOFFS)
     finally:
-        lock.close()
+        for lock in held:
+            lock.close()
 
 
 first = threading.Thread(target=worker, args=(head_a, "the tests pass", "handoff A"))
 first.start()
 reached = [wait_for(lambda: "handoff A" in session.prompts())]
-second = threading.Thread(target=worker, args=(session.head(), "", "handoff B"))
+second = threading.Thread(target=worker, args=(session.head(), claimed(session), "handoff B"))
 second.start()
-check("the next agent's worker waits while an earlier one on the session is posting",
-      all(reached) and wait_for(lambda: contended), contended)
-session.end_turn()
-reached.append(wait_for(lambda: "/goal the tests pass" in session.prompts()))
-first.join(10)
-time.sleep(1.5)
-check("the earlier one posts its goal at the turn's end, and the next posts nothing into the goal's turn",
-      all(reached) and session.prompts() == ["/clear", "handoff A", "/goal the tests pass"], session.prompts())
-session.end_turn()
 reached.append(wait_for(lambda: "handoff B" in session.prompts()))
+check("the next worker ends the handoff's turn, and posts its own handoff once the earlier one lets go",
+      all(reached) and [stopped is None for _, stopped in session.interrupts] == [True, False]
+      and session.prompts() == ["/clear", "handoff A", "/clear", "handoff B"], (session.prompts(), session.interrupts))
+session.end_turn()
+first.join(10)
 second.join(10)
-check("then the next one's /clear and handoff follow the goal's turn, each to an idle session",
-      all(reached) and session.prompts() == ["/clear", "handoff A", "/goal the tests pass", "/clear", "handoff B"]
-      and all(idle for _, idle in session.posts), session.posts)
+check("then the goal the earlier one carried is posted once, after the second /clear, to an idle session",
+      session.prompts() == ["/clear", "handoff A", "/clear", "handoff B", "/goal the tests pass"]
+      and session.posts[-1][1:] == (True, 2) and all(idle for _, idle, _ in session.posts), session.posts)
 
 # --- the session server ---------------------------------------------------------
 
@@ -549,6 +752,23 @@ check("as is a timeout that is no number",
       done.returncode == 1 and "is no number" in done.stdout and "the /clear was NOT posted" in done.stdout
       and missing in done.stdout and not fake_session_server.REQUESTS.get("cse_lost02"),
       (done.returncode, done.stdout, done.stderr))
+goalfile = os.path.join(os.path.dirname(missing), "goal")
+with open(goalfile, "w") as handle:
+    handle.write("the tests pass")
+done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost03", "10",
+                       missing, goalfile, "1", "1"], capture_output=True, text=True)
+check("and a worker stopped before its first post names the goal it carried, to set by hand",
+      done.returncode == 1 and "the /clear was NOT posted" in done.stdout
+      and "deliver it by hand once the session is up: /goal the tests pass" in done.stdout, done.stdout)
+publication = remote_control.publish(os.path.dirname(missing), "cse_live01", "the tests pass")
+done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",
+                       os.path.dirname(missing)], capture_output=True, text=True)
+check("claim prints the goal a live worker published for the session, and takes it",
+      done.returncode == 0 and done.stdout == "the tests pass" and not publication.take_back(lambda line: None),
+      (done.returncode, done.stdout, done.stderr))
+done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",
+                       os.path.dirname(missing)], capture_output=True, text=True)
+check("and prints nothing when there is none", done.returncode == 0 and done.stdout == "", done)
 # The stored login, as the keychain (a `security` that answers with it) or the config dir's file holds it.
 STORED = '{"claudeAiOauth": {"accessToken": "%s"}}' % fake_session_server.TOKEN
 login_dir = tempfile.mkdtemp(prefix="remote-control-login.")

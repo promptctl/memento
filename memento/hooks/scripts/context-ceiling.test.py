@@ -189,6 +189,18 @@ code, out, _ = run([user, assistant(OVER),
                     tool_result(content=SCHEDULED)])
 check("a bare-name close-out is credited at the stop",
       code == 0 and out and "decision" not in out, str(out))
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": "bash -c 'cd /x && finalize-session bye'"}),
+                    tool_result(content=SCHEDULED)])
+check("a close-out inside a wrapper's command is credited at the stop",
+      code == 0 and out and "decision" not in out, str(out))
+# The launcher's own suite names it only as part of a longer word, so a run of it is no close-out
+# whatever it prints.
+code, out, _ = run([user, assistant(OVER),
+                    tool_use("Bash", {"command": f"python3 {LAUNCHER}.test.py"}),
+                    tool_result(content=SCHEDULED)])
+check("a run of the launcher's test is not credited as a close-out",
+      out and out.get("decision") == "block", str(out))
 # A command string that names the launcher without running it.
 code, out, _ = run([user, assistant(OVER),
                     tool_use("Bash", {"command":
