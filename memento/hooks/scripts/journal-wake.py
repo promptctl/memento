@@ -16,7 +16,7 @@ import sys
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_log import hook_payload, log, reason_of  # noqa: E402
-from journal import JOURNAL, origin, record, woke  # noqa: E402
+from journal import JOURNAL, Refused, origin, record, woke  # noqa: E402
 
 # The first line `finalize-session` frames a handoff with, and the opening of its last.
 # [LAW:one-source-of-truth] The launcher writes them and this reads them, so this hook's suite and
@@ -54,8 +54,13 @@ try:
                                  else "")
     if handoff is not None:
         # The path is recorded as the handoff gives it: a wake finds its close-out by this text.
-        # [LAW:single-enforcer] Whether it is a path the journal keeps is `woke`'s to say.
-        record(woke(origin(hook["session_id"], hook["cwd"]), handoff), JOURNAL)
+        # [LAW:single-enforcer] Whether it is a path the journal keeps is `woke`'s to say, and its
+        # refusal is worded for a person, so it is the hook's error with no traceback around it.
+        try:
+            wake = woke(origin(hook["session_id"], hook["cwd"]), handoff)
+        except Refused as refusal:
+            sys.exit(f"memento journal-wake: {refusal}")
+        record(wake, JOURNAL)
         verdict = f"woke from {handoff}"
 except (Exception, SystemExit) as unresolved:
     log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}")
