@@ -74,22 +74,16 @@ HANDOFF_SUFFIX=$(cat <<'SUFFIX'
 SUFFIX
 )
 
-# Clears the input box before writing to it. Leftover text would fuse with the new input, so C-u is sent
-# first. Escape does not clear the box.
-_clear_box() {
-  tmux send-keys -t "$1" C-u
-  sleep 0.3
-}
-
-# Types a line into Claude Code's input box in a tmux target: _tmux_type <target> <text>. The box is
-# emptied first, the text goes in as a bracketed paste, so a newline in it does not submit it, and Enter
-# is a key of its own, so it is not read as part of the paste. Every step is checked, since a caller that
+# Types its stdin into Claude Code's input box in a tmux target, and submits it: _tmux_type <target>.
+# Leftover text would fuse with the new input, so the box is emptied first with C-u (Escape does not
+# empty it). The text goes in as a bracketed paste, so a newline in it does not submit it, and Enter is a
+# key of its own, so it is not read as part of the paste. Every step is checked, since a caller that
 # handles the failure runs this where `set -e` does not reach, and the first failing step's status is
 # returned.
 _tmux_type() {
   tmux send-keys -t "$1" C-u || return
   sleep 0.3
-  printf '%s' "$2" | tmux load-buffer -b "finalize-type-$$" - || return
+  tmux load-buffer -b "finalize-type-$$" - || return
   tmux paste-buffer -d -b "finalize-type-$$" -t "$1" -p || return
   sleep 0.5
   tmux send-keys -t "$1" Enter
@@ -100,19 +94,21 @@ _tmux_type() {
 # so osascript exits nonzero, where a script that only looked for the session would exit 0 having done
 # nothing.
 _iterm_tell() {
+  local uuid
+  uuid=$(_applescript_string "$1")
   osascript <<OSA
 tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        if (unique id of s) is "$1" then
+        if (unique id of s) is $uuid then
           $2
           return
         end if
       end repeat
     end repeat
   end repeat
-  error "no iTerm2 session has unique id $1"
+  error "no iTerm2 session has unique id " & $uuid
 end tell
 OSA
 }
@@ -719,7 +715,7 @@ case "$MODE" in
       # holds the session is the session's state, not the --goal flag, and last, after every step that can
       # refuse, so a refused close-out keeps the goal that keeps it working. A failure refuses: the worker
       # types into this pane the same way.
-      _tmux_type "$TARGET" "/goal clear" \
+      printf '/goal clear' | _tmux_type "$TARGET" \
         || _refuse "tmux transport: cannot type /goal clear into pane $TARGET, which the handoff is typed into too"
       nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
@@ -836,7 +832,6 @@ Nothing on this machine to deliver the close-out into."
     GOALFILE="$3"
     shift 3
 
-    BUFFER="finalize-$$"
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
@@ -848,10 +843,7 @@ Nothing on this machine to deliver the close-out into."
 
     tmux send-keys -t "$TARGET" Escape
     sleep 1
-    _clear_box "$TARGET"
-    tmux send-keys -t "$TARGET" "/clear"
-    sleep 0.5
-    tmux send-keys -t "$TARGET" Enter
+    printf /clear | _tmux_type "$TARGET"
 
     # Polls for the reset to appear, up to the timeout. The poll count is integer arithmetic, since bash 3.2
     # (the /bin/bash on macOS) has no floats.
@@ -876,21 +868,14 @@ Nothing on this machine to deliver the close-out into."
     log "/clear $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
     # The requested /model and /effort go in before the handoff, while the reset session's box is idle, so the
-    # handoff's first turn already runs on them. Each value is a single word, so typing it literally is safe.
+    # handoff's first turn already runs on them.
     for SETTING in "$@"; do
       log "setting $SETTING"
-      _clear_box "$TARGET"
-      tmux send-keys -t "$TARGET" -l "$SETTING"
-      sleep 0.5
-      tmux send-keys -t "$TARGET" Enter
+      printf '%s' "$SETTING" | _tmux_type "$TARGET"
       sleep 1
     done
 
-    _clear_box "$TARGET"
-    tmux load-buffer -b "$BUFFER" "$MSGFILE"
-    tmux paste-buffer -d -b "$BUFFER" -t "$TARGET" -p
-    sleep 0.5
-    tmux send-keys -t "$TARGET" Enter
+    _tmux_type "$TARGET" < "$MSGFILE"
 
     # The goal is typed once the handoff's turn is under way, where /goal is an immediate command: its Stop
     # hook holds from then on, and the turn is told at a later tool call. /clear wiped it.
@@ -903,7 +888,7 @@ Nothing on this machine to deliver the close-out into."
       else
         log "re-establishing carried goal"
         sleep 1
-        _tmux_type "$TARGET" "/goal $(cat "$GOALFILE")" \
+        { printf '/goal '; cat "$GOALFILE"; } | _tmux_type "$TARGET" \
           || log "ERROR: could not re-establish the carried goal in $TARGET; deliver it by hand: /goal $(cat "$GOALFILE")"
       fi
     fi
@@ -1038,7 +1023,7 @@ Nothing on this machine to deliver the close-out into."
     # already handed off. Its failure is logged, not fatal, so the retirement still runs.
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
-      _tmux_type "$SESSION" "/goal $(cat "$GOALFILE")" \
+      { printf '/goal '; cat "$GOALFILE"; } | _tmux_type "$SESSION" \
         || log "ERROR: could not re-establish the carried goal in $SESSION; deliver it by hand: /goal $(cat "$GOALFILE")"
     fi
 

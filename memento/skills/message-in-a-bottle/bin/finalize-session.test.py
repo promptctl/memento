@@ -858,8 +858,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
             done.osascript_log = open(osascriptlog).read() if os.path.exists(osascriptlog) else ""
             # The tmux and iTerm2 workers' arguments hold the handoff's path, in this case's own handoff
-            # directory.
-            subprocess.run(["pkill", "-KILL", "-f", f"[-]-(iterm-)?worker .*{env['MEMENTO_HANDOFF_DIR']}"],
+            # directory; its dots, as in mkdtemp's prefixes, are bracketed so the extended regex matches
+            # them only.
+            handoff_re = env["MEMENTO_HANDOFF_DIR"].replace(".", "[.]")
+            subprocess.run(["pkill", "-KILL", "-f", f"[-]-(iterm-)?worker .*{handoff_re}"],
                            capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
@@ -1069,7 +1071,7 @@ script = done.osascript_log
 at = [script.find(line) for line in KEYSTROKES]
 check("an iTerm2 close-out types /goal clear into its own session, keystroke by keystroke",
       done.returncode == 0 and f'(unique id of s) is "{ITERM_UUID}"' in script and -1 < at[0] < at[1] < at[2]
-      and f'error "no iTerm2 session has unique id {ITERM_UUID}"' in script,
+      and f'error "no iTerm2 session has unique id " & "{ITERM_UUID}"' in script,
       f"rc={done.returncode} err={done.stderr!r} script={script!r}")
 done = run(panes=None, iterm=True, dry_run="", osascript_status=1)
 check("a clear that cannot be written to the iTerm2 session refuses the handoff and says where it is",
@@ -2262,12 +2264,13 @@ check("a reset the worker never sees has no goal typed, and the goal named to de
 # pasted, so the handoff's first turn already runs on them.
 done, _, log = tmux_worker_case("Claude Code v1.2.3", settings=("/model opus", "/effort high"))
 model_at, effort_at, paste_at = (log.find(needle) for needle in
-                                 ("-l /model opus", "-l /effort high", "paste-buffer"))
+                                 ("buffer: /model opus", "buffer: /effort high", "buffer: the whole handoff"))
 check("the worker types the requested /model and /effort, in order, before the handoff",
       0 <= model_at < effort_at < paste_at, f"out={done.stdout!r} log={log!r}")
 done, _, log = tmux_worker_case("Claude Code v1.2.3")
 check("with nothing requested the worker types no setting",
-      " -l " not in log and "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
+      "buffer: /model" not in log and "buffer: /effort" not in log and "buffer: the whole handoff" in log,
+      f"out={done.stdout!r} log={log!r}")
 
 # The launcher's half: the payload lands in its durable home and names itself.
 handoff_home = tempfile.mkdtemp(prefix="finalize-home.")
