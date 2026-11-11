@@ -206,8 +206,10 @@ def inside(entries, hops):
 
 
 def having(entry, field, text):
-    """Whether an entry has the field and its value contains the text. An absent value contains nothing."""
-    return text in (getattr(entry, field, None) or "")
+    """Whether an entry has the field and its value contains the text. An absent value contains
+    nothing, the empty text included, so `summary=` keeps the entries that have a summary."""
+    value = getattr(entry, field, None)
+    return value is not None and text in value
 
 
 def _where(entry):

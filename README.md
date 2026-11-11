@@ -135,9 +135,10 @@ before, and so on back.
 Writing is open and reading is narrow. `note` is for an agent to use freely. `recall` is all
 an agent reads back: the summaries of the nearest five close-outs in its own chain, oldest
 first, and never a note, so looking back costs about 6,000 characters at most. `show` is for
-you: every entry in full, `--chain <session id>` keeping one session's chain, and each
-`FIELD=TEXT` keeping the entries whose field contains the text, as in
-`journal show kind=note text=parser`. The fields are `kind`, `ts`, `session`, `cwd`,
+you: every entry in full, `--chain <session id>` keeping one session's chain and ending with
+the reason the chain goes no further, and each `FIELD=TEXT` keeping the entries that have the
+field and whose value contains the text, as in `journal show kind=note text=parser`
+(`summary=` keeps every entry that has a summary). The fields are `kind`, `ts`, `session`, `cwd`,
 `branch`, `handoff`, `text` and `summary`.
 
 The record is `~/.claude/memento/journal.jsonl`, one JSON object per line;

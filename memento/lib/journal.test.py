@@ -153,6 +153,9 @@ check("and drops one that lacks the field or the text",
       not having(note, "summary", "loses") and not having(note, "text", "gains"))
 check("an absent value contains nothing",
       not having(noted(by(None), "n"), "session", "None") and not having(note, "session", "None"))
+check("not even the empty text, which every value an entry does have contains",
+      not having(note, "summary", "") and not having(noted(by(None), "n"), "session", "")
+      and having(note, "text", ""))
 check("an entry is shown with its origin and each field of its kind, later lines indented",
       shown(note) == "2026-11-10T00:00:00Z  note  A  /work  (trunk)\n"
                      "  text: the parser\n    loses a byte", shown(note))

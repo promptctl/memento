@@ -61,11 +61,16 @@ def recall(args):
 
 
 def show(args):
+    """A chain is shown with the reason it goes no further as its last line, so a session id the
+    journal has never seen says so instead of printing nothing."""
     kept = entries(JOURNAL)
-    positions = inside(kept, chain(kept, args.chain)[0]) if args.chain else range(len(kept))
-    for entry in (kept[at] for at in positions):
-        if all(having(entry, field, text) for field, text in args.having):
-            print(shown(entry))
+    positions, ending = range(len(kept)), []
+    if args.chain:
+        hops, end = chain(kept, args.chain)
+        positions, ending = inside(kept, hops), [f"The chain goes no further: {end}"]
+    for line in [shown(kept[at]) for at in positions
+                 if all(having(kept[at], field, text) for field, text in args.having)] + ending:
+        print(line)
 
 
 parser = argparse.ArgumentParser(

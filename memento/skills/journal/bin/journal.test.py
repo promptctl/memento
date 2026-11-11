@@ -138,7 +138,13 @@ check("show prints every entry, oldest first",
 done = run(journal, "show", "--chain", "session-B")
 check("show --chain keeps the entries of that session's chain and no other session's",
       done.returncode == 0 and "a dead end worth keeping" in done.stdout
-      and "shipped the parser" in done.stdout and "another agent" not in done.stdout, done)
+      and "shipped the parser" in done.stdout and "another agent" not in done.stdout
+      and done.stdout.endswith("The chain goes no further: session session-A did not wake from a "
+                               "handoff.\n"), done)
+done = run(journal, "show", "--chain", "session-nobody")
+check("show --chain of a session the journal has never seen says so instead of printing nothing",
+      done.returncode == 0 and done.stdout == "The chain goes no further: session session-nobody "
+                                              "did not wake from a handoff.\n", done)
 done = run(journal, "show", "kind=note", "text=dead end")
 check("each FIELD=TEXT narrows the entries shown",
       done.returncode == 0 and "a dead end worth keeping" in done.stdout
