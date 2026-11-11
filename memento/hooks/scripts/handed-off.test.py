@@ -59,15 +59,15 @@ class Fence(unittest.TestCase):
         self.assertIsNone(decided("old-3"))
         self.assertEqual(script("clear", "old-3").returncode, 0)
 
-    def test_a_record_that_stands_but_cannot_be_read_still_stops_naming_why(self):
+    def test_a_record_that_cannot_be_read_fails_the_hook_loudly_and_stops_nothing(self):
         script("mark", "old-5", "its successor is session new-5.")
-        os.chmod(handed_off.path("old-5"), 0)
-        try:
-            reason = decided("old-5")
-        finally:
-            os.chmod(handed_off.path("old-5"), 0o600)
-        self.assertIn("could not be read", reason)
-        self.assertIn(handed_off.path("old-5"), reason)
+        with open(handed_off.path("old-5"), "wb") as record:
+            record.write(b"\xff\xfe not utf-8")
+        payload = json.dumps({"session_id": "old-5", "tool_name": "Bash", "tool_input": {}})
+        result = subprocess.run([HOOK], input=payload, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("UnicodeDecodeError", result.stderr)
 
     def test_a_mark_that_cannot_be_written_fails_naming_why(self):
         # A HOME of its own, where a file stands where the records' directory goes.

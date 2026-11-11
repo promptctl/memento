@@ -25,8 +25,8 @@ def path(session_id):
 
 def reason(session_id):
     """The successor the session handed off to, as the worker recorded it, or None when the session has
-    no record, which is also so when a file stands where the records' directory goes. A record that stands
-    but cannot be read raises OSError."""
+    no record, which is also so when a file stands where the records' directory goes. Any other fault in
+    reading it raises."""
     try:
         with open(path(session_id), encoding="utf-8") as record:
             return record.read()

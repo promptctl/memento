@@ -1067,15 +1067,15 @@ Nothing on this machine to deliver the close-out into."
     # context may still run model calls until its retirement below lands: the one that reads the
     # launcher's result, and a goal's Stop-hook turns. So it is fenced before the launcher hears the
     # verdict, by the record on which the handed-off hook denies its tool calls and ends its turn, which
-    # pauses its goal, and never earlier, so a
-    # session whose handoff is refused keeps its tools. A mark that fails cannot undo the take, so the
-    # verdict says the session is not fenced.
-    if FENCE=$(python3 -I "$HANDED_OFF" mark "$OLD_SESSION_ID" "its successor is session $SUCCESSOR_ID, in detached tmux window '$SESSION'." 2>&1); then
+    # pauses its goal, and never earlier, so a session whose handoff is refused keeps its tools. A mark
+    # that fails cannot undo the take, so the verdict says the session is not fenced. The mark prints only
+    # the record's path; why one failed goes to this log, which is the worker's stderr.
+    if FENCE=$(python3 -I "$HANDED_OFF" mark "$OLD_SESSION_ID" "its successor is session $SUCCESSOR_ID, in detached tmux window '$SESSION'."); then
       log "session $OLD_SESSION_ID fenced: its tool calls are denied while $FENCE stands"
       _verdict taken
     else
-      log "ERROR: session $OLD_SESSION_ID could not be fenced off from the work: $FENCE"
-      _verdict taken "this session could not be fenced off from the work ($FENCE), so its tool calls still run until it is retired. Its successor holds the work: do nothing more."
+      log "ERROR: session $OLD_SESSION_ID could not be fenced off from the work, for the reason above"
+      _verdict taken "this session could not be fenced off from the work (the log says why), so its tool calls still run until it is retired. Its successor holds the work: do nothing more."
       FENCE=""
     fi
 
