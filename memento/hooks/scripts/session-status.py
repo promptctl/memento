@@ -18,6 +18,8 @@ from ceiling_log import run  # noqa: E402
 
 
 def publish_status(hook, facts):
+    """Publishes the session's status. Publishing is this hook's whole work, so a failed publish
+    stops it, where the ceiling hooks publish beside their work through `published`."""
     facts |= publish(session_directory(hook["session_id"]), anchored(hook["cwd"]))
     return "published"
 
