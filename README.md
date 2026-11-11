@@ -103,7 +103,9 @@ The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. The first two are scheduled and the launcher returns at once. The detached one
 waits up to 30s for the new session to take the message before it answers, so a Bash call
-that runs it needs a timeout of 60s or more. A session `claude remote-control` spawned is
+that runs it needs a timeout of 60s or more. Once it returns, the old session is retired: one a
+daemon hosts (`claude --bg`) through `claude stop`, since the daemon respawns a session whose process
+is signalled, and any other with a signal. A session `claude remote-control` spawned is
 reached through the session server instead: once the turn ends, a worker posts `/clear` and
 then the message into it, as claude.ai does, under your claude.ai login, and the launcher
 returns at once. Prefix `FINALIZE_DRY_RUN=1` to see which one
@@ -435,6 +437,7 @@ memento/hooks/scripts/session-status.py
 memento/hooks/scripts/journal-wake.py
 memento/hooks/scripts/hyphenate-handoff.py
 memento/cc-candybar/plugin.json5
+memento/lib/background_session.py
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
@@ -457,8 +460,9 @@ hooks write the ceiling log through `ceiling_log.py`, so their lines read alike.
 also publishes the session's status for cc-candybar through `candybar.py`. `journal-wake.py`
 writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
 `journal` command is the command line of. The ceiling hook and the `finalize-session`
-launcher both read a session's transcript through `transcript.py`, and the launcher posts into
-a Remote Control session through `remote_control.py`; `script.py` runs those two as the
+launcher both read a session's transcript through `transcript.py`, the launcher posts into
+a Remote Control session through `remote_control.py`, and it reads a daemon-hosted session's
+background session id, and stops it, through `background_session.py`; `script.py` runs those three as the
 commands the launcher calls.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of

@@ -1,5 +1,5 @@
 """Runs a lib module as a script: `<module>.py <command> <argument>...`, for the shell scripts that call
-lib/transcript.py and lib/remote_control.py.
+lib/transcript.py, lib/remote_control.py and lib/background_session.py.
 
 A command is a function. [LAW:one-source-of-truth] Its signature is both its arity and its usage line, and
 a `*rest` parameter takes any number of trailing arguments. What it returns is the exit status. A failure

@@ -236,11 +236,37 @@ fi
 exit $?
 """
 
+# The daemon's command line, which both fixture claudes answer, since the launcher runs
+# whichever claude is on PATH. `agents --json` prints $FIXTURE_AGENTS, `[]` (no session
+# is a background session) by default, and exits $FIXTURE_AGENTS_STATUS. `stop <id>`
+# appends its argv to $FIXTURE_STOP_LOG; for the id $FIXTURE_BACKGROUND_ID it ends the
+# process whose pid is in the file $FIXTURE_BACKGROUND_PID with SIGUSR1, a signal only
+# this fixture sends, so a case tells the daemon's stop from the worker's TERM, unless
+# $FIXTURE_STOP_LEAVES says the stop is accepted and the process stays. Any other id is
+# refused as 2.1.299 refuses one.
+DAEMON_CLI = r"""
+case "${1:-}" in
+  agents)
+    printf '%s\n' "${FIXTURE_AGENTS:-[]}"
+    exit "${FIXTURE_AGENTS_STATUS:-0}" ;;
+  stop)
+    printf '%s\n' "$*" >> "${FIXTURE_STOP_LOG:-/dev/null}"
+    if [ -n "${FIXTURE_BACKGROUND_ID:-}" ] && [ "${2:-}" = "$FIXTURE_BACKGROUND_ID" ]; then
+      [ -n "${FIXTURE_STOP_LEAVES:-}" ] || kill -USR1 "$(cat "$FIXTURE_BACKGROUND_PID")"
+      echo "Stopped $2"
+      exit 0
+    fi
+    echo "No job matching $2" >&2
+    exit 1 ;;
+esac
+"""
+
 CLAUDE = r"""#!/bin/bash
 # Stands in for `claude daemon run --bg-pty-host`: the daemon host. A session it
 # hosts is not displayed by any pane above it, and by default inherits none of
 # tmux's environment - stripped here for real, not simulated.
 set -uo pipefail
+""" + DAEMON_CLI + r"""
 # The host hop ran this from the directory that names it; the chain goes on where it was.
 cd "$NEST_CWD" || exit 2
 unset NEST_CWD
@@ -312,6 +338,7 @@ SUCCESSOR = r"""#!/bin/bash
 #   killed   is killed by SIGTERM at boot
 # It then holds its pid, as a running claude does, until it is killed.
 set -uo pipefail
+""" + DAEMON_CLI + r"""
 id="" prompt=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -371,6 +398,12 @@ DAEMON_ARGV = ["claude", "daemon", "run", "--bg-pty-host"]
 SERVER_ARGV = ["remote-control", "--spawn", "worktree", "--name", "memento"]
 
 
+def listed_background(id, session_id):
+    """A background session's entry in `claude agents --json`, as 2.1.299 lists one: no pid."""
+    return {"id": id, "cwd": "/tmp", "kind": "background", "startedAt": 1794394494195,
+            "sessionId": session_id, "name": "a job", "state": "working"}
+
+
 def session_url(id):
     """The URL a remote-control server starts a session's claude with, on the fake session server."""
     return f"{SESSION_SERVER}/v1/code/sessions/{id}"
@@ -402,6 +435,8 @@ TMUX_SERVER_BIN, WRAPPED_TMUX_BIN = exe("tmux"), exe(".tmux-wrapped")
 NOT_CLAUDE_BIN, ZSH_BIN = exe("2.1"), exe("zsh")
 
 SESSION_ID = "6a1f9e2c-3b7d-4e8a-9c0f-5d2b1a7e3c94"
+# The id the fixture daemon's listing gives a background session, as `claude --bg` prints one.
+BACKGROUND_ID = "b08daab6"
 # A session id as the launcher mints one for a successor: a lowercase UUID4.
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 
@@ -572,6 +607,8 @@ def settle_detached(done, workdir, tmux_state):
     wait_for(lambda: not worker_running(), 45)
     tmuxlog = os.path.join(workdir, "tmux.log")
     done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
+    stoplog = os.path.join(workdir, "stop.log")
+    done.stop_log = open(stoplog).read() if os.path.exists(stoplog) else ""
     pane = os.path.join(tmux_state, "pane")
     done.pane = open(pane).read() if os.path.exists(pane) else ""
     logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
@@ -620,7 +657,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
         successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
-        bridge=None, host_argv=None, claude_argv=None):
+        bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -653,6 +690,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     unless the case names others; the environment is the one Claude Code gives such a session; and the
     login and session server fixtures stand in for the keychain and the server. With the dry run off, the
     remote worker the launcher starts is waited out before the case ends, and `done.worker_log` is its log.
+
+    The session listing (`claude agents --json`) names the session as background session BACKGROUND_ID,
+    and the fixture daemon's `claude stop` of that id ends the deepest planted claude: `done.stop_log`
+    lists the stops asked for. `agents` is the listing's text instead, and `agents_status` the exit
+    status of `claude agents --json`.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     if host_argv is None:
@@ -724,6 +766,11 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                    MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
     if server_config_dir is not None:
         env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
+    env.update(FIXTURE_BACKGROUND_ID=BACKGROUND_ID, FIXTURE_BACKGROUND_PID=env["NEST_RECORD_CLAUDE"],
+               FIXTURE_STOP_LOG=os.path.join(workdir, "stop.log"),
+               FIXTURE_AGENTS=json.dumps([listed_background(BACKGROUND_ID, session_id)]) if agents is None else agents)
+    if agents_status is not None:
+        env["FIXTURE_AGENTS_STATUS"] = str(agents_status)
     if iterm:
         env["PATH"] = ITERM_BIN + ":" + env["PATH"]
         env["TERM_PROGRAM"] = "iTerm.app"
@@ -1112,6 +1159,26 @@ done = run(depth=3, panes="%1 4 0\n%99 ROOTPID 0\n%7 5 0")
 check("picks the pane that owns it, not the first pane listed",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r}")
 
+# A daemon respawns a session it hosts whose process exits on a signal, beside its
+# successor, so a hosted session is retired through `claude stop` of the id the daemon's
+# listing gives it, and a session no claude hosts is signalled without reading the listing.
+done = run(panes=None, agents_status=1)
+check("a session no claude hosts is retired by signal, and never needs the session listing",
+      picked(done) == DETACHED and "[dry-run] retirement: signal\n" in done.stdout,
+      f"out={done.stdout!r} err={done.stderr!r}")
+done = run(depth=2, rehost_at=2, claude_at=1, panes=None)
+check("a hosted session is retired through `claude stop` of the id the session listing gives it",
+      re.search(rf"^\[dry-run\] retirement: stop \S+/claude {BACKGROUND_ID}$", done.stdout, re.M),
+      f"out={done.stdout!r} err={done.stderr!r}")
+for name, case, reason in (
+        ("does not name it", dict(agents="[]"), "holds 0 background sessions"),
+        ("cannot be read", dict(agents="Error: daemon not running"), "not JSON"),
+        ("fails", dict(agents_status=1), "agents --json' exited 1")):
+    done = run(depth=2, rehost_at=2, claude_at=1, panes=None, **case)
+    check(f"a hosted session whose session listing {name} is refused, since a signal would have it respawned",
+          done.returncode == REFUSED_RC and reason in done.stderr and "a daemon respawns one that is signalled" in done.stderr
+          and "[dry-run] transport=" not in done.stdout, f"out={done.stdout!r} err={done.stderr!r}")
+
 # A daemon host is a pane boundary: a hosted session must not deliver into a pane
 # above its host, which shows the spawner's session. The chain is pane shell,
 # spawner claude, `claude --bg-pty-host`, session claude, shell. Both claudes are
@@ -1310,7 +1377,8 @@ try:
     done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets04", dry_run="", handoff_dir=handoffs,
                message="carry this forward", launcher_flags=("--goal", "the tests pass", "--effort", "high"))
     seen = requests("cse_resets04")
-    written = [open(os.path.join(handoffs, name)).read() for name in os.listdir(handoffs)]
+    # The remote worker's per-session lock sits beside the handoff, so only the handoff is read.
+    written = [open(os.path.join(handoffs, name)).read() for name in os.listdir(handoffs) if name.endswith(".md")]
     check("the launcher reads the log's head and schedules the handoff for the turn's end",
           done.returncode == 0
           and f"handoff scheduled → remote-control session {session_url('cse_resets04')}" in done.stdout
@@ -1734,6 +1802,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     # mid-wait. The worker, outside that call's tree, still decides.
     stopped_then_taken = pool.submit(run, panes=None, successor="late", kill_launcher_tree=True)
     stopped_never_taken = pool.submit(run, panes=None, successor="silent", kill_launcher_tree=True)
+    hosted_taken = pool.submit(run, depth=2, rehost_at=2, claude_at=1, panes=None, successor="records")
 
 done = taken.result()
 check("a successor that takes the message is reported delivered, naming its session id",
@@ -1784,6 +1853,14 @@ done = stopped_never_taken.result()
 check("and never taken, the successor is torn down and the old process lives on",
       "kill-session" in done.tmux_log and not done.retired, detail(done))
 
+# The host shim exits with its session claude's status, so 128 + the signal it died on.
+done = hosted_taken.result()
+check("a hosted session that hands off is stopped through its daemon once the launcher returns, never signalled",
+      "handoff delivered" in done.stdout and done.returncode == 128 + signal.SIGUSR1
+      and done.stop_log == f"stop {BACKGROUND_ID}\n" and "terminated" not in done.worker_log
+      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude" in done.worker_log,
+      detail(done) + f" stop_log={done.stop_log!r}")
+
 
 # --- the detached worker alone: what it retires, and in what order -------------
 
@@ -1804,7 +1881,7 @@ def identity_of(pid):
 
 
 def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), successor="records",
-                hold_launcher=False):
+                hold_launcher=False, retirement=("signal",), stop_leaves=False):
     """Run one detached worker over a real process standing in for the old claude.
 
     Returns (retired, done): whether the victim was signalled, and the worker's
@@ -1813,8 +1890,14 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
     real identity, and identity="reused" swaps the command out, as happens when the OS
     reissues the pid. The launcher it waits on has already exited, unless
     `hold_launcher`, when it lives until the case has seen the victim survive it.
+    `retirement` is the worker's trailing arguments, and the fixture daemon holds the victim
+    as background session BACKGROUND_ID, so `done.victim_signal` tells its stop (SIGUSR1)
+    from a TERM or KILL; `stop_leaves` has the daemon accept the stop and leave the victim
+    running. The victim is reaped the moment it exits, as a claude is by the process that
+    started it, so ps never shows it lingering as a zombie.
     """
     proc = subprocess.Popen(list(victim), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    threading.Thread(target=proc.wait, daemon=True).start()
     real = identity_of(proc.pid)
     if identity == "match":
         ident = real
@@ -1847,7 +1930,13 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_STATE": tmux_state,
         "FIXTURE_SUCCESSOR": successor,
+        "FIXTURE_BACKGROUND_ID": BACKGROUND_ID,
+        "FIXTURE_BACKGROUND_PID": os.path.join(workdir, "victim.pid"),
     }
+    with open(env["FIXTURE_BACKGROUND_PID"], "w") as handle:
+        handle.write(str(proc.pid))
+    if stop_leaves:
+        env["FIXTURE_STOP_LEAVES"] = "1"
     if fail_on is not None:
         env["FIXTURE_TMUX_FAIL"] = fail_on
     verdict_read, verdict_write = os.pipe()
@@ -1857,7 +1946,8 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
         worker = subprocess.Popen(
             ["/bin/bash", "-c", f'exec 3>&{verdict_write}; exec {verdict_write}>&-; exec "$@"', "bash",
              LAUNCHER, "--detached-worker", "fixture-session", workdir, relaunch, config, successor_id,
-             msgfile, goalfile, str(proc.pid), ident, str(launcher.pid), launcher_ident],
+             msgfile, goalfile, str(proc.pid), ident, str(launcher.pid), launcher_ident,
+             *retirement],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, pass_fds=(verdict_write,))
         os.close(verdict_write)
         # The verdict is whatever came before EOF. A process still holding the pipe after the
@@ -1881,6 +1971,7 @@ def worker_case(identity, goal="", fail_on=None, victim=("sleep", "600"), succes
             retired = True
         except subprocess.TimeoutExpired:
             retired = False
+        done.victim_signal = -proc.returncode if retired and proc.returncode < 0 else None
         done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         done.verdict = verdict_box.get("text", "(the pipe was still held open after the worker exited)")
         done.survived_launcher = survived_launcher
@@ -1910,6 +2001,12 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     # A victim that ignores TERM, which is the only way to reach the KILL escalation.
     survives_term = pool.submit(worker_case, "match", victim=IGNORES_TERM)
     launcher_held = pool.submit(worker_case, "match", hold_launcher=True)
+    stopped = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM, BACKGROUND_ID))
+    stop_refused = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM, "ffffffff"))
+    stop_leaves = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM, BACKGROUND_ID),
+                              stop_leaves=True)
+    no_retirement = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM))
+    stop_after_gone = pool.submit(worker_case, "reused", retirement=("stop", HOST_SHIM, BACKGROUND_ID))
 
 
 def worker_detail(done):
@@ -1958,6 +2055,33 @@ check("and the escalation says so, rather than the pid quietly disappearing",
 retired, done = launcher_held.result()
 check("the worker does not retire the old process while the launcher is still running",
       done.survived_launcher is True and retired, worker_detail(done))
+
+# A daemon respawns a background session whose process exits on a signal, and prompts it to
+# continue beside its successor, so a background session is retired through `claude stop`.
+retired, done = same_pid.result()
+check("a session retired by signal is never stopped through a daemon",
+      done.victim_signal == signal.SIGTERM and "asking the daemon" not in done.stdout, worker_detail(done))
+retired, done = stopped.result()
+check("a background session is retired by its daemon's stop, not by a signal",
+      done.verdict == "taken\n" and done.victim_signal == signal.SIGUSR1
+      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude {done.args[13]} no longer runs" in done.stdout
+      and f"(old claude {done.args[13]}: still running)" in done.stdout, worker_detail(done))
+retired, done = stop_after_gone.result()
+check("a background session whose old process has already gone is still stopped by its id, saying so",
+      done.victim_signal == signal.SIGUSR1 and f"(old claude {done.args[13]}: already gone" in done.stdout,
+      worker_detail(done))
+retired, done = stop_refused.result()
+check("a stop the daemon refuses leaves the old process unsignalled, and the log says it is still live",
+      not retired and "ERROR: the daemon did not stop background session ffffffff:" in done.stdout
+      and "stop ffffffff' exited 1: No job matching ffffffff" in done.stdout
+      and "still live beside its successor" in done.stdout, worker_detail(done))
+retired, done = stop_leaves.result()
+check("a stop the daemon accepts that leaves the process running is never escalated to a signal",
+      not retired and "still runs 10s later" in done.stdout and "KILL" not in done.stdout, worker_detail(done))
+retired, done = no_retirement.result()
+check("a retirement the worker cannot parse is refused before anything is started",
+      done.returncode == 2 and "retirement is 'signal' or 'stop <claude>" in done.stderr
+      and done.tmux_log == "" and not retired, worker_detail(done) + f" tmux_log={done.tmux_log!r}")
 
 
 # ---------------------------------------------------------------------------
