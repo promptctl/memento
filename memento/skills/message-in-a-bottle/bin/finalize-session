@@ -83,8 +83,8 @@ _clear_box() {
 # server `tmux: server`.
 #
 # No argv is read for what a session was started with: that is read from its transcript, never its
-# command line. The one argv the launcher reads is the own claude's, for the Remote Control session it
-# names, which nothing else a tool call can see carries (the remote-control transport).
+# command line. The one argv the launcher reads is a hosted claude's and its host's, for the Remote
+# Control session they name, which nothing else a tool call can see carries (the remote-control transport).
 _process_table() {
   ps -eo pid=,ppid=,etime=,ucomm=
 }
@@ -528,8 +528,8 @@ case "$MODE" in
     # re-detect.
     #
     # [LAW:effects-at-boundaries] The process table and the panes are each read once, here, and _ancestry
-    # decides every transport question but one from those two readings: the own claude's command line,
-    # read once below, names the Remote Control session it is, if any. No tmux binary, or no server, means no
+    # decides every transport question but one from those two readings: for a hosted session, its claude's
+    # and its host's command lines, read once below, name the Remote Control session it is, if any. No tmux binary, or no server, means no
     # panes. The environment's $TMUX_PANE is never read: it is inherited, so a daemon passes its spawner's
     # down, and a pane the walk did not reach is not this session's whatever the environment says.
     [[ -n "${CLAUDE_PID:-}" ]] \
@@ -544,16 +544,24 @@ case "$MODE" in
     [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] ancestry: $KIND, $REASON"
     [[ "$KIND" != refused ]] || _refuse "$REASON"
     # [LAW:one-source-of-truth] The session's URL on the session server is in one place a tool call can
-    # read: the --sdk-url the server started this session's claude with. The walk proved $CLAUDE_PID is
-    # that claude. The environment's CLAUDE_CODE_ENVIRONMENT_KIND is never read: it is inherited, so a
-    # daemon started from a remote-control session's shell passes it down to sessions that are not one.
-    ARGS=$(ps -ww -o args= -p "$CLAUDE_PID") \
-      || _refuse "cannot read the command line of claude process $CLAUDE_PID"
-    REMOTE_SESSION=$(python3 -I "$REMOTE" session "$ARGS") \
-      || _refuse "cannot tell which Remote Control session claude process $CLAUDE_PID is"
-    # A claude started with a Remote Control session's URL takes its input from that session's stream, so
-    # no pane or relaunch reaches it, whatever sits above it: its prompts come through its log on the
-    # session server. `claude remote-control` starts such a claude as its direct child (hosted).
+    # read: the --sdk-url a `claude remote-control` server started this session's claude with. The walk
+    # proved $CLAUDE_PID is that claude and, when hosted, that its parent is a claude. Only a hosted
+    # claude's command line and its host's are read: any other claude's holds its starting prompt, which
+    # for a relaunched one is a handoff, and a handoff may quote a session's URL. The environment's
+    # CLAUDE_CODE_ENVIRONMENT_KIND is never read: it is inherited, so a daemon started from a
+    # remote-control session's shell passes it down to sessions that are not one.
+    REMOTE_SESSION=""
+    if [[ "$KIND" == hosted ]]; then
+      HOST_PID=$(awk -v pid="$CLAUDE_PID" '$1 == pid { print $2 }' <<<"$PROCS")
+      HOST_ARGS=$(ps -ww -o args= -p "$HOST_PID") \
+        || _refuse "cannot read the command line of claude process $HOST_PID, which hosts this session"
+      ARGS=$(ps -ww -o args= -p "$CLAUDE_PID") \
+        || _refuse "cannot read the command line of claude process $CLAUDE_PID"
+      REMOTE_SESSION=$(python3 -I "$REMOTE" session "$HOST_ARGS" "$ARGS") \
+        || _refuse "cannot tell which Remote Control session claude process $CLAUDE_PID is"
+    fi
+    # A `claude remote-control` server hosts this session, so its input is the server's pipe and no pane or
+    # relaunch reaches it: its prompts come through its log on the session server.
     if [[ -n "$REMOTE_SESSION" ]]; then
       # [LAW:no-ambient-temporal-coupling] Nothing is posted during this turn: a prompt posted now can be
       # handed to this turn as text at its next tool call, so a /clear would be read, not run. The worker
@@ -933,7 +941,7 @@ OSA2
     fi
     trap 'rm -f "$4"' EXIT
     # One process makes every post, since the order of the posts, the login, and how far the log has been
-    # read are state the steps share (lib/remote_control.py deliver).
+    # read are state the steps share (lib/remote_control.py).
     python3 -I "$REMOTE" deliver "$1" "$2" "$3" "$4" "$REMOTE_IDLE_TIMEOUT_SECONDS" \
       "$RESET_REGISTER_TIMEOUT_SECONDS" "${@:5}"
     ;;

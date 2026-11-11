@@ -193,8 +193,11 @@ if [ "$depth" -gt 0 ]; then
     unset NEST_REHOST_AT
     # A host hop: the claude shim stands in for `claude daemon run --bg-pty-host`,
     # run by the executable $NEST_HOST_BIN names, a claude by default, so a case can
-    # plant a host whose executable is named tmux instead.
-    (exec "$NEST_HOST_BIN" "$(command -v claude)" daemon run --bg-pty-host -- "$self" $((depth - 1)) "$@")
+    # plant a host whose executable is named tmux instead. $NEST_HOST_VERB is the
+    # command line it shows before its `--`, so a case can plant a `claude
+    # remote-control` server instead.
+    # shellcheck disable=SC2086
+    (exec "$NEST_HOST_BIN" "$(command -v claude)" ${NEST_HOST_VERB:-daemon run --bg-pty-host} -- "$self" $((depth - 1)) "$@")
     exit $?
   fi
   "$self" $((depth - 1)) "$@"
@@ -574,7 +577,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
         successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
-        bridge=None):
+        bridge=None, host_verb=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -599,8 +602,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     below it once the successor exists, as Claude Code kills a stopped Bash call.
 
     `bridge` is a Remote Control session id: the session gets the environment Claude Code gives one
-    `claude remote-control` spawned, its claude shows the command line naming that session, and the login
-    and session server fixtures stand in for the keychain and the server.
+    `claude remote-control` spawned, its claude shows the command line naming that session, its host shows
+    a `claude remote-control` server's, and the login and session server fixtures stand in for the keychain
+    and the server. `host_verb` is the host's command line instead.
     With the dry run off, a remote worker the launcher starts is waited out before the case ends, and
     `done.worker_log` is its log.
     """
@@ -659,12 +663,14 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     if bridge is not None:
         env["PATH"] = KEYCHAIN_DIR + ":" + env["PATH"]
         url = session_url(bridge)
-        env.update(CLAUDE_CODE_ENVIRONMENT_KIND="bridge",
+        env.update(CLAUDE_CODE_ENVIRONMENT_KIND="bridge", NEST_HOST_VERB="remote-control --spawn worktree",
                    NEST_CLAUDE_ARGV0=f"claude --print --sdk-url {url} --session-id {bridge} --resume={url}",
                    MEMENTO_RESET_TIMEOUT_SECONDS="2", MEMENTO_IDLE_TIMEOUT_SECONDS="2")
         if not config_unset:
             with open(os.path.join(config_dir, ".credentials.json"), "w") as handle:
                 handle.write(LOGIN)
+    if host_verb is not None:
+        env["NEST_HOST_VERB"] = host_verb
     if iterm:
         env["PATH"] = ITERM_BIN + ":" + env["PATH"]
         env["TERM_PROGRAM"] = "iTerm.app"
@@ -1104,25 +1110,33 @@ done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoi
 check("a session a remote-control server spawned posts to its own session, not a pane or a relaunch",
       remote_picked(done) == session_url("cse_resets01") and ancestry(done).startswith("hosted, "),
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# The control: the same host, whose claude names no session, is a daemon host, whose session is
-# relaunched. A daemon started from a remote-control session's shell passes the bridge kind down to it.
-for name, bridge in (("", None), (" though it inherited the bridge kind", "not-a-cse-id")):
-    done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, bridge=bridge)
-    check(f"the same direct host whose claude names no session is a daemon host{name}, relaunched in a detached window",
+# The control: a daemon host, whose session is relaunched. A daemon started from a remote-control
+# session's shell passes the bridge kind down, and a session's command line may quote a spawned claude's
+# in its starting prompt, so neither makes it a remote-control session: the host's command line does.
+for name, bridge, verb in (("", None, None),
+                           (" though it inherited the bridge kind and its prompt quotes a session's --sdk-url",
+                            "cse_quoted01", "daemon run --bg-pty-host")):
+    done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, bridge=bridge, host_verb=verb)
+    check(f"a daemon host's session is relaunched in a detached window{name}",
           picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
           f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# A claude started from the remote session's shell inherits its environment, but not its command line,
-# which names no session: posting its /clear would reset the session that started this one.
-done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="not-a-cse-id")
+# A relaunched session's starting prompt is its handoff, which may be about this very transport.
+done = run(bridge="cse_quoted02")
+check("a pane's session whose prompt quotes a session's --sdk-url is cleared in its pane, never posted to",
+      picked(done) == "%99" and remote_picked(done) is None, f"out={done.stdout!r} err={done.stderr!r}")
+# A remote-control server's child that names no session is reached by no transport, and a relaunch would
+# take it from the server.
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="not-a-cse-id")
+check("a remote-control server's session whose command line names no session refuses",
+      done.returncode == REFUSED_RC and "cannot tell which Remote Control session" in done.stderr
+      and "gives 0 sessions" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
+# A claude started from the remote session's shell inherits its environment, but its host is the outer
+# session's claude, not the server: posting its /clear would reset the session that started this one.
+done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
 check("a claude started inside a remote-control session never posts to that session",
       remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, ")
       and "another claude (process " in ancestry(done) and "is further up" in ancestry(done),
-      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# The command line decides, not the walk's kind: a process between the session's claude and its server
-# confines the walk, and a relaunch would take the session's claude from the server.
-done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
-check("a claude whose command line names its session posts to it, whatever sits between it and its server",
-      remote_picked(done) == session_url("cse_resets02") and ancestry(done).startswith("confined, "),
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
            bridge="cse_resets03", launcher_flags=("--goal", "the tests pass"))

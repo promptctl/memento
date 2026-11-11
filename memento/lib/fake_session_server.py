@@ -9,7 +9,8 @@ only in the id it uses:
   cse_stalls...   a /clear brings no reset
   cse_refuses...  every request is answered 403
   cse_flaky...    the first read of the log after the head is answered 502
-  cse_garbled...  every request is answered 200 with a page of HTML
+  cse_garbled...  every read is answered 200 with a page of HTML
+  cse_moved...    every read is redirected to cse_elsewhere
   anything else   the asking turn ends once the log's head has been read
 Every request must carry TOKEN as its bearer, or it is answered 401.
 """
@@ -69,18 +70,11 @@ class SessionLog:
         with self.lock:
             return int(self.events[-1]["sequence_num"])
 
-    def events_after(self, cursor):
+    def page(self, after):
+        """The first PAGE events after sequence number `after`, and whether more follow them."""
         with self.lock:
-            return [event for event in self.events if int(event["sequence_num"]) > int(cursor)]
-
-    def page(self, cursor):
-        """The events after `cursor`, PAGE at a time, as the server pages them over HTTP. Its next_cursor
-        is a token holding a `+`, which reaches the server intact only when the client encodes it."""
-        after = self.events_after(cursor[len("p+"):] if cursor.startswith("p+") else cursor)
-        page = {"data": after[:PAGE]}
-        if len(after) > PAGE:
-            page["next_cursor"] = "p+" + after[PAGE - 1]["sequence_num"]
-        return page
+            later = [event for event in self.events if int(event["sequence_num"]) > int(after)]
+        return later[:PAGE], len(later) > PAGE
 
     def prompts(self):
         return [text for text, _ in self.posts]
@@ -133,6 +127,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         refused = self.refusal()
         if refused:
             return self.answer(*refused)
+        if "/cse_moved" in self.path:
+            self.send_response(302)
+            self.send_header("Location", "/v1/code/sessions/cse_elsewhere/events")
+            return self.end_headers()
         if "/cse_garbled" in self.path:
             self.send_response(200)
             self.end_headers()
@@ -143,7 +141,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not log.id.startswith("cse_busy"):
                 log.end_turn()
             return self.answer(200, {"data": [{"sequence_num": str(head), "payload": {"type": "assistant"}}]})
-        self.answer(200, log.page(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["cursor"][0]))
+        events, more = log.page(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["cursor"][0])
+        # The server's next_cursor is its own token; a client reads it only for whether more follow.
+        self.answer(200, {"data": events, **({"next_cursor": "opaque+token"} if more else {})})
 
 
 def serve():

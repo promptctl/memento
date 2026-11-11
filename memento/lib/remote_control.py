@@ -6,9 +6,9 @@ pipe, so nothing local can type into it. Its prompts arrive as client events in 
 `/v1/code/sessions/<cse id>/events`, which is where claude.ai posts them; this posts them there the same
 way, under the user's own claude.ai login. Run as a script:
 
-  remote_control.py session <command line>
-      prints the URL of the session a claude's command line names in its --sdk-url, or nothing when it
-      names none.
+  remote_control.py session <host command line> <command line>
+      prints the URL of the Remote Control session a claude is, from its host's command line and its own,
+      or nothing when its host is no `claude remote-control` server.
   remote_control.py head <session>
       prints the sequence number of the last event in the session's log.
   remote_control.py deliver <session> <after seq> <msgfile> <goalfile> <idle timeout> <reset timeout> [<setting>...]
@@ -25,18 +25,14 @@ idle, which a `result` after the last prompt marks.
 import fcntl
 import hashlib
 import http.client
-import inspect
 import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
-import traceback
 import unicodedata
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 
@@ -44,12 +40,13 @@ import uuid
 # prompt typed on claude.ai between a turn's end and the next post turns that post into text in its turn.
 POLL_SECONDS = 0.5
 POLL_CEILING_SECONDS = 5
+# The server's command line is what the user typed to start it: `claude remote-control [flags]`.
+REMOTE_CONTROL_SERVER = re.compile(r"(?:^|\s)remote-control(?=\s|$)")
 # The session's URL on the server, which the server passes the claude it spawns as --sdk-url (and again as
 # --resume=). A tool call sees neither the id nor the worker token naming it: its CLAUDE_CODE_SESSION_ID
 # is a local uuid, and Claude Code strips the token from a bridge child's tools (2.1.299).
 # [LAW:one-source-of-truth] The URL also names the server, so the login goes where the session's own
-# claude goes. Only the --sdk-url value is read, since the command line also holds any prompt the claude
-# was started with, which may quote a URL.
+# claude goes.
 SESSION_URL = re.compile(r"(?:^|\s)--sdk-url[=\s](https?://[^\s/]+/v1/code/sessions/cse_[A-Za-z0-9]+)(?=\s|$)")
 
 
@@ -58,20 +55,26 @@ class Refused(Exception):
 
 
 class Transient(Refused):
-    """No answer came, or one the server marks as passing (429, 5xx), so a later try may succeed."""
+    """No answer came, or one that may pass (an expired login, 429, 5xx), so a later try may succeed."""
 
 
 class Withheld(Exception):
     """A prompt was not posted, so nothing after it was either: (what, why)."""
 
 
-def session_url(command_line):
-    """The URL of the one session a claude's command line names, or None when it names none."""
+def session_url(host_command_line, command_line):
+    """The URL of the Remote Control session a claude is, or None when its host is no `claude remote-control`
+    server. Neither command line holds a prompt: the server's is what the user typed, and the server hands
+    its child prompts on stdin. Any other claude's command line may hold its starting prompt, which may
+    quote a session's URL, so it is never read."""
+    if not REMOTE_CONTROL_SERVER.search(host_command_line):
+        return None
     found = set(SESSION_URL.findall(command_line))
-    if len(found) > 1:
-        raise Refused(f"the claude's command line gives {len(found)} Remote Control sessions as --sdk-url "
-                      f"({', '.join(sorted(found))}), not one: {command_line[:300]}")
-    return found.pop() if found else None
+    if len(found) != 1:
+        raise Refused(f"a `claude remote-control` server hosts this claude, but its command line gives "
+                      f"{len(found)} sessions as --sdk-url ({', '.join(sorted(found))}), not one: "
+                      f"{command_line[:300]}")
+    return found.pop()
 
 
 def credential_directory(environ):
@@ -142,6 +145,16 @@ def user_event(session_id, text):
                         "message": {"role": "user", "content": text}}}
 
 
+class _Unredirected(urllib.request.HTTPRedirectHandler):
+    """Answers a redirect as the 3xx it is: urllib would send the login's bearer on to wherever it points."""
+
+    def redirect_request(self, *args):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_Unredirected)
+
+
 class Session:
     """One session on the session server, reached under the login. [LAW:effects-at-boundaries] Every
     request goes through `request`."""
@@ -151,35 +164,38 @@ class Session:
         self.id = url.rpartition("/")[2]
 
     def request(self, method, path, body=None):
-        """One call, answered as JSON. A 401 is retried once under a re-read login. Any other answer but
-        2xx is a refusal naming the status and the server's reason, and Transient when a retry may pass.
+        """One call, answered as JSON. A 401 is retried once under a re-read login, and is Transient if it
+        comes again, since Claude Code may not have refreshed the stored login yet. Any other answer but 2xx
+        is a refusal naming the status and the server's reason, and Transient when a retry may pass.
 
         The platform is the one Claude Code's own CLI declares when it posts to a session. The session reads
         a prompt from a request that declares none as a message from an unknown peer, and runs no slash
         command in it: an idle session took a posted /clear as text (2.1.299)."""
         data = None if body is None else json.dumps(body).encode()
+        where = f"{method} {self.url}{path}"
         for attempt in (1, 2):
             call = urllib.request.Request(self.url + path, data=data, method=method, headers={
                 "Authorization": f"Bearer {self.login.token}", "Content-Type": "application/json",
                 "anthropic-version": "2023-06-01", "anthropic-beta": "ccr-byoc-2025-07-29",
                 "anthropic-client-platform": "claude_code_cli"})
             try:
-                with urllib.request.urlopen(call, timeout=30) as answer:
+                with _OPENER.open(call, timeout=30) as answer:
                     text = answer.read()
+                break
             except urllib.error.HTTPError as error:
-                if error.code == 401 and attempt == 1:
-                    self.login.refresh()
-                    continue
-                reason = (f"{method} {self.url}{path} answered HTTP {error.code}: "
-                          f"{error.read().decode(errors='replace')[:400]}")
-                raise (Transient if error.code == 429 or error.code >= 500 else Refused)(reason) from None
+                status, reason = error.code, _body(error)
             # A refused connection, a timeout, a reset, a body cut short: no whole answer.
             except (OSError, http.client.HTTPException) as error:
-                raise Transient(f"{method} {self.url}{path} got no answer: {error!r}") from None
-            try:
-                return json.loads(text)
-            except ValueError:
-                raise Refused(f"{method} {self.url}{path} answered with no JSON: {text[:400]!r}") from None
+                raise Transient(f"{where} got no answer: {error!r}") from None
+            if status == 401 and attempt == 1:
+                self.login.refresh()
+                continue
+            passing = status in (401, 429) or status >= 500
+            raise (Transient if passing else Refused)(f"{where} answered HTTP {status}: {reason}")
+        try:
+            return json.loads(text)
+        except ValueError:
+            raise Refused(f"{where} answered with no JSON: {text[:400]!r}") from None
 
     def post(self, event):
         """Appends an event to the log and returns the sequence number it was given."""
@@ -197,18 +213,20 @@ class Session:
         except (KeyError, IndexError, TypeError, ValueError):
             raise Refused(f"session {self.id}'s log answered with no last event: {page!r}") from None
 
-    def events_after(self, cursor):
-        """Every log event after sequence number `cursor`, oldest first, across pages. A page's next_cursor
-        is the server's token, passed back as it came."""
-        events = []
-        while True:
-            page = self.request("GET", f"/events?sort_order=asc&cursor={urllib.parse.quote(str(cursor), safe='')}")
-            events += page.get("data", [])
-            if not page.get("next_cursor"):
-                return events
-            if str(page["next_cursor"]) == str(cursor):
-                raise Refused(f"session {self.id}'s log gave back the cursor it was read at: {cursor!r}")
-            cursor = page["next_cursor"]
+    def page(self, after):
+        """The first page of log events after sequence number `after`, oldest first, and whether more
+        follow it."""
+        page = self.request("GET", f"/events?sort_order=asc&cursor={int(after)}")
+        if not isinstance(page, dict) or not isinstance(page.get("data", []), list):
+            raise Refused(f"session {self.id}'s log answered with no page of events: {page!r}"[:400])
+        return page.get("data", []), bool(page.get("next_cursor"))
+
+
+def _body(error):
+    try:
+        return error.read().decode(errors="replace")[:400]
+    except (OSError, http.client.HTTPException) as unread:
+        return f"(its body could not be read: {unread!r})"
 
 
 class Log:
@@ -223,23 +241,40 @@ class Log:
         self.idle = False
         self.last_reset = 0  # sequence numbers start above 0
         self.prompts = {}  # a posted prompt's uuid -> its sequence number
+        self.unreachable = None  # why the last read got no answer, or None when it got one
 
     def read(self):
-        for event in self.session.events_after(self.cursor):
-            try:
-                seq, payload = int(event["sequence_num"]), event.get("payload") or {}
-            except (KeyError, TypeError, ValueError, AttributeError):
-                raise Refused(f"session {self.session.id}'s log holds an event with no sequence number: "
-                              f"{event!r}"[:400]) from None
+        """Reads every page after the cursor, taking each in as it comes. The cursor is the last event's
+        sequence number, so each page moves it on, and a page that does not is a log that cannot be read
+        to its end."""
+        while True:
+            events, more = self.session.page(self.cursor)
+            start = self.cursor
+            for event in events:
+                self._take(event)
+            if not more:
+                return
+            if self.cursor == start:
+                raise Refused(f"session {self.session.id}'s log promised more events after {start} "
+                              f"but gave none")
+
+    def _take(self, event):
+        try:
+            seq, payload = int(event["sequence_num"]), event.get("payload") or {}
             kind = payload.get("type")
-            if kind == "user":
-                self.idle = False
-                self.prompts.setdefault(payload.get("uuid"), seq)
-            elif kind == "result":
-                self.idle = True
-            elif kind == "conversation_reset":
-                self.last_reset = seq
-            self.cursor = seq
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise Refused(f"session {self.session.id}'s log holds an event it cannot be read by: "
+                          f"{event!r}"[:400]) from None
+        if seq <= self.cursor:
+            raise Refused(f"session {self.session.id}'s log gave event {seq} after {self.cursor}")
+        if kind == "user":
+            self.idle = False
+            self.prompts.setdefault(payload.get("uuid"), seq)
+        elif kind == "result":
+            self.idle = True
+        elif kind == "conversation_reset":
+            self.last_reset = seq
+        self.cursor = seq
 
 
 def retry(attempt, timeout, clock=time.monotonic, sleep=time.sleep):
@@ -255,11 +290,13 @@ def retry(attempt, timeout, clock=time.monotonic, sleep=time.sleep):
 
 
 def read(log, note):
-    """Reads the log on. A read that failed in passing is noted and left for the next, which may pass; a
-    refusal propagates."""
+    """Reads the log on. A read that failed in passing is noted, and kept as why the log is unreachable
+    until one passes; a refusal propagates."""
     try:
         log.read()
+        log.unreachable = None
     except Transient as error:
+        log.unreachable = error
         note(f"reading the log failed, retrying: {error}")
 
 
@@ -291,13 +328,14 @@ def post(session, log, text, timeout, note, clock=time.monotonic, sleep=time.sle
     return seq
 
 
-def exclusive(session_id, note):
-    """Takes this machine's lock on posting into the session, held until the process exits.
+def exclusive(directory, session_id, note):
+    """Takes the lock on posting into the session, held until the process exits. It lives in `directory`,
+    the handoff directory, which every worker of this user shares and no other user can write.
     [LAW:no-ambient-temporal-coupling] An earlier handoff's worker waiting to post its carried goal and the
     next agent's worker waiting to post /clear wait on the same `result`, and whichever posts second is
     handed to the first one's turn as text. So workers on one session post one at a time, and each reads
     the session's state only once it holds the lock."""
-    handle = open(os.path.join(tempfile.gettempdir(), f"memento-remote-{session_id}.lock"), "w")
+    handle = open(os.path.join(directory, f".remote-control-{session_id}.lock"), "a")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -321,7 +359,8 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
                 return
         except Refused as error:
             raise Withheld(what, f"cannot read the log: {error}") from None
-        raise Withheld(what, f"{why} within {timeout:g}s")
+        unreachable = f" (the log was unreachable: {log.unreachable})" if log.unreachable else ""
+        raise Withheld(what, f"{why} within {timeout:g}s{unreachable}")
 
     def send(text, what):
         try:
@@ -356,8 +395,8 @@ def _login():
     return Login(lambda: stored_credential(os.environ))
 
 
-def _session(command_line):
-    print(session_url(command_line) or "")
+def _session(host_command_line, command_line):
+    print(session_url(host_command_line, command_line) or "")
     return 0
 
 
@@ -369,7 +408,7 @@ def _head(session):
 def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout, *setting):
     _note(f"waking; remote-control session {session}, log head {after_seq}")
     try:
-        lock = exclusive(session.rpartition("/")[2], _note)  # noqa: F841 - held until exit
+        lock = exclusive(os.path.dirname(os.path.abspath(msgfile)), session.rpartition("/")[2], _note)  # noqa: F841 - held until exit
         with open(msgfile) as handle:
             handoff = handle.read()
         with open(goalfile) as handle:
@@ -392,31 +431,8 @@ def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout,
 COMMANDS = {"session": _session, "head": _head, "deliver": _deliver}
 
 
-def _usage(name, command):
-    return f"remote_control.py {name} " + " ".join(
-        f"[<{p.name}>...]" if p.kind is p.VAR_POSITIONAL else f"<{p.name.replace('_', ' ')}>"
-        for p in inspect.signature(command).parameters.values())
-
-
-def _takes(command, count):
-    parameters = inspect.signature(command).parameters.values()
-    fixed = sum(p.kind is not p.VAR_POSITIONAL for p in parameters)
-    return count == fixed or (count > fixed and any(p.kind is p.VAR_POSITIONAL for p in parameters))
-
-
 if __name__ == "__main__":
-    # [LAW:one-source-of-truth] Each command's signature is both its arity and its usage line.
-    command, arguments = COMMANDS.get(sys.argv[1] if len(sys.argv) > 1 else ""), sys.argv[2:]
-    if command is None or not _takes(command, len(arguments)):
-        print("usage: " + " | ".join(_usage(name, fn) for name, fn in COMMANDS.items()), file=sys.stderr)
-        sys.exit(2)
-    try:
-        sys.exit(command(*arguments))
-    except Refused as error:
-        print(error, file=sys.stderr)
-        sys.exit(2)
-    # Python exits 1 on an uncaught exception, which deliver uses for a prompt it withheld, so a crash
-    # says so with 2 and the traceback.
-    except Exception:
-        traceback.print_exc()
-        sys.exit(2)
+    # -I keeps this file's directory off the path; lib/script.py is beside it.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import script
+    script.run(COMMANDS, Refused)

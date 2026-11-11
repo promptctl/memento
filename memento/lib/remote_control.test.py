@@ -10,6 +10,7 @@ Run with: python3 remote_control.test.py
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -55,17 +56,26 @@ SPAWNED = (f"/Users/bmf/.local/share/claude/versions/2.1.299 --print --sdk-url {
            f"--input-format stream-json --output-format stream-json --replay-user-messages --resume={URL} "
            f"--mcp-config=/Users/bmf/.claude/bridge-spawn/{SESSION}-doIX9g/mcp.json --model claude-opus-5-5")
 
-check("a spawned session's command line names its session's URL, server included",
-      remote_control.session_url(SPAWNED) == URL)
-check("a claude started with no --sdk-url names none",
-      remote_control.session_url("claude --permission-mode auto") is None)
-check("a URL the claude's starting prompt quotes is no session of its own",
-      remote_control.session_url(f"claude --permission-mode auto look at {URL} and --sdk-url-ish {URL}") is None)
+SERVER = "claude remote-control --spawn worktree"
+DAEMON = "/Users/bmf/.local/share/claude/versions/2.1.299 daemon run --bg-pty-host"
+
+check("a claude a remote-control server spawned is the session its --sdk-url names, server included",
+      remote_control.session_url(SERVER, SPAWNED) == URL)
+check("as is one a node install's server spawned",
+      remote_control.session_url("node /opt/claude/cli.js remote-control", SPAWNED) == URL)
+# A relaunched claude's command line holds its handoff as its starting prompt, and a handoff about this
+# transport may quote a spawned claude's command line.
+QUOTED = f"claude --permission-mode auto 'the fix: {SPAWNED}'"
+check("a claude no remote-control server hosts is none, whatever its starting prompt quotes",
+      remote_control.session_url(DAEMON, QUOTED) is None and remote_control.session_url("tmux", QUOTED) is None)
 check("the --sdk-url=<url> spelling names the session too",
-      remote_control.session_url(f"claude --print --sdk-url={URL}") == URL)
+      remote_control.session_url(SERVER, f"claude --print --sdk-url={URL}") == URL)
+error = raised(lambda: remote_control.session_url(SERVER, "claude --print"))
+check("a remote-control server's claude whose command line gives no session is refused, since nothing "
+      "else reaches it", isinstance(error, Refused) and "gives 0 sessions" in str(error), error)
 error = raised(lambda: remote_control.session_url(
-    SPAWNED + " --sdk-url https://api.anthropic.com/v1/code/sessions/cse_other"))
-check("a command line giving two sessions as --sdk-url is refused, naming both",
+    SERVER, SPAWNED + " --sdk-url https://api.anthropic.com/v1/code/sessions/cse_other"))
+check("as is one giving two, naming both",
       isinstance(error, Refused) and "cse_other" in str(error) and SESSION in str(error), error)
 
 # --- where the login is kept -------------------------------------------------
@@ -120,29 +130,36 @@ session.post(remote_control.user_event(session.id, "/clear"))
 log.read()
 check("a /clear's reset is read with its sequence number", log.last_reset > head and log.idle, vars(log))
 
-class Malformed:
-    id = "cse_malformed"
 
-    def events_after(self, cursor):
-        return [{"payload": {"type": "assistant"}}]
+class Pages:
+    """A session whose log answers with the given pages, one per read, as (events, whether more follow)."""
+    id = "cse_pages"
+
+    def __init__(self, *pages):
+        self.pages = iter(pages)
+
+    def page(self, after):
+        return next(self.pages)
 
 
-error = raised(Log(Malformed(), 0).read)
-check("an event with no sequence number is a refusal, not a crash",
-      type(error) is Refused and "no sequence number" in str(error), error)
+for name, pages in (("an event with no sequence number", ([{"payload": {"type": "assistant"}}], False)),
+                    ("an event whose payload is no object", ([{"sequence_num": "12", "payload": "text"}], False)),
+                    ("an event older than the cursor", ([{"sequence_num": "3", "payload": {}}], False)),
+                    ("a page promising more after no events", ([], True))):
+    error = raised(Log(Pages(pages), 10).read)
+    check(f"{name} is a refusal, not a crash or an endless read", type(error) is Refused, error)
 
 
 class Recording:
-    """A session log that records the cursor of every read, and fails the reads it is told to."""
-    def __init__(self, log, failing=0):
-        self.log, self.id, self.cursors, self.failing = log, log.id, [], failing
+    """A session log that records where every page read starts, and fails the reads it is told to."""
+    def __init__(self, log, failing=()):
+        self.log, self.id, self.cursors, self.failing = log, log.id, [], list(failing)
 
-    def events_after(self, cursor):
-        self.cursors.append(cursor)
-        if self.failing:
-            self.failing -= 1
+    def page(self, after):
+        self.cursors.append(after)
+        if len(self.cursors) in self.failing:
             raise Transient("GET answered HTTP 502: bad gateway")
-        return self.log.events_after(cursor)
+        return self.log.page(after)
 
 
 session, head = fresh()
@@ -154,6 +171,17 @@ log.read()
 log.read()
 check("each read asks only for events after the last one read",
       recording.cursors == [head, head, session.head()], recording.cursors)
+for _ in range(2):
+    session.post(remote_control.user_event(session.id, "/clear"))
+recording = Recording(session, failing=(2,))
+log = Log(recording, head)
+error = raised(log.read)
+taken = log.cursor
+log.read()
+check("a read takes in every page, and one that fails part-way keeps the pages it took in",
+      isinstance(error, Transient) and taken == head + fake_session_server.PAGE
+      and log.cursor == session.head() and log.idle and recording.cursors[2] == taken,
+      (error, taken, recording.cursors))
 
 
 class Clock:
@@ -171,7 +199,7 @@ class Clock:
 session, head = fresh()
 session.end_turn()
 notes, clock = [], Clock()
-log = Log(Recording(session, failing=2), head)
+log = Log(Recording(session, failing=(1, 2)), head)
 check("a wait reads through reads that got no answer, noting each",
       remote_control.await_state(log, lambda log: log.idle, 60, notes.append, clock, clock.sleep)
       and len(notes) == 2 and "HTTP 502" in notes[0], notes)
@@ -222,10 +250,10 @@ session, head = fresh(holds=True)
 session.end_turn()
 thread = threading.Thread(target=run_deliver, args=(session, head, "the tests pass"))
 thread.start()
-wait_for(lambda: "the handoff" in session.prompts())
+posted_handoff = wait_for(lambda: "the handoff" in session.prompts())
 time.sleep(1)
 check("the goal waits for the handoff's turn to end, since /goal starts a turn of its own",
-      session.prompts() == ["/clear", "the handoff"], session.prompts())
+      posted_handoff and session.prompts() == ["/clear", "the handoff"], session.prompts())
 session.end_turn()
 thread.join(10)
 check("and is posted once it has", session.prompts()[-1] == "/goal the tests pass" and session.posts[-1][1],
@@ -238,8 +266,8 @@ class Unanswered:
     def __init__(self, log, lands, failing=1000):
         self.log, self.id, self.lands, self.failing, self.sent = log, log.id, lands, failing, []
 
-    def events_after(self, cursor):
-        return self.log.events_after(cursor)
+    def page(self, after):
+        return self.log.page(after)
 
     def post(self, event):
         self.sent.append(event["payload"]["uuid"])
@@ -270,6 +298,11 @@ session.end_turn()
 withheld, _ = run_deliver(Unanswered(session, lands=False), head, reset_timeout=1)
 check("one the log never shows is withheld, saying so",
       withheld[0] == "the /clear" and "never showed the prompt" in withheld[1], withheld)
+session, head = fresh()
+withheld, _ = run_deliver(Recording(session, failing=range(1, 1000)), head, idle_timeout=1)
+check("a wait the log never answered says so, not only that the session did not change",
+      withheld[0] == "the /clear" and "did not end" in withheld[1] and "unreachable" in withheld[1]
+      and "HTTP 502" in withheld[1], withheld)
 
 # Two workers on one session: an earlier handoff's, waiting to post its carried goal once the handoff's
 # turn ends, and the next agent's, started from inside that turn, waiting to post /clear once it ends.
@@ -277,10 +310,11 @@ check("one the log never shows is withheld, saying so",
 session, head_a = fresh(holds=True)
 session.end_turn()
 contended = []
+LOCKS = tempfile.mkdtemp(prefix="remote-control-locks.")
 
 
 def worker(head, goal, handoff):
-    lock = remote_control.exclusive(session.id, contended.append)
+    lock = remote_control.exclusive(LOCKS, session.id, contended.append)
     try:
         remote_control.deliver(session, Log(session, head), handoff, goal, (), 30, 5, lambda line: None)
     finally:
@@ -289,22 +323,22 @@ def worker(head, goal, handoff):
 
 first = threading.Thread(target=worker, args=(head_a, "the tests pass", "handoff A"))
 first.start()
-wait_for(lambda: "handoff A" in session.prompts())
+reached = [wait_for(lambda: "handoff A" in session.prompts())]
 second = threading.Thread(target=worker, args=(session.head(), "", "handoff B"))
 second.start()
-wait_for(lambda: contended)
-check("the next agent's worker waits while an earlier one on the session is posting", contended, contended)
+check("the next agent's worker waits while an earlier one on the session is posting",
+      all(reached) and wait_for(lambda: contended), contended)
 session.end_turn()
-wait_for(lambda: "/goal the tests pass" in session.prompts())
+reached.append(wait_for(lambda: "/goal the tests pass" in session.prompts()))
 first.join(10)
 time.sleep(1.5)
 check("the earlier one posts its goal at the turn's end, and the next posts nothing into the goal's turn",
-      session.prompts() == ["/clear", "handoff A", "/goal the tests pass"], session.prompts())
+      all(reached) and session.prompts() == ["/clear", "handoff A", "/goal the tests pass"], session.prompts())
 session.end_turn()
-wait_for(lambda: "handoff B" in session.prompts())
+reached.append(wait_for(lambda: "handoff B" in session.prompts()))
 second.join(10)
 check("then the next one's /clear and handoff follow the goal's turn, each to an idle session",
-      session.prompts() == ["/clear", "handoff A", "/goal the tests pass", "/clear", "handoff B"]
+      all(reached) and session.prompts() == ["/clear", "handoff A", "/goal the tests pass", "/clear", "handoff B"]
       and all(idle for _, idle in session.posts), session.posts)
 
 # --- the session server ---------------------------------------------------------
@@ -337,10 +371,11 @@ check("and declares Claude Code's CLI platform, without which the session runs n
       platform == "claude_code_cli", platform)
 check("and returns the sequence number the log gave it",
       fake_session_server.LOGS["cse_served01"].prompts() == ["/clear"] and seq > head, seq)
-events = served.events_after(0)
-check("a read follows next_cursor to the last page",
-      [int(e["sequence_num"]) for e in events] == list(range(10, 10 + len(fake_session_server.LOGS["cse_served01"].events)))
-      and len(events) > fake_session_server.PAGE, events)
+log = Log(served, 0)
+log.read()
+check("a read over HTTP takes in every page to the last",
+      log.cursor == fake_session_server.LOGS["cse_served01"].head()
+      and len(fake_session_server.LOGS["cse_served01"].events) > fake_session_server.PAGE and log.idle, vars(log))
 
 expiring = remote_control.Session(f"{BASE}/v1/code/sessions/cse_expires01", login("stale", fake_session_server.TOKEN))
 check("a 401 is answered by reading the stored login again, which Claude Code has refreshed",
@@ -348,29 +383,34 @@ check("a 401 is answered by reading the stored login again, which Claude Code ha
       and [r[2] for r in fake_session_server.REQUESTS["cse_expires01"]] == ["Bearer stale", f"Bearer {fake_session_server.TOKEN}"],
       fake_session_server.REQUESTS["cse_expires01"])
 error = raised(remote_control.Session(f"{BASE}/v1/code/sessions/cse_expires02", login("stale")).head)
-check("and one the re-read login also gets is refused", type(error) is Refused and "HTTP 401" in str(error), error)
+check("and one the re-read login also gets is a passing failure, since Claude Code may not have refreshed it yet",
+      isinstance(error, Transient) and "HTTP 401" in str(error), error)
 error = raised(lambda: remote("cse_refuses01").post(remote_control.user_event("cse_refuses01", "/clear")))
 check("a refused post names the status and the server's reason, and is no passing failure",
       type(error) is Refused and "HTTP 403" in str(error) and "fixture refuses" in str(error), error)
 flaky = remote("cse_flaky01")
 flaky.head()
-error = raised(lambda: flaky.events_after(0))
+error = raised(lambda: flaky.page(0))
 check("a 5xx is a passing failure", isinstance(error, Transient) and "HTTP 502" in str(error), error)
 closed = remote_control.Session("http://127.0.0.1:9/v1/code/sessions/cse_x", login("tok"))
 check("so is a server that does not answer", isinstance(raised(closed.head), Transient))
 error = raised(remote("cse_garbled01").head)
 check("a 2xx that is not JSON is a refusal naming what came", type(error) is Refused and "<html>" in str(error), error)
+error = raised(remote("cse_moved01").head)
+check("a redirect is refused, so the login is never sent on to where it points",
+      type(error) is Refused and "HTTP 302" in str(error) and "cse_elsewhere" not in fake_session_server.REQUESTS,
+      error)
 
 # --- the script, as the launcher runs it ---------------------------------------
 
 script = os.path.join(LIB, "remote_control.py")
-done = subprocess.run([sys.executable, "-I", script, "session", SPAWNED], capture_output=True, text=True)
+done = subprocess.run([sys.executable, "-I", script, "session", SERVER, SPAWNED], capture_output=True, text=True)
 check("session prints the session's URL", done.returncode == 0 and done.stdout.strip() == URL,
       (done.returncode, done.stdout, done.stderr))
-done = subprocess.run([sys.executable, "-I", script, "session", "claude"], capture_output=True, text=True)
-check("session for a claude that names none prints nothing and exits 0",
+done = subprocess.run([sys.executable, "-I", script, "session", DAEMON, QUOTED], capture_output=True, text=True)
+check("session for a claude no remote-control server hosts prints nothing and exits 0",
       done.returncode == 0 and done.stdout.strip() == "", (done.returncode, done.stdout, done.stderr))
-missing = os.path.join(LIB, "no-such-handoff.md")
+missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."), "no-such-handoff.md")
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
                        missing, missing, "1", "1"], capture_output=True, text=True)
 check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",
