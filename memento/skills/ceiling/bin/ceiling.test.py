@@ -16,6 +16,12 @@ import tempfile
 
 SCRATCH = tempfile.mkdtemp(prefix="ceiling-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The suite keeps PATH of the environment it runs in and nothing else, so no developer's settings
+# reach a test, and every command run here is given that and what its case sets. A git hook's
+# environment names its repository in GIT_DIR, and a git command that inherited it would act on that
+# repository.
+for name in set(os.environ) - {"PATH"}:
+    del os.environ[name]
 # Gives every child a scratch XDG_DATA_HOME, so the plugin install never touches the real one.
 os.environ["XDG_DATA_HOME"] = os.path.join(SCRATCH, "data")
 
@@ -65,12 +71,10 @@ def world(user_conf=None, project_conf=None, session_conf=None, git=True):
 
 
 def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None, shadowing=None):
-    """Runs the command as the skill does, with ambient config removed so a developer's own settings cannot affect a test.
+    """Runs the command as the skill does.
 
     `anchor` sets CLAUDE_PROJECT_DIR, for cases where the session's project differs from the working directory."""
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME", "CLAUDE_CODE_SESSION_ID")}
-    env["MEMENTO_CONFIG_HOME"] = home
+    env = dict(os.environ, MEMENTO_CONFIG_HOME=home)
     if session is not None:
         env["CLAUDE_CODE_SESSION_ID"] = session
     if anchor is not None:
@@ -78,7 +82,7 @@ def run(home, cwd, *argv, session=SESSION, anchor=None, pythonpath=None, shadowi
     if pythonpath is not None:
         env["PYTHONPATH"] = pythonpath
     if shadowing is not None:
-        env["PATH"] = f"{shadowing}:{env.get('PATH', '')}"
+        env["PATH"] = f"{shadowing}:{env['PATH']}"
     done = subprocess.run([sys.executable, CLI, *argv], text=True, capture_output=True,
                           env=env, cwd=cwd)
     return done.returncode, done.stdout, done.stderr
@@ -162,9 +166,7 @@ def gate(home, repo, tokens, session=SESSION):
         "cache_read_input_tokens": tokens - 2, "output_tokens": 0}}}) + "\n")
     transcript.close()
     log = os.path.join(scratch_dir(), "ceiling.log")
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env.update({"MEMENTO_CONFIG_HOME": home, "MEMENTO_CEILING_LOG": log})
+    env = dict(os.environ, MEMENTO_CONFIG_HOME=home, MEMENTO_CEILING_LOG=log)
     done = subprocess.run([sys.executable, HOOK], text=True, capture_output=True, env=env,
                           cwd=repo, input=json.dumps(
                               {"session_id": session, "hook_event_name": "Stop", "cwd": repo,

@@ -15,6 +15,11 @@ from pathlib import Path
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="journal-cli-test-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The suite keeps PATH of the environment it runs in and nothing else, so every command run here is
+# given that and what its case sets. A git hook's environment names its repository in GIT_DIR, and a
+# git command that inherited it would act on that repository.
+for name in set(os.environ) - {"PATH"}:
+    del os.environ[name]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")
@@ -38,8 +43,7 @@ def scratch_journal():
 
 def run(journal, *argv, session="session-A", cwd=SCRATCH):
     """Runs the command as a session's Bash tool does. `session=None` is an environment naming none."""
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
-    env["MEMENTO_JOURNAL"] = str(journal)
+    env = dict(os.environ, MEMENTO_JOURNAL=str(journal))
     if session is not None:
         env["CLAUDE_CODE_SESSION_ID"] = session
     return subprocess.run([sys.executable, CLI, *argv], text=True, capture_output=True, env=env,

@@ -25,6 +25,11 @@ from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Refus
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="journal-test-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The suite keeps PATH of the environment it runs in and nothing else, so every git command run here,
+# its own or `origin`'s in this process, is given that alone. A git hook's environment names its
+# repository in GIT_DIR, and a git command that inherited it would act on that repository.
+for name in set(os.environ) - {"PATH"}:
+    del os.environ[name]
 failures = []
 
 
