@@ -859,10 +859,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             done.osascript_log = open(osascriptlog).read() if os.path.exists(osascriptlog) else ""
             # The tmux and iTerm2 workers' arguments hold the handoff's path, in this case's own handoff
             # directory; its dots, as in mkdtemp's prefixes, are bracketed so the extended regex matches
-            # them only.
-            handoff_re = env["MEMENTO_HANDOFF_DIR"].replace(".", "[.]")
-            subprocess.run(["pkill", "-KILL", "-f", f"[-]-(iterm-)?worker .*{handoff_re}"],
-                           capture_output=True)
+            # them only. A scheduled worker is waited for first, since until its exec its arguments are
+            # the launcher's and nothing matches.
+            worker_re = f"[-]-(iterm-)?worker .*{env['MEMENTO_HANDOFF_DIR'].replace('.', '[.]')}"
+            if re.search(r"handoff scheduled → (tmux|iTerm2) ", done.stdout):
+                wait_for(lambda: subprocess.run(["pgrep", "-f", worker_re], capture_output=True).returncode == 0, 10)
+            subprocess.run(["pkill", "-KILL", "-f", worker_re], capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
         # The chain's top pid, read before the workdir is removed. It is both the pane
@@ -2231,7 +2233,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
 
 done, survived, log = registered.result()
 check("a reset the worker can see delivers the handoff",
-      "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
+      "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
 check("and the handoff file outlives the worker that delivered it",
       survived, f"out={done.stdout!r}")
 
@@ -2240,7 +2242,7 @@ check("and the handoff file outlives the worker that delivered it",
 # the worker sends regardless and never deletes a handoff it could not confirm.
 done, survived, log = never.result()
 check("a reset the worker never sees still delivers the handoff",
-      "paste-buffer" in log, f"out={done.stdout!r} log={log!r}")
+      "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
 check("and says plainly that it could not confirm the reset",
       "not observed" in done.stdout, f"out={done.stdout!r}")
 check("and never claims the handoff was withheld",
@@ -2254,7 +2256,8 @@ check("and above all does not delete the handoff it could not confirm",
 # the handoff once the reset is seen, and otherwise not at all, with the goal named for delivery by hand.
 done, _, log = goal_registered.result()
 check("a reset the worker can see has the carried goal typed after the handoff",
-      0 <= log.find("paste-buffer") < log.find("buffer: /goal ship it"), f"out={done.stdout!r} log={log!r}")
+      0 <= log.find("buffer: the whole handoff") < log.find("buffer: /goal ship it"),
+      f"out={done.stdout!r} log={log!r}")
 done, _, log = goal_never.result()
 check("a reset the worker never sees has no goal typed, and the goal named to deliver by hand",
       "/goal" not in log and "carried goal NOT delivered" in done.stdout and "/goal ship it" in done.stdout,
