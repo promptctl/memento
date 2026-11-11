@@ -19,7 +19,7 @@ There is exactly **one** legitimate input: **is the handed unit of work complete
 
 ## The next session starts from your message and nothing else
 
-The next agent wakes holding ONLY the message you send (plus the standard system, user global, and project level guidance). No summary of this session travels with it. So the message carries what the next agent needs to start: what the work was, exactly where it stopped, and the next concrete step — pointers it can follow, not claims about state it would have to reverify.
+The next agent wakes holding ONLY the message you send (plus the standard system, user global, and project level guidance). No summary of this session travels with it. So the message carries what the next agent needs to start: what the work was, exactly where it stopped, and the next concrete step — pointers it can follow, not claims about state it would have to reverify. The launcher appends this session's id (from `$CLAUDE_CODE_SESSION_ID`) to the handoff, so the next agent can read this transcript when a claim needs checking; you do not pass it.
 
 ## Carry the goal forward — if one is set, it dies unless you carry it
 

@@ -470,9 +470,12 @@ case "$MODE" in
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
     # The wrapped message is built once and includes the handoff file's path, so every copy points to the
-    # full text on disk.
-    MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
-      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
+    # full text on disk. It also names the session that wrote it, so the next agent can read that transcript
+    # when a claim needs checking. Claude Code exports the id to every tool call; a run without it still hands
+    # off, saying the id is unknown. [LAW:no-silent-failure] The path stays the last line.
+    MESSAGE=$(printf '%s\n%s\n%s\n\nSent from Claude Code session %s.\nThis handoff verbatim on disk: %s' \
+      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" \
+      "${CLAUDE_CODE_SESSION_ID:-(unknown: CLAUDE_CODE_SESSION_ID was unset)}" "$MSGFILE")
 
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""

@@ -741,13 +741,14 @@ check("the tmux-absent PATH can still run the launcher",
 
 
 
-def argv_case(*args, path_prefix=""):
+def argv_case(*args, path_prefix="", session_id=None):
     """Run the launcher with these args against a handoff directory of its own.
 
     Returns (completed process, list of handoff bodies written). Bodies are returned
     rather than filenames, since the checks concern what a handoff says. The run is
     dry, and `path_prefix` is prepended to the fixture PATH, never substituted for
-    it, so a missing transport cannot masquerade as an argv refusal.
+    it, so a missing transport cannot masquerade as an argv refusal. `session_id` is
+    the $CLAUDE_CODE_SESSION_ID the launcher sees, absent by default.
     """
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
@@ -759,12 +760,15 @@ def argv_case(*args, path_prefix=""):
     with open(rootfile, "w") as handle:
         handle.write(str(os.getpid()))
     under_claude = [CLAUDE_BIN, "-c", 'export CLAUDE_PID=$$; "$@"; exit $?', "wrap"]
+    env = {"PATH": path, "HOME": workdir, "TMPDIR": workdir,
+           "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
+           "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"}
+    if session_id is not None:
+        env["CLAUDE_CODE_SESSION_ID"] = session_id
     try:
         done = subprocess.run(
             [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
-            env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
-                 "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
-                 "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
+            env=env)
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
         return done, bodies
@@ -947,6 +951,20 @@ for bad in (["--model"], ["--model", "--goal", "x"], ["--effort", ""], ["--model
 done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# The handoff names the session that wrote it, so the next agent can read that
+# transcript back. Without an id the handoff still goes, and says the id is unknown.
+SESSION_ID = "0f3c9a52-7d1e-4b6a-9c28-5e4d3b2a1f07"
+done, bodies = argv_case("a handoff", session_id=SESSION_ID)
+check("the handoff names the outgoing session's id",
+      done.returncode == 0 and len(bodies) == 1
+      and f"Sent from Claude Code session {SESSION_ID}." in bodies[0],
+      f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+done, bodies = argv_case("a handoff")
+check("a session with no id in its environment still hands off, saying the id is unknown",
+      done.returncode == 0 and len(bodies) == 1
+      and "CLAUDE_CODE_SESSION_ID was unset" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # --- resolution through a real ancestry -----------------------------------
