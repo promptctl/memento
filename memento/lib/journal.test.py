@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the journal: the chain a session's history is read along, what a session may recall of
-it, and the record on disk. The chain and its readers run in process over entries built here, with
-no file. The record runs against a scratch directory, with real processes appending at once.
+it, the summary a close-out takes, and the record on disk. The chain, its readers and the summary
+run in process over entries built here, with no file. The record runs against a scratch directory,
+with real processes appending at once.
 
 Run with: python3 journal.test.py
 """
@@ -20,7 +21,7 @@ sys.path.insert(0, LIB)
 import journal  # noqa: E402
 from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Refused,  # noqa: E402
                      Unreadable, Wake, chain, closed, entries, entry_of, having, inside, line_of,
-                     noted, origin, recalled, record, shown, woke)
+                     noted, origin, pending, recalled, record, shown, summarized, woke)
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="journal-test-"))
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
@@ -39,13 +40,14 @@ def by(session, ts="2026-11-10T00:00:00Z"):
 
 def handed(sessions):
     """The record a line of sessions leaves, each waking from the handoff the one before it wrote.
-    A session writes a note, then closes out with the summary `did <session>`."""
+    A session writes a note, records the summary `did <session>`, then closes out with it."""
     kept = []
     for place, session in enumerate(sessions):
         if place:
             kept.append(woke(by(session), f"/handoffs/{place}.md"))
         kept.append(noted(by(session), f"note of {session}"))
-        kept.append(closed(by(session), f"/handoffs/{place + 1}.md", f"did {session}"))
+        kept.append(summarized(by(session), f"did {session}"))
+        kept.append(closed(by(session), f"/handoffs/{place + 1}.md", pending(kept, session)))
     return kept
 
 
@@ -72,7 +74,7 @@ def unreadable(read, *args):
 
 # --- the chain ---------------------------------------------------------------------------------
 
-kept = handed("ABC")[:-2]  # C has woken and written nothing since.
+kept = handed("ABC")[:-3]  # C has woken and written nothing since.
 links, end = chain(kept, "C")
 check("a chain is followed from a session back through each handoff to the session that began it",
       [kept[at].summary for at in links] == ["did B", "did A"]
@@ -150,6 +152,34 @@ kept = [closed(by("A"), "/handoffs/1.md", "older"), closed(by("Z"), "/handoffs/1
 check("of two close-outs naming one handoff, the one nearest before the wake is the predecessor",
       "  newer" in recalled(kept, "B") and "  older" not in recalled(kept, "B"), recalled(kept, "B"))
 
+# --- the summary a close-out takes --------------------------------------------------------------
+
+kept = [summarized(by("A"), "a first draft"), summarized(by("B"), "did B"), noted(by("A"), "n"),
+        summarized(by("A"), "did A")]
+check("a close-out takes the summary its session recorded, the later of two",
+      (pending(kept, "A"), pending(kept, "B")) == ("did A", "did B"))
+told = refusal(pending, kept, "C") or ""
+check("a session that recorded none is refused, and told what a summary is and how to record one",
+      "what the session did" in told and "journal summary --file <path>" in told
+      and "last close-out" not in told, told)
+kept.append(closed(by("A"), "/handoffs/1.md", pending(kept, "A")))
+told = refusal(pending, kept, "A") or ""
+check("a summary is taken by one close-out, and the next is told the last one took it",
+      "since its last close-out" in told and "journal summary --file <path>" in told, told)
+check("and another session's summary is still that session's to take", pending(kept, "B") == "did B")
+# A session id that survives a reset: the successor's close-out takes what was recorded since.
+kept += [woke(by("A"), "/handoffs/1.md"), summarized(by("A"), "did the second stretch")]
+check("a session whose id survived a reset closes out with its own summary",
+      pending(kept, "A") == "did the second stretch")
+
+# An environment that names no session still closes out, with the summary recorded the same way.
+kept = [summarized(by(None), "did it unnamed"), summarized(by("A"), "did A")]
+check("a close-out that names no session takes the summary recorded with none",
+      pending(kept, None) == "did it unnamed")
+check("and never a named session's", refusal(pending, kept[1:], None) is not None)
+check("a named session's close-out never takes a summary recorded with no session",
+      refusal(pending, kept[:1], "A") is not None)
+
 # --- what show keeps ----------------------------------------------------------------------------
 
 kept = handed("AB") + [noted(by("elsewhere"), "another agent's note")]
@@ -189,6 +219,9 @@ check("not even the empty text, which every value an entry does have contains",
 check("an entry is shown with its origin and each field of its kind, later lines indented",
       shown(note) == "2026-11-10T00:00:00Z  note  A  /work  (trunk)\n"
                      "  text: the parser\n    loses a byte", shown(note))
+check("a summary is shown with its text",
+      shown(summarized(by("A"), "did it")) == "2026-11-10T00:00:00Z  summary  A  /work  (trunk)\n"
+                                              "  summary: did it")
 check("an entry that names no session is shown as naming none, not as a session called None",
       shown(noted(by(None), "n")).startswith("2026-11-10T00:00:00Z  note  (no session)  /work"),
       shown(noted(by(None), "n")))
@@ -196,14 +229,15 @@ check("an entry that names no session is shown as naming none, not as a session 
 # --- what the journal takes ---------------------------------------------------------------------
 
 check("an empty note is refused", "note is empty" in (refusal(noted, by("A"), " \n ") or ""))
-check("an empty summary is refused",
-      "summary is empty" in (refusal(closed, by("A"), "/h.md", "") or ""))
-check("a summary over the cap is refused, with the cap named",
-      f"{SUMMARY_CAP:,}" in (refusal(closed, by("A"), "/h.md", "x" * (SUMMARY_CAP + 1)) or ""))
-check("a summary at the cap is taken",
-      closed(by("A"), "/h.md", "x" * SUMMARY_CAP).summary == "x" * SUMMARY_CAP)
-check("text is kept without its surrounding whitespace",
-      closed(by("A"), "/h.md", "\n did it \n").summary == "did it")
+# A summary is held to one size where it is recorded and where a close-out holds it.
+for what, summed in (("a summary", lambda text: summarized(by("A"), text)),
+                     ("a close-out's summary", lambda text: closed(by("A"), "/h.md", text))):
+    check(f"{what} that is empty is refused", "summary is empty" in (refusal(summed, " \n ") or ""))
+    check(f"{what} over the cap is refused, with the cap named",
+          f"{SUMMARY_CAP:,}" in (refusal(summed, "x" * (SUMMARY_CAP + 1)) or ""))
+    check(f"{what} at the cap is taken", summed("x" * SUMMARY_CAP).summary == "x" * SUMMARY_CAP)
+    check(f"{what} is kept without its surrounding whitespace",
+          summed("\n did it \n").summary == "did it")
 check("a note over its cap is refused, with the cap named",
       f"{NOTE_CAP:,}" in (refusal(noted, by("A"), "x" * (NOTE_CAP + 1)) or ""))
 check("a note at its cap is taken", noted(by("A"), "x" * NOTE_CAP).text == "x" * NOTE_CAP)
@@ -218,7 +252,7 @@ for name, path in (("no", ""), ("a relative", "handoffs/1.md")):
 
 awkward = "line one\nline two\u2028after a separator \"quoted\" \\ é"
 for entry in (woke(by("A"), "/handoffs/a b.md"), noted(by(None), awkward),
-              closed(by("A"), "/h.md", awkward)):
+              summarized(by("A"), awkward), closed(by("A"), "/h.md", awkward)):
     line = line_of(entry)
     check(f"a {entry.kind} entry reads back from its line as it was written",
           entry_of(line) == entry and type(entry_of(line)) is type(entry) and "\n" not in line, line)

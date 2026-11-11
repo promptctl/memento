@@ -300,7 +300,10 @@ Empty aligned-pool (every examined candidate classified Misaligned, or no candid
 
 **Step 4 — Run finalize-session** (AlignedAndDefined and AlignedButFuzzy arms):
 
+The launcher is refused until the session has recorded its summary in the journal. With the Write tool, put what this session did, what came of it and why — from the same recap as step C — in a file under `/tmp`; Skill(memento:journal) says what a summary holds and how long it may be. Then record it and run the launcher as one command:
+
 ```bash
+${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal summary --file <path> &&
 ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session "$(cat <<'EOF'
 Last session shipped PR #<num> — <one-line description of what merged>.
 <forward-looking notes the next agent should know: in-flight context,

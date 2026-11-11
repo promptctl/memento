@@ -8,6 +8,7 @@ subprocess, then asserts the JSON it emits. Run with `python3 context-ceiling.te
 import atexit
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,7 @@ PLUGIN = os.path.dirname(os.path.dirname(HERE))
 LIB = os.path.join(PLUGIN, "lib")
 LAUNCHER = os.path.join(os.path.dirname(os.path.dirname(HERE)),
                         "skills", "message-in-a-bottle", "bin", "finalize-session")
+JOURNAL = os.path.join(PLUGIN, "skills", "journal", "bin", "journal")
 # Every case passes its threshold explicitly, so the shipped default lives only in ceiling_config
 # and retuning it cannot break these. The fixture magnitude is not a second copy of that number.
 TEST_CEILING = 100_000
@@ -513,7 +515,14 @@ for raw in ("42", "null", "[]", "not json at all"):
     check(f"a stdin payload {raw!r} that is not a Stop object fails loudly",
           done.returncode == 1, f"{done.returncode}")
 
-check("the launcher the hook points at exists", os.access(LAUNCHER, os.X_OK), LAUNCHER)
+# A block gives the two commands of a close-out on lines of their own, and an agent runs them as
+# given: the journal's, which records the summary, and then the launcher's.
+for what, verdict in (("finishing", finishing), ("closing", closing)):
+    given = [shlex.split(line)[0] for line in verdict["reason"].splitlines()
+             if line.startswith("    ")]
+    check(f"a {what} block gives the journal's command and then the launcher's, and both exist",
+          given == [JOURNAL, LAUNCHER] and all(os.access(named, os.X_OK) for named in given),
+          str(given))
 check("the hook is executable", os.access(HOOK, os.X_OK), HOOK)
 check("every SessionStart script is executable",
       all(os.access(script, os.X_OK) for script in (CLEAR_HOOK, STATUS_HOOK)))

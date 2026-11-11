@@ -16,6 +16,9 @@
 # when that id's transcript records a prompt holding the handoff file's path (lib/transcript.py). Nothing
 # about readiness is read off a screen, whose rows a long message scrolls past.
 #
+# Before any transport, the launcher journals the session's close-out (skills/journal/bin/journal): the
+# handoff's path, with the summary the session recorded for it. The handoff exists only once that is done.
+#
 # Every session can continue an autonomy chain. A launcher that cannot hand off refuses through _refuse
 # (reason on stderr, exit 2). Exit 0 means the worker is scheduled (tmux, iTerm2), whose later failures go
 # to its log, or that the successor took the message (detached).
@@ -371,14 +374,20 @@ usage: finalize-session [--goal <condition>] [--model <model>] [--effort <level>
   --                      end flag parsing; every token after it is message text
   message...              what the next agent wakes up holding (default: /next)
 
-  FINALIZE_DRY_RUN=1      report the transport it would use; schedule nothing
+  FINALIZE_DRY_RUN=1      report the transport it would use; schedule and journal
+                          nothing
   MEMENTO_HANDOFF_DIR     where the handoff is written
                           (default: ~/.claude/memento/handoffs)
 
 Every flag here has two dashes, so only a two-dash word is read as one. Anything
 else is message: -h, "- shipped the parser", any argument carrying a newline.
 
-exit: 0 it did what you asked · 2 it could not — argv, setup, or transport
+Record what the session did first, with the journal's command (the journal skill):
+journal summary --file <path>. The handoff is written once the journal holds the
+close-out with that summary, and with none recorded the run is refused.
+
+exit: 0 it did what you asked · 2 it could not — argv, setup, the journal, or
+      transport
 USAGE
 }
 
@@ -399,6 +408,9 @@ SELFDIR=$(cd "$(dirname "$SELF_RAW")" && pwd) \
   || _refuse "cannot resolve own directory from \$0=$0"
 SELF="$SELFDIR/$(basename "$SELF_RAW")"
 READER="$SELFDIR/../../../lib/transcript.py"
+# The journal's command, in the skill beside this one. A refusal prints this path for the agent to run,
+# so it is spelled without `..`.
+JOURNAL="${SELFDIR%/*/*}/journal/bin/journal"
 
 # Selects the mode once, from the first argument.
 case "${1:-}" in
@@ -467,6 +479,11 @@ case "$MODE" in
     trap '_refuse "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
+    # [LAW:parse-dont-validate] A handoff's path is its file's whole name from here on: the footer gives it
+    # to a reader in any directory, and the journal joins a wake to its close-out by it. So a directory
+    # given relative to this one is made absolute here, once, where the environment is read.
+    HANDOFF_DIR=$(CDPATH= cd -- "$HANDOFF_DIR" && pwd) \
+      || _refuse "cannot resolve handoff directory $HANDOFF_DIR"
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
     # The wrapped message is built once and includes the handoff file's path, so every copy points to the
@@ -484,10 +501,27 @@ case "$MODE" in
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""
     # The EXIT trap removes transient files only. The handoff file is kept.
-    trap 'rm -f -- "$GOALFILE" ${LOGFILE:+"$LOGFILE"}' EXIT
-    # $RECORDED stays empty until the write succeeds, so a half-written file is never reported as the handoff.
-    printf '%s' "$MESSAGE" > "$MSGFILE" \
+    trap 'rm -f -- "$GOALFILE" "$MSGFILE.part" ${LOGFILE:+"$LOGFILE"}' EXIT
+    # The handoff is written beside its name and takes the name only once the journal holds its close-out.
+    # A close-out the journal refuses then leaves no handoff, a handoff that cannot be written leaves the
+    # summary for the next run, and the close-out is in the record before the handoff can wake anyone,
+    # which is where a wake looks for it.
+    printf '%s' "$MESSAGE" > "$MSGFILE.part" \
       || _refuse "cannot write the handoff to $MSGFILE"
+    # [LAW:single-enforcer] Whether this session has said what it did is the journal's to decide, and so is
+    # everything about the summary. The launcher gives it the one thing only the launcher knows, the
+    # handoff's path, and relays its refusal whole: the remedy is in the journal's words.
+    if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
+      echo "[dry-run] close-out not journaled; a real run takes this session's summary from the journal"
+    else
+      WHY_NOT=$(python3 -I "$JOURNAL" close --handoff="$MSGFILE" 2>&1) \
+        || { printf '%s\n' "$WHY_NOT" >&2
+             _refuse "the journal did not record the close-out, so no handoff was written. The journal's command is: $JOURNAL"; }
+    fi
+    # $RECORDED stays empty until the handoff has its name, so a file the journal never took is not
+    # reported as the handoff.
+    mv -- "$MSGFILE.part" "$MSGFILE" \
+      || _refuse "cannot name the handoff $MSGFILE"
     RECORDED="$MSGFILE"
     # The goal is passed as a file value, empty when none was carried. Workers re-issue /goal only when it is non-empty.
     printf '%s' "$GOAL" > "$GOALFILE" \

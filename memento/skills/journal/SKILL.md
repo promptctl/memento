@@ -1,6 +1,6 @@
 ---
 name: journal
-description: Deposit a note in the journal that outlives this session, or read back the short close-out summaries of the sessions that came before it. Use when the user says "journal this", "note that in the journal", "write that down for later", "what did the last session do", "why am I doing this", "what was already tried" — and unprompted when you have just made a decision whose reason will be lost at the reset, when you have abandoned an approach, or when you woke from a handoff that does not explain itself.
+description: Deposit a note in the journal that outlives this session, record the summary this session's close-out takes, or read back the short close-out summaries of the sessions that came before it. Use when the user says "journal this", "note that in the journal", "write that down for later", "what did the last session do", "why am I doing this", "what was already tried" — and unprompted when you have just made a decision whose reason will be lost at the reset, when you have abandoned an approach, when you are about to run finalize-session, which is refused until the session has recorded a summary, or when you woke from a handoff that does not explain itself.
 ---
 
 # Keep a journal across resets
@@ -11,6 +11,7 @@ keeps the rest. Writing to it is free; reading from it is small on purpose.
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal note '<text>'
 ${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal note --file <path>
+${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal summary --file <path>
 ${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal recall
 ```
 
@@ -47,6 +48,35 @@ file's contents as written, minus surrounding whitespace, and does not delete th
 Don't respell a word (`g-i-t`, "the version-control tool") to get past the guard: the user
 finds notes by searching for their words, and a respelled word is one they will not find.
 
+## `summary` says what the session did, for its close-out
+
+A close-out is journaled with a summary of the session, and `finalize-session` takes that
+summary from the journal: it is refused, having written no handoff, until this session has
+recorded one. So at the end of a unit of work the two run together:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/skills/journal/bin/journal summary --file <path> &&
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session '<handoff message>'
+```
+
+The summary is what the session did, what came of it and why, in at most 1,200 characters.
+The sessions after this one read it back with `recall` when their handoff does not explain
+itself, so it says what they could not get from the code, the ticket or the handoff, and the
+detail goes in notes.
+
+It is always a file: write it with the Write tool under `/tmp`, as a note's file is written,
+and pass the path. `summary` takes no words, because memento respells git and shell names
+through the whole of a command that names the launcher, and a summary given as words in that
+command would be recorded respelled. The journal stores the file's contents as written,
+minus surrounding whitespace, and does not delete the file. It prints nothing and exits 0.
+An empty file or one over 1,200 characters is refused: exit 2, nothing written. A file that
+cannot be read is exit 1 with the reason.
+
+A close-out takes the latest summary the session recorded since its last close-out, so a
+second `summary` replaces the first, and every close-out needs one of its own. A launcher
+run that was refused after naming the handoff it preserved has already taken the summary:
+record it again before running the launcher again, which the joined command above does.
+
 ## `recall` is the whole of what you read
 
 Run it when you need to know why you are doing what you are doing, or what was already
@@ -54,8 +84,8 @@ tried, and the handoff you woke with does not say. It is not a start-of-session 
 
 It prints the close-out summaries of the sessions before this one in its chain of handoffs
 — the session whose handoff woke you, the session whose handoff woke that one, and so on —
-the nearest 5, oldest first. Each prints as a header line with the summary indented two
-spaces beneath it:
+the nearest 5, oldest first. Each is what that session recorded with `summary` before it
+closed out, and prints as a header line with the summary indented two spaces beneath it:
 
     <UTC time>  <directory>  (<branch>)
       <summary>

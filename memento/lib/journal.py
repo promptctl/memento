@@ -2,10 +2,10 @@
 """The journal: an append-only record of what each session woke from, noted, and closed out with.
 
 A handoff carries the next step forward and nothing of what came before it. The journal keeps that:
-a session's wake names the handoff it started from, its close names the handoff it wrote and
-summarizes what it did, and notes are whatever it chose to deposit in between. A session id changes
-at nearly every reset, so an agent's history is a chain of handoffs: a wake and the close that wrote
-its handoff are the link from one session to the one before.
+a session's wake names the handoff it started from, its summary says what it did, its close names
+the handoff it wrote and holds that summary, and notes are whatever it chose to deposit in between.
+A session id changes at nearly every reset, so an agent's history is a chain of handoffs: a wake and
+the close that wrote its handoff are the link from one session to the one before.
 
 The record is one file, one entry per line. An entry's place in it is the only order anything here
 relies on: the timestamp an entry carries is for a person to read.
@@ -34,7 +34,7 @@ Origin = collections.namedtuple("Origin", "ts session cwd branch")
 ABSENT = ("session", "branch")
 
 
-# [LAW:types-are-the-program] An entry is one of these three and carries exactly its kind's fields.
+# [LAW:types-are-the-program] An entry is one of these four and carries exactly its kind's fields.
 class Wake(collections.namedtuple("Wake", Origin._fields + ("handoff",))):
     """A session started from the handoff file at `handoff`."""
     __slots__ = ()
@@ -47,13 +47,19 @@ class Note(collections.namedtuple("Note", Origin._fields + ("text",))):
     kind = "note"
 
 
+class Summary(collections.namedtuple("Summary", Origin._fields + ("summary",))):
+    """What a session says it did, what came of it and why, for the close-out that follows."""
+    __slots__ = ()
+    kind = "summary"
+
+
 class Close(collections.namedtuple("Close", Origin._fields + ("handoff", "summary"))):
     """A session wrote the handoff file at `handoff`, having done what `summary` says."""
     __slots__ = ()
     kind = "close"
 
 
-KINDS = {shape.kind: shape for shape in (Wake, Note, Close)}
+KINDS = {shape.kind: shape for shape in (Wake, Note, Summary, Close)}
 # Every name a `FIELD=TEXT` filter may use.
 FIELDS = ("kind", *dict.fromkeys(field for shape in KINDS.values() for field in shape._fields))
 
@@ -97,15 +103,24 @@ def noted(origin, text):
                                "file in the note."))
 
 
+def _summed(text):
+    """A summary's text as the journal keeps it: not empty and at most SUMMARY_CAP, the size later
+    sessions read back."""
+    return _said(text, "the summary", SUMMARY_CAP,
+                 "Say what the session did and what came of it in a few sentences; the detail "
+                 "belongs in notes.")
+
+
+def summarized(origin, text):
+    """A summary entry for this text. Raises Refused for text that is empty or over SUMMARY_CAP."""
+    return Summary(*origin, _summed(text))
+
+
 def closed(origin, handoff, summary):
     """A close entry for the handoff a session wrote. Raises Refused for a handoff path that is not
-    absolute, and for a summary that is empty or over SUMMARY_CAP, the size later sessions read
-    back. Its writer records it before the handoff can wake anyone: a wake finds its close-out only
-    earlier in the record."""
-    return Close(*origin, _named(handoff),
-                 _said(summary, "the summary", SUMMARY_CAP,
-                       "Say what the session did and what came of it in a few sentences; the "
-                       "detail belongs in notes."))
+    absolute, and for a summary that is empty or over SUMMARY_CAP. Its writer records it before the
+    handoff can wake anyone: a wake finds its close-out only earlier in the record."""
+    return Close(*origin, _named(handoff), _summed(summary))
 
 
 def woke(origin, handoff):
@@ -139,9 +154,9 @@ def line_of(entry):
 def entry_of(line):
     """The entry one line of the record holds.
 
-    [LAW:parse-dont-validate] A line comes back as a Wake, Note or Close, or this raises: a kind
-    that is not one of the three, keys that are not exactly that kind's fields, or a value that is
-    not text where only `session` and `branch` may be absent instead."""
+    [LAW:parse-dont-validate] A line comes back as a Wake, Note, Summary or Close, or this raises: a
+    kind that is not one of the four, keys that are not exactly that kind's fields, or a value that
+    is not text where only `session` and `branch` may be absent instead."""
     try:
         fields = json.loads(line)
         entry = KINDS[fields.pop("kind")](**fields)
@@ -192,6 +207,30 @@ def entries(path):
 def _latest(entries, before, wanted):
     """The position of the last entry before `before` that `wanted` accepts, or None."""
     return next((at for at in range(before - 1, -1, -1) if wanted(entries[at])), None)
+
+
+def pending(entries, session):
+    """The summary a close-out by this session takes: the one it recorded since its last close-out,
+    the latest where it recorded several. Raises Refused where there is none.
+
+    [LAW:one-source-of-truth] Whether a summary is still to be taken is read off the record's order
+    and marked nowhere else: the close that follows a summary has taken it, so a session whose id
+    survived the reset its close-out made closes out with its own words and not its predecessor's.
+    A summary that no close-out took is taken by the session's next one, through any other reset.
+
+    A session is the id its entries carry. Entries that carry none are one session here, and here
+    only: a close-out must not fail because its environment names no session, so the summary it
+    takes is the latest recorded the same way."""
+    at = _latest(entries, len(entries),
+                 lambda entry: isinstance(entry, (Summary, Close)) and entry.session == session)
+    if at is None or isinstance(entries[at], Close):
+        raise Refused(
+            "this session has recorded no summary for a close-out to take"
+            + ("" if at is None else " since its last close-out, which took the one before it")
+            + f". Write what the session did, what came of it and why, in at most {SUMMARY_CAP:,} "
+              "characters, to a file with the Write tool, and record it before closing out: "
+              "journal summary --file <path>")
+    return entries[at].summary
 
 
 def chain(entries, session):
