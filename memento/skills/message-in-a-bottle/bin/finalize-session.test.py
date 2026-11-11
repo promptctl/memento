@@ -100,7 +100,8 @@ case "${1:-}" in
     # delivery that dies mid-way, or a session that cannot be created at all, is
     # staged. Every subcommand appends its whole argv to $FIXTURE_TMUX_LOG, which is
     # how a case can see that a teardown the worker owes actually happened: a log line
-    # from the worker only says it meant to.
+    # from the worker only says it meant to. A buffer loaded from stdin is logged as
+    # `buffer: <its text>` after its argv, so a case sees what a paste typed.
     # The tmux WORKER resets a pane that already exists and runs nothing in it, so its
     # cases state what that pane shows: $FIXTURE_TMUX_PANE_TEXT, when set, is what
     # capture-pane prints.
@@ -150,6 +151,10 @@ case "${1:-}" in
           *'#{'*) echo "fixture tmux: cannot expand '$fmt'" >&2; exit 2 ;;
         esac
         printf '%s\n' "$line" ;;
+      load-buffer)
+        if [ "${!#}" = - ]; then
+          printf 'buffer: %s\n' "$(cat)" >> "${FIXTURE_TMUX_LOG:-/dev/null}"
+        fi ;;
       capture-pane)
         if [ -n "${FIXTURE_TMUX_PANE_TEXT+set}" ]; then
           printf '%s\n' "$FIXTURE_TMUX_PANE_TEXT"
@@ -372,10 +377,16 @@ PS_DIR = os.path.join(FIXTURES, "ps")
 os.mkdir(PS_DIR)
 install(PS_DIR, "ps", PS)
 # The iTerm2 transport's probe asks osascript for iTerm2's version, so an osascript that
-# answers stands in for a running iTerm2. It goes on PATH only for an iTerm2 case.
+# answers stands in for a running iTerm2. It goes on PATH only for an iTerm2 case. Every
+# other script, a write to a session, comes on stdin: it is appended to
+# $FIXTURE_OSASCRIPT_LOG and exits $FIXTURE_OSASCRIPT_STATUS.
 ITERM_BIN = os.path.join(FIXTURES, "iterm")
 os.mkdir(ITERM_BIN)
-install(ITERM_BIN, "osascript", "#!/bin/bash\necho 3.6.0\n")
+install(ITERM_BIN, "osascript", """#!/bin/bash
+if [ "${1:-}" = -e ]; then echo 3.6.0; exit 0; fi
+cat >> "${FIXTURE_OSASCRIPT_LOG:-/dev/null}"
+exit "${FIXTURE_OSASCRIPT_STATUS:-0}"
+""")
 # The successor's claude, named claude so `command -v claude` in a launcher finds it.
 SUCCESSOR_DIR = os.path.join(FIXTURES, "successor")
 os.mkdir(SUCCESSOR_DIR)
@@ -657,7 +668,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
         successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
-        bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None, tmux_fail=None):
+        bridge=None, host_argv=None, claude_argv=None, agents=None, agents_status=None, tmux_fail=None,
+        osascript_status=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -699,6 +711,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     Every case's `done.tmux_log` lists the tmux calls made, and `tmux_fail` names one tmux subcommand to
     fail. A real run on the tmux transport schedules the tmux worker, which acts only after its delay, so
     `done.tmux_log` is the launcher's own calls, and the worker is killed before the case ends.
+    `done.osascript_log` is the AppleScript the launcher wrote to iTerm2 sessions, and `osascript_status`
+    the status those writes exit with. A real run on the iTerm2 transport has its worker killed the same way.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     if host_argv is None:
@@ -768,6 +782,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     env["FIXTURE_TMUX_LOG"] = tmuxlog
     if tmux_fail is not None:
         env["FIXTURE_TMUX_FAIL"] = tmux_fail
+    osascriptlog = os.path.join(workdir, "osascript.log")
+    env["FIXTURE_OSASCRIPT_LOG"] = osascriptlog
+    if osascript_status is not None:
+        env["FIXTURE_OSASCRIPT_STATUS"] = str(osascript_status)
     if successor is not None:
         env.update(FIXTURE_SUCCESSOR=successor, FIXTURE_TMUX_STATE=tmux_state, NEST_LINGER="20",
                    MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
@@ -838,8 +856,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
             settle_detached(done, workdir, tmux_state)
         else:
             done.tmux_log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
-            # The tmux worker's arguments hold the handoff's path, in this case's own handoff directory.
-            subprocess.run(["pkill", "-KILL", "-f", f"[-]-worker .*{env['MEMENTO_HANDOFF_DIR']}"],
+            done.osascript_log = open(osascriptlog).read() if os.path.exists(osascriptlog) else ""
+            # The tmux and iTerm2 workers' arguments hold the handoff's path, in this case's own handoff
+            # directory.
+            subprocess.run(["pkill", "-KILL", "-f", f"[-]-(iterm-)?worker .*{env['MEMENTO_HANDOFF_DIR']}"],
                            capture_output=True)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
             settle_remote(done, session_url(bridge))
@@ -1008,37 +1028,21 @@ check("a tempfile it cannot make after the handoff is written says where the han
       done.returncode == REFUSED_RC and len(recorded) == 1
       and os.path.join(logfail_dir, recorded[0]) in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
-body = open(os.path.join(logfail_dir, recorded[0])).read() if recorded else ""
-check("a handoff that carries no goal names none", "carries the goal" not in body, f"body={body!r}")
 # The session's own goal is cleared only after every step that can refuse.
 check("and a close-out refused before its worker types nothing into its pane",
       "send-keys" not in done.tmux_log, f"tmux_log={done.tmux_log!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
 
-# The handoff is the one text a successor's first turn always holds, so it names the carried goal and the
-# flag that passes it on, quoted so that running the line as written gives back the condition whole.
-CARRIED_GOAL = "it's \"done\" when $HOME has no `stray` files"
-goal_dir = tempfile.mkdtemp(prefix="finalize-goal.")
-done = run(dry_run="", log_mktemp_fails=True, handoff_dir=goal_dir, launcher_flags=("--goal", CARRIED_GOAL))
-recorded = sorted(os.listdir(goal_dir))
-body = open(os.path.join(goal_dir, recorded[0])).read() if recorded else ""
-passed_on = body.rpartition("finalize-session --goal ")[2].partition("\n")[0]
-echoed = subprocess.run(["/bin/bash", "-c", f"printf %s {passed_on}"], capture_output=True, text=True,
-                        env={"PATH": REAL_DIRS, "HOME": "/nonexistent"}).stdout
-check("a handoff carrying a goal names it, and the --goal line gives it back whole",
-      f"This session carries the goal: {CARRIED_GOAL}\n" in body and echoed == CARRIED_GOAL,
-      f"body={body!r} passed_on={passed_on!r} echoed={echoed!r}")
-check("and the handoff's path is still its last line",
-      body.endswith(f"This handoff verbatim on disk: {os.path.join(goal_dir, recorded[0])}"), f"body={body!r}")
-shutil.rmtree(goal_dir, ignore_errors=True)
-
 # On the tmux transport the close-out ends its own session's goal, by typing the immediate `/goal clear`
 # into its own pane, every time: whether a goal holds the session is the session's state, not the flag.
-CLEARS = ["send-keys -t %99 C-u", "send-keys -t %99 -l /goal clear", "send-keys -t %99 Enter"]
+# It is typed as every line is typed into the box: emptied, pasted, then Enter on its own.
+CLEARS = ["send-keys -t %99 C-u", "load-buffer -b finalize-type-N -", "buffer: /goal clear",
+          "paste-buffer -d -b finalize-type-N -t %99 -p", "send-keys -t %99 Enter"]
 for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with --goal")):
     done = run(dry_run="", launcher_flags=flags)
+    typed = re.sub(r"finalize-type-\d+", "finalize-type-N", done.tmux_log).splitlines()
     check(f"a tmux close-out {name} clears its own goal before its worker acts",
-          done.returncode == 0 and done.tmux_log.splitlines() == CLEARS,
+          done.returncode == 0 and typed == CLEARS,
           f"rc={done.returncode} err={done.stderr!r} tmux_log={done.tmux_log!r}")
 
 # The worker types into the same pane, so a pane the clear cannot reach refuses the handoff.
@@ -1052,6 +1056,29 @@ done = run()
 check("a dry run says it would clear the goal and types nothing",
       "[dry-run] would type /goal clear into %99" in done.stdout and done.tmux_log == "",
       f"out={done.stdout!r} tmux_log={done.tmux_log!r}")
+
+# The iTerm2 transport clears it the same way, in the session the relaunch is written to: the box
+# emptied, the text bracketed as a paste, and Enter, each written on its own, so the box does not read
+# them as one paste. A uuid no session has is an AppleScript error, so a write that finds none fails.
+ITERM_UUID = "5C2E7B1A-0D4F-4E8B-9A3C-6F1D2E7B8A90"
+KEYSTROKES = ["write s text (character id 21) newline false",
+              '[200~" & "/goal clear" & (character id 27) & "[201~") newline false',
+              "write s text (character id 13) newline false"]
+done = run(panes=None, iterm=True, dry_run="")
+script = done.osascript_log
+at = [script.find(line) for line in KEYSTROKES]
+check("an iTerm2 close-out types /goal clear into its own session, keystroke by keystroke",
+      done.returncode == 0 and f'(unique id of s) is "{ITERM_UUID}"' in script and -1 < at[0] < at[1] < at[2]
+      and f'error "no iTerm2 session has unique id {ITERM_UUID}"' in script,
+      f"rc={done.returncode} err={done.stderr!r} script={script!r}")
+done = run(panes=None, iterm=True, dry_run="", osascript_status=1)
+check("a clear that cannot be written to the iTerm2 session refuses the handoff and says where it is",
+      done.returncode == REFUSED_RC and f"cannot write /goal clear to iTerm2 session {ITERM_UUID}" in done.stderr
+      and "/handoffs/" in done.stderr, f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+done = run(panes=None, iterm=True)
+check("an iTerm2 dry run says it would clear the goal and writes nothing",
+      f"[dry-run] would write /goal clear to iTerm2 session {ITERM_UUID}" in done.stdout
+      and done.osascript_log == "", f"out={done.stdout!r} script={done.osascript_log!r}")
 
 # A give-up path with no explicit guard: the detached transport reads its working
 # directory with a bare command substitution, so an unlinked cwd exits on that
@@ -2089,7 +2116,8 @@ def before_retirement(log, line):
 
 retired, done = goal_lands.result()
 check("the detached worker types the carried goal before it retires the old process",
-      retired and "paste-buffer" in done.tmux_log and before_retirement(done.stdout, "re-establishing carried goal"),
+      retired and "buffer: /goal ship the thing" in done.tmux_log
+      and before_retirement(done.stdout, "re-establishing carried goal"),
       worker_detail(done) + f" tmux_log={done.tmux_log!r}")
 
 # A goal delivery that fails is logged and handled, so the retirement after it still runs.
@@ -2160,18 +2188,20 @@ check("a retirement the worker cannot parse is refused before anything is starte
 # removes it, and that the message carries its own path.
 # ---------------------------------------------------------------------------
 
-def tmux_worker_case(pane_text, timeout="2", settings=()):
+def tmux_worker_case(pane_text, timeout="2", settings=(), goal=""):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). `pane_text` is
     what capture-pane shows, so a reset that never registers is a value, not a mode.
+    `goal` is the carried goal, "" for none.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     msgfile = os.path.join(workdir, "handoff.md")
     goalfile = os.path.join(workdir, "goal")
     with open(msgfile, "w") as handle:
         handle.write("the whole handoff")
-    open(goalfile, "w").close()
+    with open(goalfile, "w") as handle:
+        handle.write(goal)
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
@@ -2191,9 +2221,11 @@ def tmux_worker_case(pane_text, timeout="2", settings=()):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
     registered = pool.submit(tmux_worker_case, "Claude Code v1.2.3")
     never = pool.submit(tmux_worker_case, "still working on the previous turn")
+    goal_registered = pool.submit(tmux_worker_case, "Claude Code v1.2.3", goal="ship it")
+    goal_never = pool.submit(tmux_worker_case, "still working on the previous turn", goal="ship it")
 
 done, survived, log = registered.result()
 check("a reset the worker can see delivers the handoff",
@@ -2214,6 +2246,17 @@ check("and never claims the handoff was withheld",
       f"out={done.stdout!r} log={log!r}")
 check("and above all does not delete the handoff it could not confirm",
       survived, f"out={done.stdout!r}")
+
+# /goal is an immediate command, so it does not queue behind a /clear the way the handoff does: typed
+# before the reset has run, it would be set in the old context and wiped by the reset. It is typed after
+# the handoff once the reset is seen, and otherwise not at all, with the goal named for delivery by hand.
+done, _, log = goal_registered.result()
+check("a reset the worker can see has the carried goal typed after the handoff",
+      0 <= log.find("paste-buffer") < log.find("buffer: /goal ship it"), f"out={done.stdout!r} log={log!r}")
+done, _, log = goal_never.result()
+check("a reset the worker never sees has no goal typed, and the goal named to deliver by hand",
+      "/goal" not in log and "carried goal NOT delivered" in done.stdout and "/goal ship it" in done.stdout,
+      f"out={done.stdout!r} log={log!r}")
 
 # The requested model and effort are typed into the reset session before the handoff is
 # pasted, so the handoff's first turn already runs on them.

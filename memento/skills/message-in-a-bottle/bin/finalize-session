@@ -81,32 +81,32 @@ _clear_box() {
   sleep 0.3
 }
 
-# Types `/goal <the carried goal>` into a tmux target: _paste_goal <target>, with $GOALFILE and $GOALBUF
-# set. Every step is checked, since a caller that handles the failure runs this where `set -e` does not
-# reach, and the first failing step's status is returned.
-_paste_goal() {
+# Types a line into Claude Code's input box in a tmux target: _tmux_type <target> <text>. The box is
+# emptied first, the text goes in as a bracketed paste, so a newline in it does not submit it, and Enter
+# is a key of its own, so it is not read as part of the paste. Every step is checked, since a caller that
+# handles the failure runs this where `set -e` does not reach, and the first failing step's status is
+# returned.
+_tmux_type() {
   tmux send-keys -t "$1" C-u || return
   sleep 0.3
-  { printf '/goal '; cat "$GOALFILE"; } | tmux load-buffer -b "$GOALBUF" - || return
-  tmux paste-buffer -d -b "$GOALBUF" -t "$1" -p || return
+  printf '%s' "$2" | tmux load-buffer -b "finalize-type-$$" - || return
+  tmux paste-buffer -d -b "finalize-type-$$" -t "$1" -p || return
   sleep 0.5
   tmux send-keys -t "$1" Enter
 }
 
-# Writes text, and the newline that submits it, into the iTerm2 session with a unique id:
-# _iterm_write <uuid> <text>. [LAW:no-silent-failure] A uuid no session has is an AppleScript error, so
-# osascript exits nonzero, where a script that only looked for the session would exit 0 having written
-# nothing. Only \ and " are escaped for AppleScript, so no text reaches it as code.
-_iterm_write() {
-  local text=${2//\\/\\\\}
-  text=${text//\"/\\\"}
+# Runs AppleScript statements against the iTerm2 session with a unique id, which they name `s`:
+# _iterm_tell <uuid> <statements>. [LAW:no-silent-failure] A uuid no session has is an AppleScript error,
+# so osascript exits nonzero, where a script that only looked for the session would exit 0 having done
+# nothing.
+_iterm_tell() {
   osascript <<OSA
 tell application "iTerm2"
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
         if (unique id of s) is "$1" then
-          write s text "$text"
+          $2
           return
         end if
       end repeat
@@ -115,6 +115,29 @@ tell application "iTerm2"
   error "no iTerm2 session has unique id $1"
 end tell
 OSA
+}
+
+# Prints text as an AppleScript string literal. Only \ and " are escaped, so no text reaches it as code.
+_applescript_string() {
+  local text=${1//\\/\\\\}
+  printf '"%s"' "${text//\"/\\\"}"
+}
+
+# Writes a command line, and the newline that runs it, to the shell in an iTerm2 session:
+# _iterm_shell_line <uuid> <line>.
+_iterm_shell_line() {
+  _iterm_tell "$1" "write s text $(_applescript_string "$2")"
+}
+
+# Types a line into Claude Code's input box in an iTerm2 session: _iterm_type <uuid> <text>, by the
+# keystrokes _tmux_type sends: C-u (character id 21), the text between the bracketed-paste markers, and
+# a carriage return (character id 13) for Enter, each written on its own.
+_iterm_type() {
+  _iterm_tell "$1" "write s text (character id 21) newline false
+          delay 0.3
+          write s text ((character id 27) & \"[200~\" & $(_applescript_string "$2") & (character id 27) & \"[201~\") newline false
+          delay 0.5
+          write s text (character id 13) newline false"
 }
 
 # Prints the process table the ancestry walk reads, one row per process: `pid ppid etime exe`, where exe
@@ -580,19 +603,8 @@ case "$MODE" in
     else
       SENT_FROM="Sent from a Claude Code session whose id was not in the environment (CLAUDE_CODE_SESSION_ID unset or empty)."
     fi
-    # [LAW:one-source-of-truth] A carried goal is named here too. Every transport also sets it with /goal,
-    # but a turn is told of a goal set during it only at a later tool call, and may close out before one;
-    # this message is the one copy the successor's first turn always holds. Quoted as one shell word, so
-    # the line can be run as written whatever the condition holds.
-    CARRIED=""
-    if [[ -n "$GOAL" ]]; then
-      QUOTED_GOAL=\'${GOAL//\'/\'\\\'\'}\'
-      CARRIED="This session carries the goal: $GOAL
-Unless it already holds, pass it on when you close out: finalize-session --goal $QUOTED_GOAL
-"
-    fi
-    MESSAGE=$(printf '%s\n%s\n%s\n\n%s\n%sThis handoff verbatim on disk: %s' \
-      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$SENT_FROM" "$CARRIED" "$MSGFILE")
+    MESSAGE=$(printf '%s\n%s\n%s\n\n%s\nThis handoff verbatim on disk: %s' \
+      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$SENT_FROM" "$MSGFILE")
 
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""
@@ -707,9 +719,7 @@ Unless it already holds, pass it on when you close out: finalize-session --goal 
       # holds the session is the session's state, not the --goal flag, and last, after every step that can
       # refuse, so a refused close-out keeps the goal that keeps it working. A failure refuses: the worker
       # types into this pane the same way.
-      { tmux send-keys -t "$TARGET" C-u && sleep 0.3 \
-          && tmux send-keys -t "$TARGET" -l "/goal clear" && sleep 0.5 \
-          && tmux send-keys -t "$TARGET" Enter; } \
+      _tmux_type "$TARGET" "/goal clear" \
         || _refuse "tmux transport: cannot type /goal clear into pane $TARGET, which the handoff is typed into too"
       nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
@@ -735,9 +745,8 @@ Unless it already holds, pass it on when you close out: finalize-session --goal 
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      # This session's own goal ends here, last, as the tmux transport's does above. The leading C-u
-      # empties the input box, so the command is not appended to a draft and sent as a prompt.
-      _iterm_write "$UUID" $'\025/goal clear' \
+      # This session's own goal ends here, last, as the tmux transport's does above.
+      _iterm_type "$UUID" "/goal clear" \
         || _refuse "iTerm2 transport: cannot write /goal clear to iTerm2 session $UUID, which the relaunch is written to too"
       nohup "$SELF" --iterm-worker "$UUID" "$CLAUDE_PID" "$CLAUDE_IDENT" "$MSGFILE" "$GOALFILE" "$RELAUNCH" \
         "$CONFIG_DIR" "$SUCCESSOR_ID" </dev/null >>"$LOGFILE" 2>&1 &
@@ -828,7 +837,6 @@ Nothing on this machine to deliver the close-out into."
     shift 3
 
     BUFFER="finalize-$$"
-    GOALBUF="finalize-goal-$$"
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
@@ -849,9 +857,11 @@ Nothing on this machine to deliver the close-out into."
     # (the /bin/bash on macOS) has no floats.
     POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
     POLLS=0
+    RESET_SEEN=""
     OBSERVED="WARNING: not observed within ${RESET_REGISTER_TIMEOUT_SECONDS}s"
     while :; do
       if tmux capture-pane -t "$TARGET" -p | grep -qE "$REGISTERED_RE"; then
+        RESET_SEEN=1
         OBSERVED="registered after $(awk "BEGIN{printf \"%.1f\", $POLLS * $RESET_REGISTER_POLL_SECONDS}")s"
         break
       fi
@@ -860,8 +870,9 @@ Nothing on this machine to deliver the close-out into."
       POLLS=$((POLLS + 1))
     done
 
-    # The handoff is sent whether or not the reset was seen; the poll result only goes into the log. tmux
-    # type-ahead keeps input in order, so the handoff lands after the queued reset either way.
+    # The handoff is sent whether or not the reset was seen; the poll result goes into the log, and decides
+    # only the carried goal below. tmux type-ahead keeps input in order, so the handoff lands after the
+    # queued reset either way.
     log "/clear $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
     # The requested /model and /effort go in before the handoff, while the reset session's box is idle, so the
@@ -882,13 +893,19 @@ Nothing on this machine to deliver the close-out into."
     tmux send-keys -t "$TARGET" Enter
 
     # The goal is typed once the handoff's turn is under way, where /goal is an immediate command: its Stop
-    # hook holds from then on, and the turn is told at a later tool call. /clear wiped it. The handoff
-    # names it too, for a turn that closes out before that tool call.
+    # hook holds from then on, and the turn is told at a later tool call. /clear wiped it.
+    # [LAW:no-ambient-temporal-coupling] Unlike the handoff, an immediate command does not wait its turn
+    # behind a queued /clear: typed before the reset has run, it sets the goal in the old context and the
+    # reset then wipes it. So it is typed only once the reset has been seen.
     if [[ -s "$GOALFILE" ]]; then
-      log "re-establishing carried goal"
-      sleep 1
-      _paste_goal "$TARGET" \
-        || log "ERROR: could not re-establish the carried goal in $TARGET; deliver it by hand: /goal $(cat "$GOALFILE")"
+      if [[ -z "$RESET_SEEN" ]]; then
+        log "ERROR: the reset was not seen, so a /goal typed now could run before it and be wiped by it; carried goal NOT delivered. Deliver it by hand once $TARGET is reset: /goal $(cat "$GOALFILE")"
+      else
+        log "re-establishing carried goal"
+        sleep 1
+        _tmux_type "$TARGET" "/goal $(cat "$GOALFILE")" \
+          || log "ERROR: could not re-establish the carried goal in $TARGET; deliver it by hand: /goal $(cat "$GOALFILE")"
+      fi
     fi
     ;;
 
@@ -919,7 +936,7 @@ Nothing on this machine to deliver the close-out into."
     sleep 2
 
     # The shell reads the message from MSGFILE, so no message text enters argv or AppleScript.
-    if _iterm_write "$UUID" "$RELAUNCH"; then
+    if _iterm_shell_line "$UUID" "$RELAUNCH"; then
       log "relaunch command sent to iTerm2 session $UUID"
       # Re-establishes the carried goal, which the relaunch wiped, once the handoff's turn is under way,
       # where /goal is an immediate command (see the tmux worker). Sent only when the goal file is non-empty.
@@ -927,7 +944,7 @@ Nothing on this machine to deliver the close-out into."
         log "waiting for relaunched claude $SUCCESSOR_ID to take the message (up to ${CLAUDE_READY_TIMEOUT_SECONDS}s)"
         if ! _await_prompt "$CONFIG_DIR" "$SUCCESSOR_ID"; then
           log "ERROR: relaunched claude in session $UUID did not take the message: $WHY_NOT; carried goal NOT delivered. Deliver it manually once the session is up: /goal $(cat "$GOALFILE")"
-        elif _iterm_write "$UUID" "/goal $(cat "$GOALFILE")"; then
+        elif _iterm_type "$UUID" "/goal $(cat "$GOALFILE")"; then
           log "claude took the message; carried goal re-established in iTerm2 session $UUID"
         else
           log "ERROR: claude took the message, but the carried goal could not be written to iTerm2 session $UUID; deliver it by hand: /goal $(cat "$GOALFILE")"
@@ -970,7 +987,6 @@ Nothing on this machine to deliver the close-out into."
       exit 2
     fi
 
-    GOALBUF="finalize-goal-$$"
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
     # The verdict the launcher reports: an outcome line, `taken` or `refused`, then the reason. Closing
@@ -1022,7 +1038,7 @@ Nothing on this machine to deliver the close-out into."
     # already handed off. Its failure is logged, not fatal, so the retirement still runs.
     if [[ -s "$GOALFILE" ]]; then
       log "re-establishing carried goal"
-      _paste_goal "$SESSION" \
+      _tmux_type "$SESSION" "/goal $(cat "$GOALFILE")" \
         || log "ERROR: could not re-establish the carried goal in $SESSION; deliver it by hand: /goal $(cat "$GOALFILE")"
     fi
 

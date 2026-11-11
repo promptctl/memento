@@ -38,9 +38,9 @@ With no summary recorded the launcher exits 2 and writes no handoff. Its stderr 
 
 If a `/goal <condition>` is active in this session, **the close-out silently kills it.** Every transport resets the session — tmux and remote-control send `/clear`, iTerm2 and the detached transport kill claude and relaunch a fresh process — and each of those wipes the session-scoped goal. The next agent wakes with no goal, and the autonomous run you set up just *stops* — unattended, with nobody watching to notice it stopped. That silent halt is the exact failure this guards against.
 
-So when a goal is in force, pass it: `--goal '<the exact condition>'` before your message. The launcher re-issues `/goal <condition>` into the next session once its first turn is under way, and names the goal in the handoff text too, so the next agent carries it on even if it closes out before that `/goal` reaches it. On tmux and iTerm2 it also clears this session's own goal as it hands off, so the goal cannot keep this session working after the handoff.
+So when a goal is in force, pass it: `--goal '<the exact condition>'` before your message. The launcher re-issues `/goal <condition>` into the reset session, so the next agent picks up the same condition and keeps grinding toward it.
 
-- The condition is a **value you already hold** — it is whatever was last set with `/goal` this session (you set it, or the user did), or the goal your own handoff said it carries. Reproduce it verbatim, including any bound clause like `... or stop after 20 turns`.
+- The condition is a **value you already hold** — it is whatever was last set with `/goal` this session (you set it, or the user did). Reproduce it verbatim, including any bound clause like `... or stop after 20 turns`.
 - **No goal active → omit `--goal`.** Nothing changes; this is not a field you invent, and an empty `--goal` is not a thing to pass.
 - Do not talk yourself out of it. The rationalization will be *"the next agent will infer the goal from my message"* — it will not. A goal is a harness condition re-checked after every turn, not a sentence in a prompt; if you do not re-issue it, it does not exist in the next session. Carrying it is the difference between an autonomous run that continues and one that quietly dies at the handoff.
 
