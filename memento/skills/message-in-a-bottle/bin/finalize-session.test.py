@@ -2502,7 +2502,7 @@ os.waitpid(pid, 0)
 
 
 def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="foreground", timeout="2",
-                     settings=(), goal=""):
+                     settings=(), goal="", fail=""):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). The pane shows the
@@ -2513,11 +2513,12 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
     is registered in the old session when `registered`. `on_type` is what that claude
     does with what it is typed, given its entry's path and its pid, None for a /clear
     that never runs, so how the reset lands is a value, not a mode. `goal` is the
-    carried goal, "" for none.
+    carried goal, "" for none, and `fail` the tmux subcommand that fails, "" for none.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     if claude == "background":
-        reaper = subprocess.Popen(["sleep", "600"])
+        # Its own session, so it holds no terminal, whatever terminal runs this suite.
+        reaper = subprocess.Popen(["sleep", "600"], start_new_session=True)
         pid = reaper.pid
     else:
         reaper = subprocess.Popen([sys.executable, "-I", "-c", FOREGROUND_HOLDER], stdin=subprocess.DEVNULL,
@@ -2543,6 +2544,7 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
         "FIXTURE_TMUX_LOG": tmuxlog,
         "FIXTURE_TMUX_PANE_TEXT": " ▐▛███▜▌   Claude Code v2.1.299",
         "MEMENTO_RESET_TIMEOUT_SECONDS": timeout,
+        "FIXTURE_TMUX_FAIL": fail,
     }
     if on_type is not None:
         env["FIXTURE_TMUX_ON_TYPE"] = on_type(entry, pid)
@@ -2558,8 +2560,10 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
+        # A stand-in whose reaper has exited is reaped, and its pid may be reissued, so it is not signaled.
+        if reaper.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
         reaper.wait()
         if reaper.stdout:
             reaper.stdout.close()
@@ -2573,7 +2577,8 @@ def submitted(log, text):
     return at >= 0 and "send-keys -t %1 Enter" in log[at + len(marker):].split("buffer: ", 1)[0]
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=14) as pool:
+with concurrent.futures.ThreadPoolExecutor(max_workers=15) as pool:
+    paste_fails = pool.submit(tmux_worker_case, goal="ship it", fail="paste-buffer")
     registered = pool.submit(tmux_worker_case)
     never = pool.submit(tmux_worker_case, on_type=None)
     goal_registered = pool.submit(tmux_worker_case, goal="ship it")
@@ -2693,6 +2698,11 @@ check("a claude that exits once the handoff is submitted has no goal typed, and 
       and "was submitted before then" in done.stdout and NOT_SUBMITTED not in done.stdout
       and "carried goal NOT delivered: /goal ship it" in done.stdout,
       f"rc={done.returncode} out={done.stdout!r} log={log!r}")
+done, survived, log = paste_fails.result()
+check("a worker whose tmux paste fails stops, saying the handoff was not submitted and where it is preserved",
+      done.returncode != 0 and "the worker stopped" in done.stdout and NOT_SUBMITTED in done.stdout
+      and "carried goal NOT delivered: /goal ship it" in done.stdout and survived,
+      f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} log={log!r}")
 
 # The launcher's half: the payload lands in its durable home and names itself.
 handoff_home = tempfile.mkdtemp(prefix="finalize-home.")

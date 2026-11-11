@@ -885,12 +885,16 @@ Nothing on this machine to deliver the close-out into."
     SESSION_ID="$7"
     shift 7
 
-    trap 'rm -f "$GOALFILE"' EXIT
+    # [LAW:single-enforcer] Every way this worker stops short, a gate stop or a tmux step that fails under
+    # `set -e`, ends here, which says what was left undelivered.
+    HANDOFF="the handoff was NOT submitted; it is preserved at $MSGFILE"
+    trap 'status=$?
+      [[ $status -eq 0 ]] || log "the worker stopped (exit $status): $HANDOFF$([[ ! -s "$GOALFILE" ]] || printf "; carried goal NOT delivered: /goal %s" "$(cat "$GOALFILE")")"
+      rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
-    HANDOFF="the handoff was NOT submitted; it is preserved at $MSGFILE"
     _stop_typing() { # <why>
-      log "ERROR: $1, so nothing more is typed into $TARGET, where a shell would run it as commands; $HANDOFF$([[ ! -s "$GOALFILE" ]] || printf '; carried goal NOT delivered: /goal %s' "$(cat "$GOALFILE")")"
+      log "ERROR: $1, so nothing more is typed into $TARGET, where a shell would run it as commands"
       exit 1
     }
 
@@ -904,7 +908,7 @@ Nothing on this machine to deliver the close-out into."
     # a subshell, whose exit ends only that subshell.
     _send() { # <command> [<argument>...]
       local state
-      state=$(ps -o stat= -p "$CLAUDE_PID") || state=""
+      read -r state < <(ps -o stat= -p "$CLAUDE_PID") || state=""
       if ! _still_captured_process "$CLAUDE_PID" "$CLAUDE_IDENT"; then
         _stop_typing "claude process $CLAUDE_PID has exited (its pid holds ${IDENT_NOW:-nothing} now)"
       elif [[ "$state" != *+* ]]; then
