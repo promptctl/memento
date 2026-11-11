@@ -431,7 +431,8 @@ The handoff was NOT delivered. It is preserved at: $RECORDED}" >&2
 # mktemp given none, or only -t, ignores $TMPDIR for the per-user temp directory.
 _mktemp_or_exit() {
   local __var="$1" purpose="$2" dir="${TMPDIR:-/tmp}" path
-  path=$(mktemp "${dir%/}/finalize-$purpose.XXXXXX") \
+  dir="${dir%/}"
+  path=$(mktemp "$dir/finalize-$purpose.XXXXXX") \
     || _refuse "cannot create the $purpose tempfile in $dir."
   printf -v "$__var" '%s' "$path"
 }

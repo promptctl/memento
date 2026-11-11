@@ -1016,7 +1016,8 @@ check("-- hands a lone two-dash word through to the handoff",
 done, bodies = argv_case("a real handoff", path_prefix=NO_TMPDIR_BIN)
 check("a tempfile it cannot make is refused as the launcher, not as mktemp, naming $TMPDIR",
       done.returncode == REFUSED_RC and "finalize-session:" in done.stderr
-      and f"tempfile in {os.path.join(HOME, 'finalize-argv.')}" in done.stderr and bodies == [],
+      and f"tempfile in {os.path.join(tempfile.gettempdir(), 'finalize-argv.')}" in done.stderr
+      and bodies == [],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # A refusal while creating the log tempfile happens after the handoff is written, so

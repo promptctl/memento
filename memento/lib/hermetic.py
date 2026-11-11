@@ -19,9 +19,22 @@ def home():
     running suite and removed at exit, as HOME and TMPDIR, makes it the temp directory of every
     tempfile call that names none, and returns its path."""
     scratch = tempfile.mkdtemp(prefix=os.path.basename(sys.argv[0]) + ".")
-    atexit.register(shutil.rmtree, scratch)
+    atexit.register(_remove, scratch)
     path = os.environ["PATH"]
     os.environ.clear()
     os.environ.update(PATH=path, HOME=scratch, TMPDIR=scratch)
     tempfile.tempdir = scratch
     return scratch
+
+
+def _remove(scratch):
+    """Removes the scratch directory, or fails the suite naming it: an exception in an exit handler
+    leaves the exit status as it was. Registered as the suite starts, it runs after every exit handler
+    the suite registers."""
+    try:
+        shutil.rmtree(scratch)
+    except OSError as error:
+        print(f"hermetic: cannot remove the scratch directory {scratch}: {error}", file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
