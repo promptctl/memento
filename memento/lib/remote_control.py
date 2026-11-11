@@ -292,13 +292,18 @@ class Session:
             raise unread(f"{where} answered with no JSON: {text[:400]!r}") from None
 
     def post(self, event):
-        """Appends an event to the log and returns the sequence number it was given. Transient when the
-        server took it without saying where."""
+        """Appends an event to the log and returns the sequence number it was given, and whether the log
+        already held its uuid, which the server then drops and answers with the first copy's number
+        (2.1.299). Transient when the server took it without saying where."""
         answer = self.request("POST", "/events", {"events": [event]})
         try:
-            return int(answer["results"][0]["sequence_num"])
+            result = answer["results"][0]
+            seq, duplicate = int(result["sequence_num"]), result["duplicate"]
         except (KeyError, IndexError, TypeError, ValueError):
-            raise Transient(f"the log took the prompt but returned no sequence number: {answer!r}") from None
+            duplicate = None
+        if not isinstance(duplicate, bool):
+            raise Transient(f"the log took the event but did not say where: {answer!r}")
+        return seq, duplicate
 
     def head(self):
         """The sequence number of the last event in the log."""
@@ -346,7 +351,6 @@ class Log:
         self.asking_ended = False
         self.asking_stamps = []  # what each stamp read before the asking turn's `result` names
         self.last_reset = 0  # sequence numbers start above 0
-        self.prompts = {}  # a posted prompt's uuid -> its sequence number
         self.unreachable = None  # why the last read got no answer, or None when it got one
 
     def read(self):
@@ -371,7 +375,6 @@ class Log:
         kind, stamp = payload.get("type"), aim(payload)
         if kind == "user":
             self.idle = False
-            self.prompts.setdefault(payload.get("uuid"), seq)
         elif kind == "result":
             self.idle = self.asking_ended = True
         elif kind == "conversation_reset":
@@ -468,33 +471,25 @@ def await_state(log, settled, timeout, note, clock=time.monotonic, sleep=time.sl
     return retry(lambda: read(log, note) or settled(log) or None, timeout, clock, sleep) is not None
 
 
-def post(session, log, text, timeout, note):
-    """Posts a prompt once and returns its sequence number. A post whose answer was lost may still have
-    landed, and a second /clear behind a handoff would wipe it, so a prompt is never sent again: the log
-    settles it by the prompt's uuid within `timeout`, and a prompt the log never shows is a refusal."""
-    event = user_event(session.id, text)
+def posted(session, event, what, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """Posts `event`, which notes name as `what`, and returns its sequence number. One whose answer was
+    lost is sent again as the same event until one is answered within `timeout`, and the server keeps one
+    copy: it drops a repeated uuid, answering with the first copy's number (2.1.299). Every copy goes out
+    before this returns, so before anything posted after it, and a copy the server takes late is that
+    same uuid.
+    [LAW:one-type-per-behavior] Prompts and interrupts are posted alike."""
     try:
-        return session.post(event)
+        seq, duplicate = retried(lambda: session.post(event), timeout, note, f"posting {what}", clock, sleep)
     except Transient as error:
-        note(f"posting got no clear answer, reading the log for the prompt: {error}")
-        unanswered = error
-    posted = event["payload"]["uuid"]
-    if await_state(log, lambda log: posted in log.prompts, timeout, note):
-        return log.prompts[posted]
-    raise Refused(f"posting got no clear answer ({unanswered}), and the log did not show the prompt "
-                  f"within {timeout:g}s")
+        raise Refused(f"no answer to {what} within {timeout:g}s: {error}") from None
+    if duplicate:
+        note(f"the log already held {what}, at sequence {seq}: a copy whose answer was lost had landed")
+    return seq
 
 
 def interrupt(session, prompts, timeout, note, clock=time.monotonic, sleep=time.sleep):
-    """Posts an interrupt aimed at `prompts` and returns its sequence number. One whose answer was lost is
-    sent again as the same event until one is answered within `timeout`: it names one turn that is
-    already stopping, so a second copy stops nothing new, and the server drops a repeated uuid anyway.
-    A prompt is never sent again (`post`), since a repeated /clear could land behind the handoff."""
-    event = interrupt_event(prompts)
-    try:
-        return retried(lambda: session.post(event), timeout, note, "posting the interrupt", clock, sleep)
-    except Transient as error:
-        raise Refused(f"no answer to the interrupt within {timeout:g}s: {error}") from None
+    """Posts an interrupt aimed at `prompts` and returns its sequence number (`posted`)."""
+    return posted(session, interrupt_event(prompts), "the interrupt", timeout, note, clock, sleep)
 
 
 def stopping_asking_turn(session, log, reset_timeout, note):
@@ -657,7 +652,7 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
 
     def send(text, what):
         try:
-            seq = post(session, log, text, reset_timeout, note)
+            seq = posted(session, user_event(session.id, text), what, reset_timeout, note)
         except Refused as error:
             raise Withheld(what, f"could not post it: {error}") from None
         note(f"posted {what} (log sequence {seq})")

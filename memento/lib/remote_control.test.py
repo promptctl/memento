@@ -387,7 +387,8 @@ check("and a stamp is only a turn's top-level assistant event",
 
 
 class Interrupts:
-    """A session whose interrupts get the answer `answer(event)` gives: a sequence number, or it raises."""
+    """A session whose interrupts get the answer `answer(event)` gives: a sequence number and whether the
+    log already held it, or it raises."""
     def __init__(self, log, answer):
         self.log, self.id, self.answer, self.sent = log, log.id, answer, []
 
@@ -432,6 +433,8 @@ withheld, notes = run_deliver(interrupts, head)
 check("an interrupt whose answer was lost is sent again as the same event, which the log holds once",
       withheld is None and len(interrupts.sent) == 2 and len(set(interrupts.sent)) == 1
       and session.interrupts == [(("asking-turn",), ("asking-turn",))], (interrupts.sent, session.interrupts))
+check("and the worker says the first copy had landed",
+      any(note.startswith("the log already held the interrupt") for note in notes), notes)
 
 session, head = fresh(deaf=True)
 withheld, _ = run_deliver(session, head, goal="the tests pass", idle_timeout=1)
@@ -512,21 +515,33 @@ class Unanswered:
         raise Transient("POST got no answer: timed out")
 
 
+# A /clear the log took twice could land behind the handoff and wipe it, so a re-sent post must be the
+# same event, which the log keeps once.
 session, head = fresh()
 session.end_turn()
-unanswered = Unanswered(session, lands=True)
+unanswered = Unanswered(session, lands=True, failing=1)
 withheld, notes = run_deliver(unanswered, head)
-check("a post whose answer was lost but which landed is found in the log by its uuid, and the handoff goes on",
-      withheld is None and session.prompts() == ["/clear", "the handoff"] and len(unanswered.sent) == 2,
+check("a post whose answer was lost but which landed is sent again as the same event, which the log holds once",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and len(unanswered.sent) == 3 and unanswered.sent[0] == unanswered.sent[1],
       (withheld, notes, unanswered.sent))
-# A /clear sent again could land after the handoff and wipe it.
+check("and the worker says the first copy had landed",
+      any(note.startswith("the log already held the /clear") for note in notes), notes)
 session, head = fresh()
 session.end_turn()
 unanswered = Unanswered(session, lands=False, failing=1)
+withheld, notes = run_deliver(unanswered, head)
+check("one whose first copy did not land is sent again as the same event, and lands once",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and len(unanswered.sent) == 3 and unanswered.sent[0] == unanswered.sent[1]
+      and not any(note.startswith("the log already held") for note in notes), (withheld, notes, unanswered.sent))
+session, head = fresh()
+session.end_turn()
+unanswered = Unanswered(session, lands=False)
 withheld, notes = run_deliver(unanswered, head, reset_timeout=1)
-check("one that got no clear answer and did not land is never sent again, and is withheld saying so",
-      session.prompts() == [] and len(unanswered.sent) == 1
-      and withheld[0] == "the /clear" and "did not show the prompt within 1s" in withheld[1]
+check("one never answered within the timeout is withheld saying so, with the last failure",
+      session.prompts() == [] and len(set(unanswered.sent)) == 1 and len(unanswered.sent) > 1
+      and withheld[0] == "the /clear" and "no answer to the /clear within 1s" in withheld[1]
       and "timed out" in withheld[1], (withheld, unanswered.sent))
 session, head = fresh(deaf=True)
 withheld, _ = run_deliver(Recording(session, failing=range(1, 1000)), head, idle_timeout=1)
@@ -664,7 +679,7 @@ head = served.head()
 check("the head is the newest event's sequence, read as one event in descending order",
       head == fake_session_server.LOGS["cse_served01"].head() - 2
       and "sort_order=desc&limit=1" in fake_session_server.REQUESTS["cse_served01"][-1][1])
-seq = served.post(remote_control.user_event(served.id, "/clear"))
+seq, duplicate = served.post(remote_control.user_event(served.id, "/clear"))
 method, path, auth, platform = fake_session_server.REQUESTS["cse_served01"][-1]
 check("a post goes to the session's events with the login as bearer",
       (method, path, auth) == ("POST", "/v1/code/sessions/cse_served01/events", f"Bearer {fake_session_server.TOKEN}"),
@@ -672,7 +687,17 @@ check("a post goes to the session's events with the login as bearer",
 check("and declares Claude Code's CLI platform, without which the session runs no slash command",
       platform == "claude_code_cli", platform)
 check("and returns the sequence number the log gave it",
-      fake_session_server.LOGS["cse_served01"].prompts() == ["/clear"] and seq > head, seq)
+      fake_session_server.LOGS["cse_served01"].prompts() == ["/clear"] and seq > head and duplicate is False,
+      (seq, duplicate))
+dropping = remote("cse_drops01")
+event = remote_control.user_event(dropping.id, "/clear")
+error = raised(lambda: dropping.post(event))
+check("a post whose answer is lost is a passing failure", isinstance(error, Transient), error)
+check("and the same event posted again is answered as a duplicate, with the first copy's sequence number",
+      dropping.post(event) == (next(int(taken["sequence_num"]) for taken in fake_session_server.LOGS["cse_drops01"].events
+                                    if taken["payload"].get("uuid") == event["payload"]["uuid"]), True)
+      and fake_session_server.LOGS["cse_drops01"].prompts() == ["/clear"],
+      fake_session_server.LOGS["cse_drops01"].events)
 log = Log(served, 0)
 log.read()
 check("a read over HTTP takes in every page to the last",
@@ -707,6 +732,26 @@ check("a 2xx that is not JSON is a refusal naming what came", type(error) is Ref
 error = raised(lambda: remote("cse_garbled02").post(remote_control.user_event("cse_garbled02", "/clear")))
 check("but for a post it is a passing failure, since the server took the prompt",
       type(error) is Transient and "<html>" in str(error), error)
+
+
+class Answering(remote_control.Session):
+    """A session whose every request is answered `answer`."""
+    def __init__(self, answer):
+        super().__init__(f"{BASE}/v1/code/sessions/cse_answering", login("tok"))
+        self.answer = answer
+
+    def request(self, method, path, body=None):
+        return self.answer
+
+
+event = remote_control.user_event("cse_answering", "/clear")
+check("a post's answer is its sequence number and whether the log already held it",
+      Answering({"results": [{"sequence_num": "5", "duplicate": True}]}).post(event) == (5, True))
+for answer in ({"results": []}, {"results": [{"duplicate": False}]}, {"results": [{"sequence_num": "5"}]},
+               {"results": [{"sequence_num": "5", "duplicate": "false"}]}):
+    error = raised(lambda: Answering(answer).post(event))
+    check(f"one that does not say both is a passing failure, since the server took it: {answer}",
+          isinstance(error, Transient) and "did not say where" in str(error), error)
 error = raised(remote("cse_moved01").head)
 check("a redirect is refused, so the login is never sent on to where it points",
       type(error) is Refused and "HTTP 302" in str(error) and "cse_elsewhere" not in fake_session_server.REQUESTS,
