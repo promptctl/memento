@@ -16,6 +16,7 @@ Run: python3 finalize-session.test.py
 """
 
 import concurrent.futures
+import http.server
 import json
 import os
 import shlex
@@ -184,7 +185,9 @@ case " ${NEST_CLAUDE_AT:-} " in
     export NEST_CLAUDE_AT
     [ -n "${NEST_RECORD_CLAUDE:-}" ] && printf '%s' "$$" > "$NEST_RECORD_CLAUDE"
     [ -n "${NEST_EXPORT_CLAUDE_PID:-}" ] && export CLAUDE_PID=$$
-    exec "$NEST_CLAUDE_BIN" "$self" "$depth" "$@" ;;
+    # $NEST_CLAUDE_ARGV0 is the command line it shows, as a claude `claude remote-control` spawned
+    # shows its session's URL. The kernel names the executable from the file, so the walk is unmoved.
+    exec -a "${NEST_CLAUDE_ARGV0:-$NEST_CLAUDE_BIN}" "$NEST_CLAUDE_BIN" "$self" "$depth" "$@" ;;
 esac
 if [ "$depth" -gt 0 ]; then
   if [ "${NEST_REHOST_AT:-}" = "$depth" ]; then
@@ -346,6 +349,77 @@ CLAUDE_BIN, VERSIONED_CLAUDE_BIN, WRAPPED_CLAUDE_BIN, NODE_BIN = (
 TMUX_SERVER_BIN, WRAPPED_TMUX_BIN = exe("tmux"), exe(".tmux-wrapped")
 # Not a claude: a name only one dot short of a version, and a shell.
 NOT_CLAUDE_BIN, ZSH_BIN = exe("2.1"), exe("zsh")
+
+# A Remote Control session's login and session server. `security` answers the keychain read with a
+# login, so the poster finds one on macOS, and the same login is written as .credentials.json where it
+# looks elsewhere. The session server is a fake on localhost holding each session's log as a running
+# session would write it: the asking turn ends with a `result` once its log head has been read, a /clear
+# brings a conversation_reset and a `result`, and any other prompt a `result`. The session id chooses
+# where that stops, so each case differs only in the id it hands the launcher:
+#   cse_resets...   nothing stops
+#   cse_stalls...   a /clear brings no reset
+#   cse_busy...     the asking turn never ends
+#   cse_refuses...  every request is refused with 403
+KEYCHAIN_DIR = os.path.join(FIXTURES, "keychain")
+os.mkdir(KEYCHAIN_DIR)
+LOGIN = '{"claudeAiOauth": {"accessToken": "fixture-login"}}'
+install(KEYCHAIN_DIR, "security", f"#!/bin/bash\nprintf '%s' '{LOGIN}'\n")
+# Per session: the requests it received, as (method, prompt or path, Authorization), and its log.
+SESSION_SERVER_LOG = {}
+SESSION_LOGS = {}
+
+
+class SessionServer(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def answer(self, status, body):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def session(self):
+        return self.path.split("/")[4].split("?")[0]
+
+    def append(self, session, *kinds):
+        events = SESSION_LOGS.setdefault(session, [{"sequence_num": "10", "payload": {"type": "assistant"}}])
+        for kind in kinds:
+            events.append({"sequence_num": str(int(events[-1]["sequence_num"]) + 1), "payload": {"type": kind}})
+        return int(events[-1]["sequence_num"])
+
+    def do_POST(self):
+        prompt = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["events"][0]["payload"]["message"]["content"]
+        session = self.session()
+        SESSION_SERVER_LOG.setdefault(session, []).append(("POST", prompt, self.headers.get("Authorization")))
+        if session.startswith("cse_refuses"):
+            return self.answer(403, {"error": {"type": "permission_error", "message": "fixture refuses"}})
+        seq = self.append(session, "user")
+        if prompt == "/clear":
+            self.append(session, *(() if session.startswith("cse_stalls") else ("conversation_reset", "result")))
+        else:
+            self.append(session, "assistant", "result")
+        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq), "duplicate": False}]})
+
+    def do_GET(self):
+        session = self.session()
+        SESSION_SERVER_LOG.setdefault(session, []).append(("GET", self.path, self.headers.get("Authorization")))
+        if session.startswith("cse_refuses"):
+            return self.answer(403, {"error": {"type": "permission_error", "message": "fixture refuses"}})
+        self.append(session)
+        events = SESSION_LOGS[session]
+        if "sort_order=desc" in self.path:
+            head = events[-1]
+            if not session.startswith("cse_busy"):
+                self.append(session, "result")
+            return self.answer(200, {"data": [head]})
+        after = int(self.path.rpartition("cursor=")[2])
+        self.answer(200, {"data": [e for e in events if int(e["sequence_num"]) > after]})
+
+
+SESSION_SERVER = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SessionServer)
+threading.Thread(target=SESSION_SERVER.serve_forever, daemon=True).start()
+
 
 SESSION_ID = "6a1f9e2c-3b7d-4e8a-9c0f-5d2b1a7e3c94"
 # A session id as the launcher mints one for a successor: a lowercase UUID4.
@@ -531,6 +605,19 @@ def settle_detached(done, workdir, tmux_state):
         pass
 
 
+def settle_remote(done, session):
+    """After a real remote-control run: the remote worker's log, read once the worker has exited, so the
+    case sees every post it made. The worker is known by the session it posts to, which each case names
+    uniquely: its files are mktemp's, which on macOS sit outside the case's TMPDIR."""
+    def worker_running():
+        rows = subprocess.run(["/bin/ps", "-eo", "args="], capture_output=True, text=True).stdout
+        return any(f"--remote-worker {session} " in row for row in rows.split("\n"))
+
+    wait_for(lambda: not worker_running(), 30)
+    logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
+    done.worker_log = open(logged).read() if logged and os.path.exists(logged) else ""
+
+
 def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         rehost_at=None, tmux_pane=None, sleep=None, mute_identity=False,
         message="handoff", handoff_dir=None, dry_run="1",
@@ -539,7 +626,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
-        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False):
+        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
+        bridge=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
@@ -562,6 +650,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     `config_unset` leaves the session's unset, so its config is $HOME/.claude under a
     HOME of the case's own. `kill_launcher_tree` kills the launcher and everything
     below it once the successor exists, as Claude Code kills a stopped Bash call.
+
+    `bridge` is a Remote Control session id: the session gets the environment Claude Code gives one
+    `claude remote-control` spawned, its claude shows the command line naming that session, and the login
+    and session server fixtures stand in for the keychain and the server.
+    With the dry run off, a remote worker the launcher starts is waited out before the case ends, and
+    `done.worker_log` is its log.
     """
     workdir = tempfile.mkdtemp(prefix="finalize-case.")
     pidfile = os.path.join(workdir, "root.pid")
@@ -615,6 +709,16 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                    MEMENTO_READY_TIMEOUT_SECONDS=str(READY_TIMEOUT))
     if server_config_dir is not None:
         env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
+    if bridge is not None:
+        env["PATH"] = KEYCHAIN_DIR + ":" + env["PATH"]
+        url = f"https://api.anthropic.com/v1/code/sessions/{bridge}"
+        env.update(CLAUDE_CODE_ENVIRONMENT_KIND="bridge",
+                   NEST_CLAUDE_ARGV0=f"claude --print --sdk-url {url} --session-id {bridge} --resume={url}",
+                   MEMENTO_REMOTE_API_URL=f"http://127.0.0.1:{SESSION_SERVER.server_address[1]}",
+                   MEMENTO_REMOTE_POLL_SECONDS="0.2", MEMENTO_RESET_TIMEOUT_SECONDS="2")
+        if not config_unset:
+            with open(os.path.join(config_dir, ".credentials.json"), "w") as handle:
+                handle.write(LOGIN)
     if iterm:
         env["PATH"] = ITERM_BIN + ":" + env["PATH"]
         env["TERM_PROGRAM"] = "iTerm.app"
@@ -669,6 +773,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
                                   text=True, capture_output=True, env=env, timeout=120)
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
+        if bridge is not None and not env["FINALIZE_DRY_RUN"]:
+            settle_remote(done, bridge)
         # The chain's top pid, read before the workdir is removed. It is both the pane
         # fixtures' ROOTPID and the planted claude, so assertions can name the exact
         # process the launcher picked.
@@ -1031,6 +1137,106 @@ check("a host above this session's pane does not make it hosted",
 done = run(depth=5, panes=PANES_ABOVE_HOST, message="next: verify the --bg-pty-host boundary")
 check("a handoff message containing --bg-pty-host does not trip the boundary",
       picked(done) == "%99", f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r}")
+
+# --- a session `claude remote-control` spawned ----------------------------------
+# The server is the host: the session's claude is a `--print` child directly below it, whose input is
+# the server's pipe. Claude Code marks its environment with the bridge kind, and its command line names
+# the session's URL. The chain is pane shell, the server claude, the session claude, shell.
+
+
+def remote_picked(done):
+    """The session id the launcher would post to, or None when it picked another transport."""
+    for line in done.stdout.splitlines():
+        if line.startswith("[dry-run] transport=remote-control session="):
+            return line.split("session=", 1)[1].split(" ", 1)[0]
+    return None
+
+
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_resets01")
+check("a session a remote-control server spawned posts to its own session, not a pane or a relaunch",
+      remote_picked(done) == "cse_resets01" and ancestry(done).startswith("hosted, "),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# The control: the same host without the bridge kind is a daemon host, whose session is relaunched.
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST)
+check("the same direct host without the bridge kind is a daemon host, relaunched in a detached window",
+      picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A claude started from the remote session's shell inherits its bridge kind and worker token, but the
+# session is the outer one's: posting its /clear would reset the session that started this one.
+done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
+check("a claude started inside a remote-control session never posts to that session",
+      remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, "),
+      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_resets03", launcher_flags=("--goal", "the tests pass"))
+check("the dry run carries the goal it would post",
+      "[dry-run] carried goal: the tests pass" in done.stdout, f"out={done.stdout!r}")
+
+# The real path, against the fake session server. The session reads a prompt posted here as another
+# session's message, handed to a running turn as text at its next tool call, so every slash command is
+# posted only once the log shows the session idle.
+
+
+def requests(session):
+    """What the session server received, as (method, prompt or path)."""
+    return [(method, what) for method, what, _ in SESSION_SERVER_LOG.get(session, [])]
+
+
+def posted(session):
+    return [what for method, what in requests(session) if method == "POST"]
+
+
+handoffs = tempfile.mkdtemp(prefix="finalize-remote.")
+try:
+    done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+               bridge="cse_resets04", dry_run="", handoff_dir=handoffs, message="carry this forward",
+               launcher_flags=("--goal", "the tests pass", "--effort", "high"))
+    seen = requests("cse_resets04")
+    written = [open(os.path.join(handoffs, name)).read() for name in os.listdir(handoffs)]
+    check("the launcher reads the log's head and schedules the handoff for the turn's end",
+          done.returncode == 0 and "handoff scheduled → remote-control session cse_resets04" in done.stdout
+          and seen and "sort_order=desc" in seen[0][1],
+          f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} seen={seen!r}")
+    check("then posts /clear, the setting, the handoff from its file, and the goal, in that order",
+          posted("cse_resets04") == ["/clear", "/effort high", written[0] if written else None,
+                                     "/goal the tests pass"], f"seen={seen!r} log={done.worker_log!r}")
+    check("and reads the log after each step before posting the next, so each goes to an idle session",
+          all(seen[i - 1][0] == "GET" for i, (method, _) in enumerate(seen) if method == "POST"), seen)
+    check("every request carries the stored login",
+          {auth for _, _, auth in SESSION_SERVER_LOG["cse_resets04"]} == {"Bearer fixture-login"},
+          SESSION_SERVER_LOG["cse_resets04"])
+finally:
+    shutil.rmtree(handoffs, ignore_errors=True)
+
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_busy01", dry_run="")
+check("an asking turn the log never ends gets no /clear, which it would read as text",
+      done.returncode == 0 and posted("cse_busy01") == [], f"seen={requests('cse_busy01')!r} out={done.stdout!r}")
+check("and the worker's log says the /clear was not posted and where the handoff is kept",
+      "the /clear was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_stalls01", dry_run="")
+check("a reset the log never records holds the handoff back, so it never lands in the old conversation",
+      done.returncode == 0 and posted("cse_stalls01") == ["/clear"], f"seen={requests('cse_stalls01')!r}")
+check("and the worker's log says the handoff was not posted and where it is kept",
+      "the handoff was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_refuses01", dry_run="")
+check("a session whose log refuses the login refuses the handoff in front of the agent, naming the answer",
+      done.returncode == REFUSED_RC and "HTTP 403" in done.stderr and "fixture refuses" in done.stderr
+      and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
+check("and nothing is posted to it", posted("cse_refuses01") == [], requests("cse_refuses01"))
+
+# A bridge session whose claude's command line names no session cannot be found on the server, and no
+# other transport reaches it, so it refuses rather than relaunching the server's child.
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="not-a-cse-id")
+check("a remote-control session whose command line names no session refuses",
+      done.returncode == REFUSED_RC and "cannot name this session" in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r}")
 
 # The boundary is read from the shape of the tree: a claude other than this session's
 # own, met before a live pane, means the pane shows that claude's session.
