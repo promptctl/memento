@@ -92,18 +92,20 @@ calls = []
 raised, lines, _ = ran(lambda hook, facts: calls.append(hook),
                        payload={"session_id": "abcdef0123456789", "hook_event_name": "PreToolUse"},
                        every_line=lambda hook: calls.append(("every_line", hook)) or {})
-check("a payload for another event exits naming the hook and both events, and the work never runs",
-      isinstance(raised, SystemExit) and "memento test hook: registered on Stop" in raised.code
-      and "'PreToolUse'" in raised.code and calls == [("every_line", {})], (raised, calls))
-check("and its line names no session, since no payload was accepted",
-      len(lines) == 1 and " session=None event=None " in lines[0] and "-> stopped: " in lines[0],
-      lines)
+check("a payload for another event exits naming the hook and both events, and neither the work "
+      "nor every_line runs", isinstance(raised, SystemExit)
+      and "memento test hook: registered on Stop" in raised.code
+      and "'PreToolUse'" in raised.code and calls == [], (raised, calls))
+check("and its line names the session and event the payload gave, so a grep for the session finds it",
+      len(lines) == 1 and " session=abcdef01 event=PreToolUse -> stopped: " in lines[0], lines)
 
 for raw in ("42", "[]", "not json at all"):
-    raised, lines, _ = ran(decided, payload=raw)
-    check(f"stdin {raw!r}, which is no JSON object, stops the run and is logged",
-          raised is not None and len(lines) == 1 and "-> stopped: " in lines[0]
-          and "tokens=" not in lines[0], (raised, lines))
+    calls = []
+    raised, lines, _ = ran(decided, payload=raw,
+                           every_line=lambda hook: calls.append(hook) or {"status": "written"})
+    check(f"stdin {raw!r}, which is no JSON object, stops the run and is logged with no session "
+          "and no fields", raised is not None and calls == [] and len(lines) == 1
+          and " session=None event=None -> stopped: " in lines[0], (raised, calls, lines))
 
 blocker = SCRATCH / "a file"
 blocker.write_text("")

@@ -25,29 +25,36 @@ def run(name, event, work, every_line=lambda hook: {}):
     `work(hook, facts)` returns the run's verdict, and puts each log field into `facts` as it learns
     it, so a run that fails logs `stopped: <reason>` with the fields it reached and none it did not.
     `every_line(hook)` gives the fields every line of the hook carries whatever the outcome, read as
-    the line is written. [LAW:single-enforcer] A failure, an exit included, is re-raised once it is
-    logged, so it stays loud: the hook exits 1 with its reason on stderr."""
-    hook, facts = {}, {}
+    the line is written, so a failure of its own is its to report as a field, never to raise. A
+    payload that is no object, or is for another event, stops the run before the work: its line
+    names the session and event the payload gave, and carries no `every_line` fields, since the run
+    was never the hook's. [LAW:single-enforcer] A failure, an exit included, is re-raised once it is
+    logged, so it stays loud: the hook ends as the failure would have ended it."""
+    hook, facts, also = {}, {}, lambda hook: {}
     try:
-        hook = _payload(name, event)
+        hook = _object(name)
+        _for_event(name, hook, event)
+        also = every_line
         verdict = work(hook, facts)
     except (Exception, SystemExit) as failure:
-        _write(name, hook, f"stopped: {reason_of(failure)}", facts | every_line(hook))
+        _write(name, hook, f"stopped: {reason_of(failure)}", facts | also(hook))
         raise
-    _write(name, hook, verdict, facts | every_line(hook))
+    _write(name, hook, verdict, facts | also(hook))
 
 
-def _payload(name, event):
-    """Reads the hook payload from stdin and checks that it is for the expected event.
-
-    Exits with a reason if stdin is not a JSON object or if its hook_event_name is not `event`."""
+def _object(name):
+    """Reads the hook payload from stdin, exiting with a reason if it is not a JSON object."""
     hook = json.load(sys.stdin)
     if not isinstance(hook, dict):
         sys.exit(f"memento {name}: stdin must be a JSON object, got {type(hook).__name__}.")
+    return hook
+
+
+def _for_event(name, hook, event):
+    """Exits with a reason if the payload's hook_event_name is not `event`."""
     if hook.get("hook_event_name") != event:
         sys.exit(f"memento {name}: registered on {event}, called with hook_event_name "
                  f"{hook.get('hook_event_name')!r}. Fix hooks.json.")
-    return hook
 
 
 def reason_of(failure):
@@ -61,10 +68,10 @@ def _write(name, hook, verdict, fields):
 
     A write failure is printed to stderr, naming the hook, and not raised, so logging cannot disable
     the hook."""
-    facts = " ".join(f"{key}={value}" for key, value in fields.items())
+    fields = {"session": str(hook.get("session_id"))[:8], "event": hook.get("hook_event_name"),
+              **fields}
     line = (f"{datetime.now().isoformat(timespec='seconds')} "
-            f"session={str(hook.get('session_id'))[:8]} event={hook.get('hook_event_name')} "
-            f"{facts} -> {verdict}\n")
+            f"{' '.join(f'{key}={value}' for key, value in fields.items())} -> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with LOG_FILE.open("a") as handle:
