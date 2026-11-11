@@ -606,8 +606,11 @@ case "$MODE" in
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
-        ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 &
+      # The worker waits through the agent's turns, up to a day, so it is double-forked out of this Bash
+      # call's process tree, as the detached worker is: Claude Code kills a stopped call's tree by
+      # parentage, and nohup guards only against hangup.
+      ( nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
+          ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 & )
       trap - EXIT
       echo "handoff scheduled → remote-control session $REMOTE_SESSION: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
 

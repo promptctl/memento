@@ -75,6 +75,22 @@ for name, host in (("a daemon host", DAEMON), ("a claude whose prompt holds the 
                    ("a host with no arguments", ["claude"]), ("an empty argv", [])):
     check(f"a claude hosted by {name} is no Remote Control session, whatever its own argv gives",
           remote_control.session_url(host, SPAWNED) is None)
+for name, url in (("over plain http to another machine", f"http://api.anthropic.com/v1/code/sessions/{SESSION}"),
+                  ("over http to a host that only starts with loopback's name",
+                   f"http://localhost.example.com/v1/code/sessions/{SESSION}")):
+    check(f"a --sdk-url {name} is refused, since the login would go there in the clear",
+          type(raised(lambda: remote_control.session_url(SERVER, ["claude", "--sdk-url", url]))) is Refused)
+LOOPBACK = f"http://127.0.0.1:8080/v1/code/sessions/{SESSION}"
+check("one over http to this machine names the session",
+      remote_control.session_url(SERVER, ["claude", "--sdk-url", LOOPBACK]) == LOOPBACK)
+for name, url in (("over plain http to another machine", f"http://api.anthropic.com/v1/code/sessions/{SESSION}"),
+                  ("over http to a host that only starts with loopback's name",
+                   f"http://localhost.example.com/v1/code/sessions/{SESSION}")):
+    check(f"a --sdk-url {name} is refused, since the login would go there in the clear",
+          type(raised(lambda: remote_control.session_url(SERVER, ["claude", "--sdk-url", url]))) is Refused)
+LOOPBACK = f"http://127.0.0.1:8080/v1/code/sessions/{SESSION}"
+check("one over http to this machine names the session",
+      remote_control.session_url(SERVER, ["claude", "--sdk-url", LOOPBACK]) == LOOPBACK)
 for name, claude, given in (("no --sdk-url", ["claude", "--print"], "[]"),
                             ("a prompt that quotes one", ["claude", "--print", QUOTING], "[]"),
                             ("a --sdk-url with no value", ["claude", "--print", "--sdk-url"], "['']"),
@@ -243,6 +259,57 @@ check("a wait for what never comes ends at its timeout",
 check("and its polling backs off, doubling up to a ceiling of seconds",
       slept[:2] == [remote_control.POLL_SECONDS, 2 * remote_control.POLL_SECONDS]
       and max(slept) == remote_control.POLL_CEILING_SECONDS <= 5, slept[:12])
+
+
+class Hiccups:
+    """A session whose head reads fail in passing `failing` times, then give 42."""
+    id = "cse_hiccups"
+
+    def __init__(self, failing):
+        self.failing = failing
+
+    def head(self):
+        if self.failing:
+            self.failing -= 1
+            raise Transient("GET answered HTTP 502: bad gateway")
+        return 42
+
+
+notes, clock = [], Clock()
+check("the head is read again after a read that failed in passing, noting it",
+      remote_control.head(Hiccups(2), 15, notes.append, clock, clock.sleep) == 42
+      and len(notes) == 2 and "HTTP 502" in notes[0], notes)
+clock = Clock()
+error = raised(lambda: remote_control.head(Hiccups(1000), 15, notes.append, clock, clock.sleep))
+check("and one that keeps failing raises its last failure at the timeout",
+      isinstance(error, Transient) and 15 <= clock.now < 15 + remote_control.POLL_CEILING_SECONDS,
+      (error, clock.now))
+
+
+
+class Hiccups:
+    """A session whose head reads fail in passing `failing` times, then give `seq`."""
+    id = "cse_hiccups"
+
+    def __init__(self, failing, seq=42):
+        self.failing, self.seq = failing, seq
+
+    def head(self):
+        if self.failing:
+            self.failing -= 1
+            raise Transient("GET answered HTTP 502: bad gateway")
+        return self.seq
+
+
+notes, clock = [], Clock()
+check("the head is read again after a read that failed in passing, noting it",
+      remote_control.head(Hiccups(2), 15, notes.append, clock, clock.sleep) == 42
+      and len(notes) == 2 and "HTTP 502" in notes[0], notes)
+clock = Clock()
+error = raised(lambda: remote_control.head(Hiccups(1000), 15, notes.append, clock, clock.sleep))
+check("and one that keeps failing raises its last failure at the timeout",
+      isinstance(error, Transient) and 15 <= clock.now < 15 + remote_control.POLL_CEILING_SECONDS,
+      (error, clock.now))
 
 # --- a handoff's posts -----------------------------------------------------------
 
@@ -473,6 +540,26 @@ done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code
 check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",
       done.returncode == 1 and "the /clear was NOT posted" in done.stdout and missing in done.stdout
       and not fake_session_server.REQUESTS.get("cse_lost01"), (done.returncode, done.stdout, done.stderr))
+done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost02", "10",
+                       missing, missing, "1d", "1"], capture_output=True, text=True)
+check("as is a timeout that is no number",
+      done.returncode == 1 and "is no number" in done.stdout and "the /clear was NOT posted" in done.stdout
+      and missing in done.stdout and not fake_session_server.REQUESTS.get("cse_lost02"),
+      (done.returncode, done.stdout, done.stderr))
+# The stored login, as the keychain (a `security` that answers with it) or the config dir's file holds it.
+STORED = '{"claudeAiOauth": {"accessToken": "%s"}}' % fake_session_server.TOKEN
+login_dir = tempfile.mkdtemp(prefix="remote-control-login.")
+with open(os.path.join(login_dir, ".credentials.json"), "w") as handle:
+    handle.write(STORED)
+with open(os.path.join(login_dir, "security"), "w") as handle:
+    handle.write(f"#!/bin/sh\nprintf '%s' '{STORED}'\n")
+os.chmod(os.path.join(login_dir, "security"), 0o755)
+done = subprocess.run([sys.executable, "-I", script, "head", f"{BASE}/v1/code/sessions/cse_hiccups01"],
+                      capture_output=True, text=True,
+                      env={**os.environ, "CLAUDE_CONFIG_DIR": login_dir, "PATH": login_dir + ":" + os.environ["PATH"]})
+check("head reads through a read that fails in passing, saying so on stderr",
+      done.returncode == 0 and done.stdout.strip() == str(fake_session_server.LOGS["cse_hiccups01"].head() - 2)
+      and "retrying" in done.stderr and "HTTP 502" in done.stderr, (done.returncode, done.stdout, done.stderr))
 done = subprocess.run([sys.executable, "-I", script, "deliver", URL], capture_output=True, text=True)
 check("a command missing an argument prints the usage and exits 2",
       done.returncode == 2 and "usage: remote_control.py session <host pid> <claude pid>" in done.stderr

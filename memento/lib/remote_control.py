@@ -10,7 +10,8 @@ way, under the user's own claude.ai login. Run as a script:
       prints the URL of the Remote Control session a claude is, from its host's argv and its own, or
       nothing when its host is no `claude remote-control` server.
   remote_control.py head <session>
-      prints the sequence number of the last event in the session's log.
+      prints the sequence number of the last event in the session's log, trying a read that fails in
+      passing again for HEAD_TIMEOUT_SECONDS.
   remote_control.py deliver <session> <after seq> <msgfile> <goalfile> <idle timeout> <reset timeout> [<setting>...]
       posts /clear, each setting, the handoff and then the goal, each once the log shows the session idle,
       logging each step on stdout. Exits 1, saying what was not posted, when one could not be.
@@ -45,8 +46,13 @@ POLL_CEILING_SECONDS = 5
 # --resume=). A tool call sees neither the id nor the worker token naming it: its CLAUDE_CODE_SESSION_ID
 # is a local uuid, and Claude Code strips the token from a bridge child's tools (2.1.299).
 # [LAW:one-source-of-truth] The URL also names the server, so the login goes where the session's own
-# claude goes.
-SESSION_URL = re.compile(r"https?://[^\s/]+/v1/code/sessions/cse_[A-Za-z0-9]+")
+# claude goes, and the login is the user's whole claude.ai bearer, so it goes only over TLS or to this
+# machine.
+SESSION_URL = re.compile(r"(?:https://[^\s/]+|http://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?)"
+                         r"/v1/code/sessions/cse_[A-Za-z0-9]+")
+# The launcher reads the log's head while the agent waits on its Bash call, so a read that fails in passing
+# is retried only this long before the handoff is refused.
+HEAD_TIMEOUT_SECONDS = 15
 # sysctl names (<sys/sysctl.h>): the size of the kernel's argument area, and a process's argc, exec path
 # and argv in it.
 CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
@@ -347,6 +353,25 @@ def retry(attempt, timeout, clock=time.monotonic, sleep=time.sleep):
         interval = min(interval * 2, POLL_CEILING_SECONDS)
 
 
+def head(session, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """The sequence number of the last event in the session's log. A read that fails in passing is noted and
+    tried again, and the last such failure is raised at the timeout; a refusal propagates."""
+    failed = []
+
+    def attempt():
+        try:
+            return session.head()
+        except Transient as error:
+            failed.append(error)
+            note(f"reading the log's head failed, retrying: {error}")
+            return None
+
+    seq = retry(attempt, timeout, clock, sleep)
+    if seq is None:
+        raise failed[-1]
+    return seq
+
+
 def read(log, note):
     """Reads the log on. A read that failed in passing is noted, and kept as why the log is unreachable
     until one passes; a refusal propagates."""
@@ -454,24 +479,27 @@ def _session(host_pid, claude_pid):
 
 
 def _head(session):
-    print(Session(session, _login()).head())
+    print(head(Session(session, _login()), HEAD_TIMEOUT_SECONDS, lambda line: print(line, file=sys.stderr)))
     return 0
 
 
 def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout, *setting):
     _note(f"waking; remote-control session {session}, log head {after_seq}")
     try:
+        try:
+            after, idle, reset = int(after_seq), float(idle_timeout), float(reset_timeout)
+        except ValueError as error:
+            raise Refused(f"the worker was given a log head or timeout that is no number: {error}") from None
         lock = exclusive(os.path.dirname(os.path.abspath(msgfile)), session.rpartition("/")[2], _note)  # noqa: F841 - held until exit
         with open(msgfile) as handle:
             handoff = handle.read()
         with open(goalfile) as handle:
             goal = handle.read()
         remote = Session(session, _login())
-        deliver(remote, Log(remote, int(after_seq)), handoff, goal, setting, float(idle_timeout),
-                float(reset_timeout), _note)
+        deliver(remote, Log(remote, after), handoff, goal, setting, idle, reset, _note)
     except Withheld as error:
         what, why = error.args
-    # Before the first post: no lock, no handoff or goal to read, or no login.
+    # Before the first post: an argument that is no number, no lock, no handoff or goal to read, or no login.
     except (Refused, OSError) as error:
         what, why = "the /clear", str(error)
     else:

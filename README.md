@@ -439,6 +439,8 @@ memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
 memento/lib/journal.py
+memento/lib/remote_control.py
+memento/lib/script.py
 memento/lib/transcript.py
 memento/skills/address-pr-reviews/
 memento/skills/message-in-a-bottle/
@@ -455,7 +457,9 @@ hooks write the ceiling log through `ceiling_log.py`, so their lines read alike.
 also publishes the session's status for cc-candybar through `candybar.py`. `journal-wake.py`
 writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
 `journal` command is the command line of. The ceiling hook and the `finalize-session`
-launcher both read a session's transcript through `transcript.py`.
+launcher both read a session's transcript through `transcript.py`, and the launcher posts into
+a Remote Control session through `remote_control.py`; `script.py` runs those two as the
+commands the launcher calls.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the

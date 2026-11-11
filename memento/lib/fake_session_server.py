@@ -9,6 +9,7 @@ only in the id it uses:
   cse_stalls...   a /clear brings no reset
   cse_refuses...  every request is answered 403
   cse_flaky...    the first read of the log after the head is answered 502
+  cse_hiccups...  the first request is answered 502
   cse_garbled...  every request is answered 200 with a page of HTML
   cse_moved...    every read is redirected to cse_elsewhere
   anything else   the asking turn ends once the log's head has been read
@@ -107,9 +108,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"<html>sign in</html>")
 
-    def refusal(self):
+    def session(self):
+        """The session id the request's path names: /v1/code/sessions/<id>/events."""
+        return urllib.parse.urlparse(self.path).path.split("/")[4]
+
+    def refusal(self, id):
         """The answer a request is refused with, or None when it is served. Records the request."""
-        id = self.path.split("/")[4].split("?")[0]
         received = REQUESTS.setdefault(id, [])
         received.append((self.command, self.path, self.headers.get("Authorization"),
                          self.headers.get("anthropic-client-platform")))
@@ -119,35 +123,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return 403, {"error": {"type": "permission_error", "message": "fixture refuses"}}
         if id.startswith("cse_flaky") and [r[0] for r in received].count("GET") == 2:
             return 502, {"error": {"type": "api_error", "message": "bad gateway"}}
+        if id.startswith("cse_hiccups") and len(received) == 1:
+            return 502, {"error": {"type": "api_error", "message": "bad gateway"}}
         return None
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        refused = self.refusal()
+        body, id = json.loads(self.rfile.read(int(self.headers["Content-Length"]))), self.session()
+        refused = self.refusal(id)
         if refused:
             return self.answer(*refused)
-        if "/cse_garbled" in self.path:
+        if id.startswith("cse_garbled"):
             return self.sign_in()
-        seq = log_of(self.path.split("/")[4]).post(body["events"][0])
+        seq = log_of(id).post(body["events"][0])
         self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq), "duplicate": False}]})
 
     def do_GET(self):
-        refused = self.refusal()
+        id = self.session()
+        refused = self.refusal(id)
         if refused:
             return self.answer(*refused)
-        if "/cse_moved" in self.path:
+        if id.startswith("cse_moved"):
             self.send_response(302)
             self.send_header("Location", "/v1/code/sessions/cse_elsewhere/events")
             return self.end_headers()
-        if "/cse_garbled" in self.path:
+        if id.startswith("cse_garbled"):
             return self.sign_in()
-        log = log_of(self.path.split("/")[4].split("?")[0])
-        if "sort_order=desc&limit=1" in self.path:
+        log, query = log_of(id), urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if query.get("sort_order") == ["desc"]:
             head = log.head()
             if not log.id.startswith("cse_busy"):
                 log.end_turn()
             return self.answer(200, {"data": [{"sequence_num": str(head), "payload": {"type": "assistant"}}]})
-        events, more = log.page(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)["cursor"][0])
+        events, more = log.page(query["cursor"][0])
         # The server's next_cursor is its own token; a client reads it only for whether more follow.
         self.answer(200, {"data": events, **({"next_cursor": "opaque+token"} if more else {})})
 

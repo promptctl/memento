@@ -1247,13 +1247,16 @@ def remote_picked(done):
 
 
 HOSTED = dict(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST)
-for name, bin_, host in (("", CLAUDE_BIN, SERVER_ARGV), (" by a node install", NODE_BIN, ["cli.js"] + SERVER_ARGV)):
-    done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_resets01", host_bin=bin_, host_argv=host)
+for name, bin_, host, session in (("", CLAUDE_BIN, SERVER_ARGV, "cse_resets01"),
+                                  (" by a node install", NODE_BIN, ["cli.js"] + SERVER_ARGV, "cse_resets06")):
+    done = run(**HOSTED, entrypoint="sdk-cli", bridge=session, host_bin=bin_, host_argv=host)
     check(f"a session a remote-control server{name} spawned posts to its own session, not a pane or a relaunch",
-          remote_picked(done) == session_url("cse_resets01") and ancestry(done).startswith("hosted, "),
+          remote_picked(done) == session_url(session) and ancestry(done).startswith("hosted, "),
           f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-check("and reads the log's head before it returns, in a dry run too",
-      "log_head=" in done.stdout and fake_session_server.REQUESTS.get("cse_resets01"), done.stdout)
+    check(f"and reads that session's log head before it returns, in a dry run too{name}",
+          f"log_head={fake_session_server.LOGS[session].head() - 2} " in done.stdout
+          and [r[:2] for r in fake_session_server.REQUESTS[session]]
+          == [("GET", f"/v1/code/sessions/{session}/events?sort_order=desc&limit=1")], done.stdout)
 # The controls: a host whose first argument is no `remote-control`. A daemon started from a
 # remote-control session's shell passes the bridge kind down, and a session's claude may hold a
 # spawned claude's arguments, so neither makes it a remote-control session. Nor does a claude whose
