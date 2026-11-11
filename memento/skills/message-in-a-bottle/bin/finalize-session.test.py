@@ -2510,7 +2510,8 @@ done, survived, log = never.result()
 check("a reset the worker never sees still delivers the handoff",
       "buffer: the whole handoff" in log, f"out={done.stdout!r} log={log!r}")
 check("and says plainly that it could not confirm the reset",
-      "not observed" in done.stdout, f"out={done.stdout!r}")
+      "WARNING: not seen" in done.stdout and "did not leave session the-old-session within 2s" in done.stderr,
+      f"out={done.stdout!r} err={done.stderr!r}")
 check("and never claims the handoff was withheld",
       "NOT sent" not in done.stdout and "misfired" not in log,
       f"out={done.stdout!r} log={log!r}")
@@ -2532,13 +2533,14 @@ check("a reset that never runs, under a banner on screen, has no goal typed, and
       f"out={done.stdout!r} log={log!r}")
 done, _, log = goal_unregistered.result()
 check("a claude with no registry entry cannot have its reset seen: the reason is logged, the handoff sent, no goal typed",
-      "cannot tell whether it ran" in done.stdout and "no registry entry" in done.stdout
+      "cannot tell whether it ran" in done.stdout and "no registry entry" in done.stderr
       and "buffer: the whole handoff" in log and "/goal" not in log and "carried goal NOT delivered" in done.stdout,
-      f"out={done.stdout!r} log={log!r}")
+      f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
 done, _, log = goal_torn.result()
 check("an entry that stays unreadable after the /clear is not seen, and the last failed read is named",
-      "not observed" in done.stdout and "the last read failed" in done.stdout and "is not a JSON object" in done.stdout
-      and "/goal" not in log, f"out={done.stdout!r} log={log!r}")
+      "not seen" in done.stdout and "did not leave session the-old-session" in done.stderr
+      and "the last read failed" in done.stderr and "is not a JSON object" in done.stderr
+      and "/goal" not in log, f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
 
 # The requested model and effort are typed into the reset session before the handoff is
 # pasted, so the handoff's first turn already runs on them.

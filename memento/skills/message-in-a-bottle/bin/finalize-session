@@ -53,7 +53,7 @@ HANDOFF_DELAY_SECONDS=10
 # so tests reach the timeout quickly.
 REMOTE_IDLE_TIMEOUT_SECONDS="${MEMENTO_IDLE_TIMEOUT_SECONDS:-86400}"
 # The reset is typed while the agent is usually still mid-turn, and Claude runs queued input only when
-# the turn ends. So the worker polls for the reset to appear instead of waiting a fixed time. The timeout
+# the turn ends. So the worker polls for the reset to land instead of waiting a fixed time. The timeout
 # can be overridden so tests can reach the timeout path.
 RESET_REGISTER_TIMEOUT_SECONDS="${MEMENTO_RESET_TIMEOUT_SECONDS:-300}"
 RESET_REGISTER_POLL_SECONDS=0.5
@@ -887,34 +887,18 @@ Nothing on this machine to deliver the close-out into."
     # its registry entry names. A banner on the screen can be the old session's own, drawn at its start,
     # and another pane's /clear is another process's. The session it is in is read just before /clear is
     # typed, so a reset anyone else made during the delay is not taken for this one. With no session to
-    # start from, the reset cannot be seen.
+    # start from, the reset cannot be seen. The registry's stdout is its answer and its stderr, the reason it
+    # has none, goes to this log.
     RESET_SEEN=""
-    OBSERVED="WARNING: not observed within ${RESET_REGISTER_TIMEOUT_SECONDS}s"
-    BEFORE=$(python3 -I "$REGISTRY" current "$CONFIG_DIR" "$CLAUDE_PID" 2>&1) \
-      || { OBSERVED="WARNING: cannot tell whether it ran, since the session claude $CLAUDE_PID is in cannot be read: $BEFORE"; BEFORE=""; }
+    OBSERVED="WARNING: not seen, as the registry says above"
+    BEFORE=$(python3 -I "$REGISTRY" current "$CONFIG_DIR" "$CLAUDE_PID") \
+      || OBSERVED="WARNING: cannot tell whether it ran, since the session claude $CLAUDE_PID is in cannot be read, as the registry says above"
     printf /clear | _tmux_type "$TARGET"
-
-    # Polls for the reset to land, up to the timeout. The poll count is integer arithmetic, since bash 3.2
-    # (the /bin/bash on macOS) has no floats. Claude rewrites its entry in place, so a read can meet a
-    # rewrite in progress: a failed read is not yet, and the last one's reason is kept for the timeout.
-    POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
-    POLLS=0
-    UNREAD=""
-    while [[ -n "$BEFORE" ]]; do
-      if NOW=$(python3 -I "$REGISTRY" current "$CONFIG_DIR" "$CLAUDE_PID" 2>&1); then
-        UNREAD=""
-        if [[ "$NOW" != "$BEFORE" ]]; then
-          RESET_SEEN=1
-          OBSERVED="seen after $(awk "BEGIN{printf \"%.1f\", $POLLS * $RESET_REGISTER_POLL_SECONDS}")s: claude $CLAUDE_PID moved from session $BEFORE to $NOW"
-          break
-        fi
-      else
-        UNREAD="; the last read failed: $NOW"
-      fi
-      [[ "$POLLS" -ge "$POLL_BUDGET" ]] && { OBSERVED+="$UNREAD"; break; }
-      sleep "$RESET_REGISTER_POLL_SECONDS"
-      POLLS=$((POLLS + 1))
-    done
+    if [[ -n "$BEFORE" ]] && MOVED=$(python3 -I "$REGISTRY" changed "$CONFIG_DIR" "$CLAUDE_PID" "$BEFORE" \
+        "$RESET_REGISTER_TIMEOUT_SECONDS" "$RESET_REGISTER_POLL_SECONDS"); then
+      RESET_SEEN=1
+      OBSERVED="seen: $MOVED"
+    fi
 
     # The handoff is sent whether or not the reset was seen; the poll result goes into the log, and decides
     # only the carried goal below. tmux type-ahead keeps input in order, so the handoff lands after the

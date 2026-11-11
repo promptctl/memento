@@ -7,6 +7,8 @@ another process's. Run as a script:
 
   session_registry.py current <config dir> <pid>
       prints the id of the session claude process <pid> is in and exits 0.
+  session_registry.py changed <config dir> <pid> <before> <timeout seconds> <poll seconds>
+      waits for claude process <pid> to leave session <before>, prints the move and exits 0.
 
 It prints why it cannot answer on stderr and exits 2.
 """
@@ -14,10 +16,19 @@ It prints why it cannot answer on stderr and exits 2.
 import json
 import os
 import sys
+import time
 
 
-class Unregistered(Exception):
+class Unseen(Exception):
+    """The registry cannot show what was asked of it; the message says why."""
+
+
+class Unregistered(Unseen):
     """The registry holds no readable session for the process; the message names the entry and why."""
+
+
+class Unchanged(Unseen):
+    """The process was still in the session it started in, or unreadable, when the wait ran out."""
 
 
 def entry(config_dir, pid):
@@ -32,18 +43,41 @@ def current(config_dir, pid):
     no session."""
     path = entry(config_dir, pid)
     try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
+        with open(path, "rb") as handle:
+            data = handle.read()
     except FileNotFoundError:
         raise Unregistered(f"no registry entry {path}, so claude process {pid} is not running "
                            "under this config dir") from None
     try:
-        session = json.loads(text).get("sessionId")
+        # A read torn inside a multibyte character fails to decode, which is a ValueError too.
+        session = json.loads(data).get("sessionId")
     except (ValueError, AttributeError):
-        raise Unregistered(f"registry entry {path} is not a JSON object: {text[:200]!r}") from None
+        raise Unregistered(f"registry entry {path} is not a JSON object: {data[:200]!r}") from None
     if not isinstance(session, str) or not session:
         raise Unregistered(f"registry entry {path} names no session: sessionId is {session!r}")
     return session
+
+
+def changed(config_dir, pid, before, timeout, interval, sleep=time.sleep):
+    """The session claude process `pid` moved to from `before`, and the seconds the wait took, reading
+    its entry every `interval` seconds for up to `timeout`.
+
+    Claude rewrites the entry in place, so a read can meet a rewrite in progress: a failed read is not
+    yet, and the last one's reason is kept for the Unchanged the wait ends in."""
+    start = time.monotonic()
+    unread = ""
+    while True:
+        try:
+            now = current(config_dir, pid)
+        except Unregistered as error:
+            unread = f"; the last read failed: {error}"
+        else:
+            unread = ""
+            if now != before:
+                return now, time.monotonic() - start
+        if time.monotonic() - start >= timeout:
+            raise Unchanged(f"claude process {pid} did not leave session {before} within {timeout:g}s{unread}")
+        sleep(interval)
 
 
 def _current(config_dir, pid):
@@ -51,11 +85,17 @@ def _current(config_dir, pid):
     return 0
 
 
-COMMANDS = {"current": _current}
+def _changed(config_dir, pid, before, timeout_seconds, poll_seconds):
+    now, waited = changed(config_dir, pid, before, float(timeout_seconds), float(poll_seconds))
+    print(f"claude process {pid} moved from session {before} to {now} after {waited:.1f}s")
+    return 0
+
+
+COMMANDS = {"current": _current, "changed": _changed}
 
 
 if __name__ == "__main__":
     # -I keeps this file's directory off the path; lib/script.py is beside it.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import script
-    script.run(COMMANDS, Unregistered)
+    script.run(COMMANDS, Unseen)
