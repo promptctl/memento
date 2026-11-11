@@ -14,13 +14,14 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from candybar import publish  # noqa: E402
 from ceiling_config import anchored, session_directory  # noqa: E402
-from ceiling_log import hook_payload, log, reason_of  # noqa: E402
+from ceiling_log import run  # noqa: E402
 
-hook = None
-try:
-    hook = hook_payload("session-status", "SessionStart")
-    facts = publish(session_directory(hook["session_id"]), anchored(hook["cwd"]))
-except (Exception, SystemExit) as unresolved:
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}")
-    raise
-log(hook, "published", **facts)
+
+def publish_status(hook, facts):
+    """Publishes the session's status. Publishing is this hook's whole work, so a failed publish
+    stops it, where the ceiling hooks publish beside their work through `published`."""
+    facts |= publish(session_directory(hook["session_id"]), anchored(hook["cwd"]))
+    return "published"
+
+
+run("session-status", "SessionStart", publish_status)

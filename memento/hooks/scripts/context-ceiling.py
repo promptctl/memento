@@ -17,7 +17,7 @@ PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 # not an installed package.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
 from ceiling_config import GRACE, anchored, in_force, session_directory  # noqa: E402
-from ceiling_log import hook_payload, log, reason_of  # noqa: E402
+from ceiling_log import run  # noqa: E402
 # Every stop refreshes the session's status on cc-candybar's bar, refusals included. The ceiling is
 # read from the layers again rather than passed in, so one reader serves every caller. A bar that
 # cannot be updated does not stop the gate.
@@ -170,25 +170,16 @@ def stop(hook, tokens, ceiling):
         tokens=tokens, ceiling=ceiling, limit=limit, launcher=shlex.quote(LAUNCHER),
         journal=shlex.quote(JOURNAL), cap=SUMMARY_CAP)}
 
-# The ceiling depends on the payload's session and project, so it is resolved here rather than at
-# import. Any failure before the gate decides is logged with the values established so far, then
-# re-raised unchanged, so it stays loud. tokens and ceiling start as sentinels until each is computed.
-# The log entry is the only place a gate-off session differs from an allowed one.
-hook = None
-tokens = "unknown"
-ceiling = "unresolved"
-try:
-    hook = hook_payload("context ceiling", "Stop")
-    tokens = context_tokens(hook["transcript_path"])
-    ceiling = resolve_ceiling(hook)
+def gate(hook, facts):
+    """Measures the stop, decides it, prints the decision, and returns its log label. The ceiling
+    depends on the payload's session and project, so it is resolved here rather than at import. The
+    log line is the only place a gate-off session differs from an allowed one."""
+    tokens = facts["tokens"] = context_tokens(hook["transcript_path"])
+    ceiling = facts["ceiling"] = resolve_ceiling(hook)
     label, verdict = (("allow-under", None) if tokens < ceiling
                       else stop(hook, tokens, ceiling))
-except (Exception, SystemExit) as unresolved:
-    # `hook` is whatever parsed, or None/non-dict when the failure came before it was one - log
-    # needs a dict to name a session.
-    log(hook if isinstance(hook, dict) else {}, f"stopped: {reason_of(unresolved)}", tokens=tokens,
-        ceiling=ceiling, **published(hook))
-    raise
-log(hook, label, tokens=tokens, ceiling=ceiling, **published(hook))
-if verdict:
-    print(json.dumps(verdict))
+    if verdict:
+        print(json.dumps(verdict))
+    return label
+
+run("context ceiling", "Stop", gate, every_line=published)

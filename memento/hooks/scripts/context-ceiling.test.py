@@ -308,18 +308,24 @@ check("a session layer written mid-session raises the ceiling on the very next s
 # A kill-and-relaunch reset gets a new session id and drops its override. `/clear` keeps the id, so
 # the SessionStart hook matched to it removes the override file.
 
-def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None):
-    """Invoke the SessionStart hook as Claude Code does on /clear. Returns (exit code, stderr)."""
-    log = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
-    log.close()
+def cleared(home, session=SESSION, source="clear", event="SessionStart", raw=None, log=None):
+    """Invoke the SessionStart hook as Claude Code does on /clear, logging to `log` or to a scratch
+    log. Returns (exit code, stderr)."""
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "XDG_CONFIG_HOME")}
-    env.update({"MEMENTO_CONFIG_HOME": home, "MEMENTO_CEILING_LOG": log.name})
+    env.update({"MEMENTO_CONFIG_HOME": home,
+                "MEMENTO_CEILING_LOG": log or os.path.join(scratch_dir(), "log")})
     payload = raw if raw is not None else json.dumps(
         {"session_id": session, "hook_event_name": event, "source": source, "cwd": home})
     done = subprocess.run([sys.executable, CLEAR_HOOK], text=True, capture_output=True, env=env,
                           input=payload)
-    os.unlink(log.name)
     return done.returncode, done.stderr
+
+
+def logged_fields(log):
+    """The `key=value` fields of a log's one line, before its verdict."""
+    with open(log) as handle:
+        (line,) = handle.read().splitlines()
+    return line.split(" -> ", 1)[0].split()[1:]
 
 
 home = scratch_dir()
@@ -352,9 +358,19 @@ for raw in ("42", "[]", "not json", "{}"):
     code, err = cleared(home, raw=raw)
     check(f"a /clear payload of {raw!r} stops the hook",
           code == 1, f"{code} {err}")
-code, err = cleared(home, session="../..")
-check("a session id that is not a bare name is refused by the /clear hook too",
-      code == 1, f"{code} {err}")
+log = os.path.join(scratch_dir(), "log")
+code, err = cleared(home, session="../..", log=log)
+fields = logged_fields(log)
+check("a session id that is not a bare name is refused by the /clear hook too, and its line names "
+      "no override, since none was reached",
+      code == 1 and not any(field.startswith("override=") for field in fields), f"{code} {fields}")
+log = os.path.join(scratch_dir(), "log")
+cleared(home, log=log)
+check("a /clear that reaches the override names it on its line",
+      any(field.startswith("override=")
+          and field.endswith(os.path.join("sessions", SESSION, CONFIG_NAME))
+          for field in logged_fields(log)),
+      logged_fields(log))
 
 # --- a setting nobody can misspell into silence -------------------------------------------
 
@@ -422,6 +438,16 @@ for malformed in ("_350000", "350000_", "3__50000", "+_100", "1_"):
                          user_conf=f"ceiling = {malformed}\n")
     check(f"{malformed!r} is not a number of tokens", code == 1,
           f"{code} {err}")
+
+# The tokens are counted before the ceiling is read, so a ceiling that cannot be read stops the gate
+# with the count on its line and no ceiling.
+log = os.path.join(scratch_dir(), "log")
+code, _, err = run([user, assistant(OVER)], user_conf="ceiling = _350000\n",
+                   extra_env={"MEMENTO_CEILING_LOG": log})
+fields = logged_fields(log)
+check("a ceiling that cannot be read is logged with the tokens counted and no ceiling",
+      code == 1 and f"tokens={OVER}" in fields
+      and not any(field.startswith("ceiling=") for field in fields), f"{code} {fields} {err}")
 
 # The session id becomes a path in one place, so its shape is checked there. An absolute id would
 # discard the sessions directory, and a relative one could climb out of it.
