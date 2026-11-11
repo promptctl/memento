@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for hermetic: a suite that calls `home`, started with every variable a git hook or a Claude
-Code session would hand it, runs with PATH and one scratch directory as HOME and temp directory - its
+"""Tests for hermetic: a suite that calls `home`, started with variables a git hook and a Claude Code
+session hand it naming real places, runs with PATH and one scratch directory as HOME and temp directory - its
 own and its children's - and leaves nothing behind it when it exits.
 
 Run with: python3 hermetic.test.py
@@ -59,9 +59,9 @@ check("a temp file it makes naming no directory lands in the scratch", seen["tem
       seen["temp"])
 check("and so does one a command it runs makes", seen["child temp"] == scratch, seen["child temp"])
 check("the scratch directory is gone once it exits", not os.path.exists(scratch), scratch)
-check("nothing is left in the temp directory or HOME it inherited",
-      os.listdir(inherited["TMPDIR"]) == [] and os.listdir(inherited["HOME"]) == [],
-      (os.listdir(inherited["TMPDIR"]), os.listdir(inherited["HOME"])))
+left = {name: os.listdir(path) for name, path in inherited.items()}
+check("nothing is left in the HOME, TMPDIR or GIT_DIR it inherited",
+      all(entries == [] for entries in left.values()), left)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

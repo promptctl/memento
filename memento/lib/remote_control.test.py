@@ -537,8 +537,7 @@ try:
 finally:
     for process in (server, spawned, daemon):
         process.kill()
-missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."),
-                       "no-such-handoff.md")
+missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."), "no-such-handoff.md")
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
                        missing, missing, "1", "1"], capture_output=True, text=True)
 check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",

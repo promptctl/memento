@@ -19,7 +19,7 @@ def home():
     running suite and removed at exit, as HOME and TMPDIR, makes it the temp directory of every
     tempfile call that names none, and returns its path."""
     scratch = tempfile.mkdtemp(prefix=os.path.basename(sys.argv[0]) + ".")
-    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    atexit.register(shutil.rmtree, scratch)
     path = os.environ["PATH"]
     os.environ.clear()
     os.environ.update(PATH=path, HOME=scratch, TMPDIR=scratch)
