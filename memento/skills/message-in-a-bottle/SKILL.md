@@ -19,7 +19,22 @@ There is exactly **one** legitimate input: **is the handed unit of work complete
 
 ## The next session starts from your message and nothing else
 
-The next agent wakes holding ONLY the message you send (plus the standard system, user global, and project level guidance). No summary of this session travels with it. So the message carries what the next agent needs to start: what the work was, exactly where it stopped, and the next concrete step — pointers it can follow, not claims about state it would have to reverify.
+The next agent wakes holding ONLY the message you send (plus the standard system, user global, and project level guidance). The summary you write below goes to the journal and not into its context. So the message carries what the next agent needs to start: what the work was, exactly where it stopped, and the next concrete step — pointers it can follow, not claims about state it would have to reverify.
+
+## The summary — what this session did, kept in the journal
+
+Every run takes `--summary-file <path>`: a file holding this session's close-out summary. The launcher journals it with the handoff, and it is all that a later session's `journal recall` reads of this one (`Skill(memento:journal)`). The message is the position, looking forward; the summary is the story, looking back: what was done, what came of it, and why. Put in it what a later session could not get from the code, the diff or the ticket — a decision and its reason, an approach abandoned, a result.
+
+    WRONG: "Worked on the parser. Tests pass. Next: review."
+    RIGHT: "Fixed the parser's crash on an empty heredoc by reading the buffer in two passes;
+            streaming was tried first and abandoned, since the tokenizer needs the whole
+            buffer. PR #91 is open and unreviewed."
+
+It is at most 1,200 characters. A longer or empty one is refused by the journal with exit 2, and no handoff is written; the detail belongs in journal notes.
+
+Write the file with the Write tool, under `/tmp`, named for the work in words joined by underscores, none of them git or a shell's name: `/tmp/parser_null_fix_summary.md`. Inside the file, write every word as it is. The file is why you can: memento's hook respells git and shell names (`g-i-t`) through the whole text of a `finalize-session` command, so that Claude Code's worktree guard lets it run, and a summary passed as text would be journaled respelled, where nobody searching for the word finds it.
+
+The hook respells a path in the command too, so `/tmp/git-summary.md` reaches the launcher as `/tmp/g-i-t-summary.md`. The launcher cannot tell such a path from one you meant, so it refuses any summary path holding single letters joined by hyphens: the hook's spelling, and also `a-b`, or the `3e-a8` inside a session id or a hash. When that refusal comes, write the summary at a path without one and pass that. Don't write it at the respelled path.
 
 ## Carry the goal forward — if one is set, it dies unless you carry it
 
@@ -48,9 +63,10 @@ The thought to catch is *"I'll run it now and tidy up while the reset lands."* T
 ## Invocation
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session --summary-file <path> [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
 ```
 
+- `--summary-file <path>` — required on every run, a dry run included. The file holding this session's summary (see *The summary* above). A run without it, or with a file that cannot be read, is refused with exit 2, having recorded nothing.
 - `--goal '<condition>'` — optional, and only when a `/goal` is active this session. Re-establishes that goal in the reset session so the run continues. Leading argument; quote the condition. **Omit entirely when no goal is set.**
 - `--model <model>`, `--effort <level>` — optional, and only when the handoff calls for a specific model or effort for the next session (see *Model and effort* above). **Omit when not requested.**
 - `--` — ends flag parsing; every token after it is message text. This is how a handoff that genuinely opens with a two-dash word gets sent.
@@ -59,9 +75,9 @@ ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session [--goal '<
 
 The flags above are the whole set, and each one has two dashes. **A single-line argument whose first word is any other two-dash token is named on stderr and refused with exit 2, having recorded nothing** — that is what catches a typo like `--gaol` instead of shipping it to the next agent as the handoff text. To send such a message anyway, **put it after `--`.** A single-dash token is message text (`-h`, `- shipped the parser`): no flag here is one dash, so nothing is being near-missed. So is any argument carrying a newline, however it opens — no flag spans a line, and this close-out's handoff is routinely a multi-line recap.
 
-On success the launcher exits 0 and prints `handoff scheduled → <target> in Ns (log: <tempfile>)`, or for the detached transport `handoff delivered → session <id> in detached tmux window '<name>'; … (log: <tempfile>)` — the log captures worker progress and any transport errors. The detached transport waits up to 30s for the new session to take the message before it answers, so don't give its Bash call a timeout under 60s: a shorter one moves the call to the background, and the close-out isn't credited. The handoff is also on disk under `~/.claude/memento/handoffs` before any transport runs.
+On success the launcher exits 0 and prints `close-out journaled for the handoff <file>`, then `handoff scheduled → <target> in Ns (log: <tempfile>)`, or for the detached transport `handoff delivered → session <id> in detached tmux window '<name>'; … (log: <tempfile>)` — the log captures worker progress and any transport errors. The detached transport waits up to 30s for the new session to take the message before it answers, so don't give its Bash call a timeout under 60s: a shorter one moves the call to the background, and the close-out isn't credited. The handoff is also on disk under `~/.claude/memento/handoffs`, and its close-out in the journal, before any transport runs.
 
-The transport is chosen by capability, most reliable first: **tmux** (send `/clear` into the pane, verified by reading it back, then paste the message) → **iTerm2** (kill the running claude and relaunch it fresh with the message as its initial prompt, delivered in the background with no focus steal) → **detached** (spawn a brand-new detached tmux window and launch claude in it fresh, with the message as its initial prompt — the transport for a session that owns neither a pane nor an iTerm2 session, most commonly a Claude Code background session hosted by `claude daemon run --bg-pty-host`). You do not choose the transport; the launcher detects it. Every transport starts the next session blank. The two relaunching transports start it in the permission mode and effort this session's transcript records last, then add a requested `--model` or `--effort`. To preview the decision without scheduling anything, prefix `FINALIZE_DRY_RUN=1`.
+The transport is chosen by capability, most reliable first: **tmux** (send `/clear` into the pane, verified by reading it back, then paste the message) → **iTerm2** (kill the running claude and relaunch it fresh with the message as its initial prompt, delivered in the background with no focus steal) → **detached** (spawn a brand-new detached tmux window and launch claude in it fresh, with the message as its initial prompt — the transport for a session that owns neither a pane nor an iTerm2 session, most commonly a Claude Code background session hosted by `claude daemon run --bg-pty-host`). You do not choose the transport; the launcher detects it. Every transport starts the next session blank. The two relaunching transports start it in the permission mode and effort this session's transcript records last, then add a requested `--model` or `--effort`. To preview the decision without scheduling anything, prefix `FINALIZE_DRY_RUN=1`; a dry run journals nothing, so it does not say whether the journal would take the summary.
 
 Every session gets the same close-out capability — background and foreground alike, no subclass excluded. A session that owns no terminal of its own is not treated as a lesser case; it gets a fresh one. When the launcher cannot schedule the handoff it refuses: it prints the reason to stderr and exits 2, naming the file the handoff is preserved in if it was already written. Read the exit code, not the prose — a nonzero exit means the close-out did not happen, so say so plainly rather than reporting the session finalized. For tmux and iTerm2, exit 0 means scheduled, not delivered, and a delivery that fails after that is recorded in the log. For the detached transport, exit 0 means the new session has taken the message, and this session is retired once the call returns.
 
@@ -70,13 +86,15 @@ Every session gets the same close-out capability — background and foreground a
 Hand off `/next` — the next session pulls the next ticket:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session /next
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --summary-file /tmp/parser_null_fix_summary.md /next
 ```
 
 Hand off with a specific instruction:
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --summary-file /tmp/spec_audit_summary.md \
   'Continue the spec audit. Pick up at section 4 — the previous session left findings in spec/audit/section-3.md.'
 ```
 
@@ -84,6 +102,7 @@ Hand off while a goal is active — carry the goal forward so the autonomous run
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --summary-file /tmp/pr_cleanup_summary.md \
   --goal 'every open PR on this branch is merged or closed, or stop after 30 turns' \
   /next
 ```
@@ -92,6 +111,7 @@ Hand off to a session that must run on a specific model and effort:
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --summary-file /tmp/parser_null_fix_summary.md \
   --model opus --effort max \
   'Review PR #41 at branch fix/parser-null. Resume at step 10.'
 ```

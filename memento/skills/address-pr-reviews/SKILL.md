@@ -300,8 +300,11 @@ Empty aligned-pool (every examined candidate classified Misaligned, or no candid
 
 **Step 4 — Run finalize-session** (AlignedAndDefined and AlignedButFuzzy arms):
 
+First write this session's summary to a file with the Write tool: what merged, what came of it, and why, as message-in-a-bottle's contract says a summary is written and where its file goes. The launcher journals it with the handoff and refuses to run without it.
+
 ```bash
-${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session "$(cat <<'EOF'
+${CLAUDE_PLUGIN_ROOT}/skills/message-in-a-bottle/bin/finalize-session \
+  --summary-file /tmp/pr_<num>_close_out_summary.md "$(cat <<'EOF'
 Last session shipped PR #<num> — <one-line description of what merged>.
 <forward-looking notes the next agent should know: in-flight context,
 follow-ups this PR surfaced, things to watch out for>

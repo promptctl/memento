@@ -60,7 +60,9 @@ spaces beneath it:
     <UTC time>  <directory>  (<branch>)
       <summary>
 
-A summary is at most 1,200 characters, so the whole read is bounded at about 6,000. It never
+Each summary was written by the session it describes, as it closed out: `finalize-session
+--summary-file` journals it with the handoff (`Skill(memento:message-in-a-bottle)`). A
+summary is at most 1,200 characters, so the whole read is bounded at about 6,000. It never
 prints a note.
 
 The last line is either

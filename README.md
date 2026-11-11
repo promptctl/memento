@@ -74,8 +74,16 @@ message you wrote arrives as the next agent's opening prompt. Every run resets; 
 hands off.
 
 ```bash
-finalize-session [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
+finalize-session --summary-file <path> [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
 ```
+
+`--summary-file` is required. The file holds the outgoing session's summary of what it did,
+what came of it and why, and the launcher journals it as that session's close-out (see
+`journal` below) before the handoff file has its name, so a run with no summary, or one the
+journal refuses, exits 2 and leaves no handoff. The summary travels in a file because
+memento's hook respells git and shell names through a `finalize-session` command's whole
+text; for the same reason a summary path holding single letters joined by hyphens is
+refused, since it cannot be told from one the hook changed.
 
 With no message it hands off `/next`. The next session starts blank on every transport.
 `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
@@ -93,7 +101,7 @@ word, whatever comes after it: `finalize-session -- --already-fixed see PR 123`.
 The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
-anything.
+or journaling anything.
 
 **`ceiling`** — moves the context ceiling, for the session running right now or for its
 whole project: off, up or down by a signed amount, or pinned to a number. It calls
@@ -131,7 +139,8 @@ at most 1,200 characters), and each records the time, the session id, the workin
 and the branch checked out there. Session ids change at nearly every reset, so a session's
 history is its chain of handoffs: its wake names a handoff, the close that wrote that
 handoff names the session before, and so on back. A wake finds its close by the handoff
-file's path alone, so `close` takes only an absolute path.
+file's path alone, so `close` takes only an absolute path. A close is written by
+`finalize-session`, from the summary file the outgoing session gives it.
 
 Writing is open and reading is narrow. `note` is for an agent to use freely. `recall` is all
 an agent reads back: the summaries of the nearest five close-outs in its own chain, oldest
@@ -345,7 +354,7 @@ still refused loudly.
 
 Over the ceiling, the hook returns `{"decision": "block"}`. Claude Code refuses the stop
 and hands the hook's `reason` back to the agent as its next instruction: run the
-`finalize-session` launcher with a handoff message. The launcher writes the handoff to disk and resets the session into it.
+`finalize-session` launcher with a summary file and a handoff message. The launcher journals the summary, writes the handoff to disk and resets the session into it.
 
 What that reason asks for depends on how far past the ceiling the session is. Until the count
 reaches 100,000 tokens past it (`GRACE` in `memento/lib/ceiling_config.py`), the agent is told to

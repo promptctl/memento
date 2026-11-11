@@ -31,6 +31,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER = os.path.join(HERE, "finalize-session")
+PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
+# The journal is read back through its own library. A plugin is a directory rather than an
+# installed package, so the path comes before the import.
+sys.path.insert(0, os.path.join(PLUGIN, "lib"))
+from journal import SUMMARY_CAP, Close, entries  # noqa: E402
 REAL_DIRS = "/usr/bin:/bin:/usr/sbin:/sbin"
 failures = []
 
@@ -328,6 +333,18 @@ os.mkdir(SUCCESSOR_DIR)
 SUCCESSOR_BIN = install(SUCCESSOR_DIR, "claude", SUCCESSOR)
 
 
+def summary_at(path, text):
+    """Write a summary file and return its path."""
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return path
+
+
+# Every launcher run takes a summary file. A case that is not about the summary passes this one.
+SUMMARY_FILE = summary_at(os.path.join(FIXTURES, "summary.md"),
+                          "Shipped the parser fix; its suite passes.\n")
+
+
 def exe(name):
     """A bash whose executable is named `name`, which is how the walk knows a claude or a tmux: the
     kernel records the name of the file executed. A symlink is recorded under its target's name, and
@@ -539,8 +556,12 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         claude_at=None, host_keeps_tmux=False, outer=None, outer_is_own=False,
         launcher_flags=(), host_bin=CLAUDE_BIN, export_claude_pid=True,
         transcripts=(BYPASS_HIGH,), session_id=SESSION_ID, entrypoint="cli", iterm=False,
-        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False):
+        successor=None, server_config_dir=None, config_unset=False, kill_launcher_tree=False,
+        summary_file=SUMMARY_FILE, journal=None):
     """Launch finalize-session under a real `nest` chain and return what it reported.
+
+    `summary_file` is passed as --summary-file. `journal` is the journal a real run
+    records its close-out in; a case that reads it back passes its own.
 
     `dry_run` is the raw value of $FINALIZE_DRY_RUN; the empty string means off,
     so the real transport path runs the same code as the dry-run cases.
@@ -649,6 +670,9 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
     # The default is inside this case's workdir, which is removed; a case that reads
     # the handoff back passes its own directory.
     env["MEMENTO_HANDOFF_DIR"] = handoff_dir or os.path.join(workdir, "handoffs")
+    # The same holds for the journal: $HOME may be the real one, so an unredirected real
+    # run would append to the real ~/.claude/memento/journal.jsonl.
+    env["MEMENTO_JOURNAL"] = journal or os.path.join(workdir, "journal.jsonl")
     if sleep is not None:
         env["NEST_SLEEP"] = str(sleep)
     try:
@@ -656,7 +680,8 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         # is unchanged; only the launcher's own cwd is gone.
         launcher = LAUNCHER if selfdir is None else os.path.join(selfdir, "finalize-session")
         entry = [CWDGONE_BIN, launcher] if cwd_gone else [launcher]
-        argv = [NEST_BIN, str(depth)] + entry + list(launcher_flags) + [message]
+        argv = ([NEST_BIN, str(depth)] + entry + ["--summary-file", summary_file]
+                + list(launcher_flags) + [message])
         # A process wrapped around the whole chain, running as the executable `outer`
         # names. The trailing `exit` keeps bash from exec-ing the chain in place of it.
         if outer is not None:
@@ -741,17 +766,29 @@ check("the tmux-absent PATH can still run the launcher",
 
 
 
-def argv_case(*args, path_prefix=""):
-    """Run the launcher with these args against a handoff directory of its own.
+def argv_case(*args, path_prefix="", summary_file=SUMMARY_FILE, dry_run="1",
+              handoff_dir=None, journal="journal.jsonl", files=()):
+    """Run the launcher with these args against a handoff directory and a journal of its own.
 
-    Returns (completed process, list of handoff bodies written). Bodies are returned
-    rather than filenames, since the checks concern what a handoff says. The run is
-    dry, and `path_prefix` is prepended to the fixture PATH, never substituted for
+    Returns (completed process, list of the bodies of every file left in the handoff
+    directory). Bodies are returned rather than filenames, since the checks concern what a
+    handoff says. `done.closes` is what the journal then holds, and `done.journaled` whether
+    its file exists. `path_prefix` is prepended to the fixture PATH, never substituted for
     it, so a missing transport cannot masquerade as an argv refusal.
+
+    `summary_file` is passed as --summary-file ahead of `args`; None passes none.
+    `handoff_dir` is a $MEMENTO_HANDOFF_DIR to pass as given, and `journal` is joined to
+    the case's own directory. That directory is the launcher's working directory, so a
+    relative `handoff_dir` is found inside it, and so is each of `files`, (name, text)
+    pairs written there before the run.
     """
     path = ":".join(p for p in (path_prefix, FIXTURES, REAL_DIRS) if p)
     workdir = tempfile.mkdtemp(prefix="finalize-argv.")
-    handoffs = os.path.join(workdir, "handoffs")
+    handoffs = os.path.join(workdir, handoff_dir or "handoffs")
+    journal = os.path.join(workdir, journal)
+    for name, text in files:
+        summary_at(os.path.join(workdir, name), text)
+    summary = [] if summary_file is None else ["--summary-file", summary_file]
     # The pane's process is this runner, and the launcher runs under a claude below
     # it, as it would in a real pane's session. The trailing `exit` keeps bash from
     # exec-ing the launcher in place of the claude process.
@@ -761,21 +798,40 @@ def argv_case(*args, path_prefix=""):
     under_claude = [CLAUDE_BIN, "-c", 'export CLAUDE_PID=$$; "$@"; exit $?', "wrap"]
     try:
         done = subprocess.run(
-            [*under_claude, LAUNCHER, *args], text=True, capture_output=True, timeout=30,
+            [*under_claude, LAUNCHER, *summary, *args], text=True, capture_output=True,
+            timeout=30, cwd=workdir,
             env={"PATH": path, "HOME": workdir, "TMPDIR": workdir,
-                 "MEMENTO_HANDOFF_DIR": handoffs, "FINALIZE_DRY_RUN": "1",
+                 "MEMENTO_HANDOFF_DIR": handoff_dir or handoffs, "MEMENTO_JOURNAL": journal,
+                 "FINALIZE_DRY_RUN": dry_run, "CLAUDE_CODE_SESSION_ID": SESSION_ID,
                  "FIXTURE_ROOT_PID": rootfile, "FIXTURE_PANES": "%99 ROOTPID 0"})
         names = sorted(os.listdir(handoffs)) if os.path.isdir(handoffs) else []
         bodies = [open(os.path.join(handoffs, name)).read() for name in names]
+        # Asked of the path first: a journal that cannot be a file is not one to read.
+        done.journaled = os.path.exists(journal)
+        done.closes = entries(journal) if done.journaled else []
         return done, bodies
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-done, bodies = argv_case("--help")
+def real_case(*args, **setup):
+    """An argv_case with the dry run off, so the launcher journals its close-out. The run
+    is refused at the log tempfile unless something refuses it sooner, so no worker is ever
+    started.
+    """
+    return argv_case(*args, dry_run="", path_prefix=NO_LOGFILE_BIN, **setup)
+
+
+def outcome(done, bodies):
+    return (f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} "
+            f"handoffs={bodies!r} journal={done.closes!r}")
+
+
+# --help exits before anything is required of the run, the summary included.
+done, bodies = argv_case("--help", summary_file=None)
 check("--help prints the usage and records nothing",
-      done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == [],
-      f"rc={done.returncode} out={done.stdout!r} handoffs={len(bodies)}")
+      done.returncode == 0 and "usage: finalize-session" in done.stdout and bodies == []
+      and not done.journaled, outcome(done, bodies))
 
 # A mistyped flag looks like an option but is not one. Without the border it would be
 # recorded as the handoff and delivered to the next agent as its instructions.
@@ -824,13 +880,33 @@ check("a tempfile it cannot make is refused as the launcher, not as mktemp",
 # requires a recorded body and its path in stderr, so a fixture that refused every
 # mktemp would fail here rather than pass.
 logfail_dir = tempfile.mkdtemp(prefix="finalize-logfail.")
-done = run(dry_run="", log_mktemp_fails=True, handoff_dir=logfail_dir)
-recorded = sorted(os.listdir(logfail_dir))
+logfail_journal = os.path.join(logfail_dir, "journal", "journal.jsonl")
+done = run(dry_run="", log_mktemp_fails=True, handoff_dir=os.path.join(logfail_dir, "handoffs"),
+           journal=logfail_journal)
+recorded = [os.path.join(logfail_dir, "handoffs", name)
+            for name in sorted(os.listdir(os.path.join(logfail_dir, "handoffs")))]
 check("a tempfile it cannot make after the handoff is written says where the handoff is",
-      done.returncode == REFUSED_RC and len(recorded) == 1
-      and os.path.join(logfail_dir, recorded[0]) in done.stderr,
+      done.returncode == REFUSED_RC and len(recorded) == 1 and recorded[0] in done.stderr,
       f"rc={done.returncode} err={done.stderr!r} recorded={recorded!r}")
+# The close-out is journaled before any transport is looked for, so a transport refused
+# afterwards leaves an entry, and the handoff it names is the file the refusal names.
+closes = entries(logfail_journal)
+check("a transport refused after the close-out leaves the entry, naming the preserved handoff",
+      len(closes) == 1 and isinstance(closes[0], Close) and [closes[0].handoff] == recorded,
+      f"journal={closes!r} recorded={recorded!r}")
 shutil.rmtree(logfail_dir, ignore_errors=True)
+
+# A session that has removed its worktree hands off from a directory that no longer
+# exists. Its close-out is still journaled, under the name the shell holds for it.
+gone_dir = tempfile.mkdtemp(prefix="finalize-gone.")
+gone_journal = os.path.join(gone_dir, "journal.jsonl")
+done = run(dry_run="", log_mktemp_fails=True, cwd_gone=True, journal=gone_journal,
+           handoff_dir=os.path.join(gone_dir, "handoffs"))
+closes = entries(gone_journal)
+check("a close-out from a working directory that has been removed is journaled",
+      len(closes) == 1 and "cwdgone." in closes[0].cwd,
+      f"rc={done.returncode} err={done.stderr!r} journal={closes!r}")
+shutil.rmtree(gone_dir, ignore_errors=True)
 
 # A give-up path with no explicit guard: the detached transport reads its working
 # directory with a bare command substitution, so an unlinked cwd exits on that
@@ -894,15 +970,19 @@ shutil.rmtree(selfgone_dir, ignore_errors=True)
 # message rather than bash's status and message.
 #
 # The handoff write, reached through an existing directory that refuses writes.
-# Nothing is recorded, so the refusal must not name a preserved handoff.
+# Nothing is recorded, so the refusal must not name a preserved handoff. The dry run is
+# off, so this is a run that journals: a close-out naming a handoff that was never
+# written would be recorded on every retry.
 rodir = tempfile.mkdtemp(prefix="finalize-ro.")
 handoffs_ro = os.path.join(rodir, "handoffs")
 os.mkdir(handoffs_ro, 0o500)
 try:
     done = subprocess.run(
-        [LAUNCHER, "a real handoff"], text=True, capture_output=True, timeout=30,
+        [LAUNCHER, "--summary-file", SUMMARY_FILE, "a real handoff"],
+        text=True, capture_output=True, timeout=30,
         env={"PATH": REAL_DIRS, "HOME": rodir, "TMPDIR": rodir,
-             "MEMENTO_HANDOFF_DIR": handoffs_ro})
+             "MEMENTO_HANDOFF_DIR": handoffs_ro,
+             "MEMENTO_JOURNAL": os.path.join(rodir, "journal.jsonl")})
     # Assert the launcher's full sentence: bash's redirection error also contains the
     # launcher's name, so a bare prefix match would not separate the two.
     check("a handoff it cannot write is refused as the launcher, not as the shell",
@@ -910,6 +990,8 @@ try:
           and "finalize-session: cannot write the handoff to" in done.stderr
           and "preserved at" not in done.stderr,
           f"rc={done.returncode} err={done.stderr!r}")
+    check("and journals no close-out for it",
+          not os.path.exists(os.path.join(rodir, "journal.jsonl")), f"err={done.stderr!r}")
 finally:
     os.chmod(handoffs_ro, 0o700)
     shutil.rmtree(rodir, ignore_errors=True)
@@ -948,6 +1030,119 @@ done, bodies = argv_case("ordinary handoff text")
 check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# --- the summary and the journal -------------------------------------------
+# Every run takes a summary file, and a run with the dry run off journals it as the
+# session's close-out, with the handoff it writes. Each refusal here leaves no file in
+# the handoff directory and no entry in the journal. The run that is delivered, and
+# what its entry holds, is with the detached transport's cases below.
+
+for name, case in (("a dry run", argv_case), ("a real run", real_case)):
+    done, bodies = case("a real handoff", summary_file=None)
+    check(f"{name} with no --summary-file is refused, naming the flag",
+          done.returncode == REFUSED_RC and "--summary-file <path> is required" in done.stderr
+          and bodies == [] and not done.journaled, outcome(done, bodies))
+
+done, bodies = argv_case("--summary-file", summary_file=None)
+check("a --summary-file with no path after it is refused",
+      done.returncode == REFUSED_RC and "requires a path" in done.stderr and bodies == [],
+      outcome(done, bodies))
+
+done, bodies = argv_case("a real handoff")
+msgpath = bodies[0].rsplit("This handoff verbatim on disk: ", 1)[-1].strip() if bodies else ""
+check("a dry run names the handoff and the summary file it would journal, and journals nothing",
+      done.returncode == 0 and len(bodies) == 1 and not done.journaled
+      and (f"[dry-run] close-out: would journal the handoff {msgpath} "
+           f"with the summary in {SUMMARY_FILE}") in done.stdout, outcome(done, bodies))
+
+SUMMARIES = os.path.join(FIXTURES, "summaries")
+os.mkdir(SUMMARIES)
+for name, path, reason in (
+        ("is missing", os.path.join(SUMMARIES, "no_such_summary.md"),
+         "cannot read the summary file"),
+        # A path given as '' is a path that cannot be read, not a flag left off.
+        ("is the empty path", "", "cannot read the summary file"),
+        ("holds only blank lines", summary_at(os.path.join(SUMMARIES, "blank.md"), "\n\n  \n"),
+         "the summary is empty"),
+        ("is over the journal's cap",
+         summary_at(os.path.join(SUMMARIES, "long.md"), "x" * (SUMMARY_CAP + 1)),
+         f"the most it may be is {SUMMARY_CAP:,}")):
+    done, bodies = real_case("a real handoff", summary_file=path)
+    check(f"a summary file that {name} is refused, leaving no handoff and no entry",
+          done.returncode == REFUSED_RC and reason in done.stderr
+          and "preserved at" not in done.stderr and bodies == [] and done.closes == [],
+          outcome(done, bodies))
+
+# A journal whose path runs through a regular file cannot be written by anyone.
+done, bodies = real_case("a real handoff", journal=os.path.join(SUMMARY_FILE, "journal.jsonl"))
+check("a journal that cannot be written is refused, leaving no handoff",
+      done.returncode == REFUSED_RC and "the journal did not record the close-out" in done.stderr
+      and "preserved at" not in done.stderr and bodies == [], outcome(done, bodies))
+
+# The journal is what refuses a handoff path that is not absolute: a wake finds its
+# close-out by that path alone.
+done, bodies = real_case("a real handoff", handoff_dir="handoffs")
+check("a relative $MEMENTO_HANDOFF_DIR is refused by the journal, leaving no handoff and no entry",
+      done.returncode == REFUSED_RC and "is not absolute" in done.stderr
+      and bodies == [] and done.closes == [], outcome(done, bodies))
+
+# memento's hook respells a git or shell name anywhere in a finalize-session command, the
+# summary's path included, so the launcher is handed a path the session never wrote. The
+# commands here go through the real hook, so a spelling the launcher does not know as
+# the hook's fails these cases. The paths are relative, so nothing of the host's own
+# directories is in them.
+HOOK = os.path.join(PLUGIN, "hooks", "scripts", "hyphenate-handoff.py")
+
+
+def through_hook(command):
+    """A Bash command as Claude Code runs it once memento's hook has seen it."""
+    asked = subprocess.run([sys.executable, "-I", HOOK], text=True, capture_output=True, check=True,
+                           input=json.dumps({"tool_input": {"command": command}}))
+    if not asked.stdout:
+        return command
+    return json.loads(asked.stdout)["hookSpecificOutput"]["updatedInput"]["command"]
+
+
+for written, spelled in (("git-summary.md", "g-i-t"), ("sh_summary.md", "s-h"),
+                         ("summary.cmd", "c-m-d")):
+    arrived = shlex.split(through_hook(f"finalize-session --summary-file {written} handoff"))[1:]
+    # The second run has a file at the respelled path, which the launcher could read:
+    # the summary of whichever session left it there.
+    for stale in ((), ((arrived[1], "a summary another session left here"),)):
+        done, bodies = real_case(*arrived, summary_file=None,
+                                 files=((written, "this session's summary"),) + stale)
+        check(f"a summary path the hook respelled is refused, quoting {spelled}"
+              f"{' (a file is at the respelled path)' if stale else ''}",
+              spelled in arrived[1] and done.returncode == REFUSED_RC
+              and f"holds '{spelled}'" in done.stderr and bodies == [] and done.closes == [],
+              f"arrived={arrived!r} " + outcome(done, bodies))
+
+# The launcher holds the spelling's shape and not the hook's words, so a path the hook
+# never touched is refused when it holds the shape, as a session id in a file name may.
+# The refusal claims only what the launcher knows: the two cannot be told apart.
+ID_NAMED = "1b9d6bcd-bbfd-4b2d-9b3e-a8f1c2d3e4f5.md"
+command = f"finalize-session --summary-file {ID_NAMED} handoff"
+done, bodies = real_case("--summary-file", ID_NAMED, "handoff", summary_file=None,
+                         files=((ID_NAMED, "this session's summary"),))
+check("a path the hook left alone that holds its spelling is refused as one it may have changed",
+      through_hook(command) == command and done.returncode == REFUSED_RC
+      and "holds 'e-a'" in done.stderr and "cannot be told from one the hook changed" in done.stderr
+      and bodies == [] and done.closes == [], outcome(done, bodies))
+
+# The skill tells a session where to write its summary, so each path it gives must reach
+# the launcher as written and pass the refusal above.
+BOTTLE_SKILL = open(os.path.join(os.path.dirname(HERE), "SKILL.md")).read()
+skill_paths = sorted(set(re.findall(r"--summary-file (/\S+)", BOTTLE_SKILL)))
+check("the skill gives a path to write a summary at", skill_paths != [], "no --summary-file /...")
+for path in skill_paths:
+    command = f"finalize-session --summary-file {path} /next"
+    done, bodies = argv_case("--summary-file", path, "/next", summary_file=None)
+    check(f"the skill's summary path reaches the launcher as written and is not refused for "
+          f"its spelling: {path}",
+          through_hook(command) == command and "cannot be told from" not in done.stderr,
+          f"hooked={through_hook(command)!r} " + outcome(done, bodies))
+check("the skill states the summary's cap as the journal holds it",
+      f"{SUMMARY_CAP:,} characters" in BOTTLE_SKILL, f"{SUMMARY_CAP:,} characters")
 
 # --- resolution through a real ancestry -----------------------------------
 
@@ -1445,8 +1640,17 @@ def detail(done):
 
 # Each case waits out a successor's answer and, when it is refused, the old process's
 # linger, so they run concurrently. Each owns its workdir, successor and old process.
+#
+# The run that is delivered is also the one whose journal entry is read back. Its summary
+# holds words memento's hook would respell in a command, a character outside ASCII, and
+# blank lines around the text.
+taken_dir = tempfile.mkdtemp(prefix="finalize-taken.")
+TAKEN_SUMMARY = "\nRebased onto master with git and ran the bash suite — 0 failed.\n\n\n"
 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-    taken = pool.submit(run, panes=None, successor="records")
+    taken = pool.submit(run, panes=None, successor="records",
+                        summary_file=summary_at(os.path.join(taken_dir, "summary.md"), TAKEN_SUMMARY),
+                        journal=os.path.join(taken_dir, "journal.jsonl"),
+                        handoff_dir=os.path.join(taken_dir, "handoffs"))
     silent = pool.submit(run, panes=None, successor="silent")
     other = pool.submit(run, panes=None, successor="other")
     dies = pool.submit(run, panes=None, successor="dies")
@@ -1469,6 +1673,17 @@ check("a successor that takes the message is reported delivered, naming its sess
       detail(done))
 check("and the line is the one the ceiling credits as a close-out",
       RESET_MARKER.search(done.stdout), f"{RESET_MARKER.pattern!r} vs {done.stdout!r}")
+closes = entries(os.path.join(taken_dir, "journal.jsonl"))
+written = [os.path.join(taken_dir, "handoffs", name)
+           for name in sorted(os.listdir(os.path.join(taken_dir, "handoffs")))]
+check("its close-out is journaled once: the handoff it wrote, the summary as written, its session",
+      len(closes) == 1 and isinstance(closes[0], Close) and [closes[0].handoff] == written
+      and closes[0].summary == TAKEN_SUMMARY.strip() and closes[0].session == SESSION_ID,
+      f"journal={closes!r} written={written!r}")
+check("and the launcher says the close-out was journaled",
+      len(written) == 1 and f"close-out journaled for the handoff {written[0]}" in done.stdout,
+      detail(done))
+shutil.rmtree(taken_dir, ignore_errors=True)
 check("and the worker retires the old process once the launcher has returned",
       done.retired and "terminated" in done.worker_log, detail(done))
 check("the successor's screen never shows the boot banner, and it still counts as taken",

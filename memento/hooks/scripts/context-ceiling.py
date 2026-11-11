@@ -48,8 +48,8 @@ FINISHING_MARK = "Finish the unit of work you are in the middle of"
 # The close-out instructions both bands share: the launcher command and the
 # handoff contract. Each band's reason is its own opening, this text, and one clause on what not to do.
 CLOSE_OUT = """
-    {launcher} '<handoff message>'
-Running it records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract. That message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
+    {launcher} --summary-file <path> '<handoff message>'
+Running it journals the summary in that file, records the handoff and resets this session into it. Load Skill(memento:message-in-a-bottle) for the handoff contract, and for what the summary says and where its file goes: you write that file first. The handoff message is the ONLY thing the next session wakes up with, so it says what you were doing, exactly where you stopped, and the next concrete step. Pass it as one single-quoted argument, writing an apostrophe as '\\''; newlines inside the quotes are fine. """
 
 FINISHING = Band("finish",
     "CONTEXT CEILING: this session is at ~{tokens:,} tokens, past the {ceiling:,} ceiling; {limit:,} is the hard limit. "
