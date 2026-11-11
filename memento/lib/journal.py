@@ -15,9 +15,10 @@ import collections
 import fcntl
 import json
 import os
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from git_at import git_at
 
 JOURNAL = Path(os.environ.get("MEMENTO_JOURNAL")
                or Path.home() / ".claude" / "memento" / "journal.jsonl")
@@ -133,8 +134,7 @@ def branch_at(cwd):
     """The branch checked out at a directory, or None where git names none: outside a repository,
     on a detached HEAD, or with no git to ask."""
     try:
-        asked = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], cwd=cwd,
-                               capture_output=True, text=True)
+        asked = git_at(cwd, "symbolic-ref", "--short", "-q", "HEAD")
     except OSError:
         return None
     return asked.stdout.strip() or None

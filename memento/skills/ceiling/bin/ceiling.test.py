@@ -632,6 +632,19 @@ verdict, enforced = gate(home, inside, 310_000, session="sub-1")
 check("and the hook reads that file back from inside the submodule",
       enforced == 300_000 and verdict == "block", f"{verdict} {enforced}")
 
+# A session started from a git hook inherits GIT_DIR and GIT_WORK_TREE naming the hook's repository.
+home, repo = world()
+other = repo_with_commit(os.path.join(scratch_dir(), "other"))
+os.environ.update(GIT_DIR=os.path.join(other, ".git"), GIT_WORK_TREE=other)
+try:
+    code, out, err = run(home, os.path.join(repo, "sub"), "set", "project", "300_000")
+finally:
+    del os.environ["GIT_DIR"], os.environ["GIT_WORK_TREE"]
+check("a project move writes the directory's repository whatever repository GIT_DIR names",
+      code == 0 and project_conf(repo) == "ceiling = 300000\n", f"{code} {out} {err}")
+check("and writes nothing beside the repository GIT_DIR names",
+      project_conf(other) is None, str(project_conf(other)))
+
 # --- the gate reads what this wrote -----------------------------------------------------
 
 home, repo = world()

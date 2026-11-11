@@ -342,6 +342,17 @@ check("a directory that does not exist has no branch",
       origin("session-1", str(SCRATCH / "gone")).branch is None)
 check("an environment that names no session leaves the session absent",
       origin(None, str(bare)).session is None and origin("", str(bare)).session is None)
+# A session started from a git hook inherits GIT_DIR and GIT_WORK_TREE naming the hook's repository.
+other = SCRATCH / "other"
+subprocess.run(["git", "init", "-q", "-b", "elsewhere", str(other)], **quiet)
+subprocess.run(["git", "checkout", "-q", "journal-lane"], cwd=repo, **quiet)
+os.environ.update(GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+try:
+    inherited = origin("session-1", str(repo)).branch
+finally:
+    del os.environ["GIT_DIR"], os.environ["GIT_WORK_TREE"]
+check("the branch is the directory's own whatever repository GIT_DIR names",
+      inherited == "journal-lane", inherited)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

@@ -444,6 +444,7 @@ memento/lib/background_session.py
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
+memento/lib/git_at.py
 memento/lib/journal.py
 memento/lib/remote_control.py
 memento/lib/script.py
@@ -466,7 +467,9 @@ writes its line through `ceiling_log.py` too, and its wake through `journal.py`,
 launcher both read a session's transcript through `transcript.py`, the launcher posts into
 a Remote Control session through `remote_control.py`, and it reads a daemon-hosted session's
 background session id, and stops it, through `background_session.py`; `script.py` runs those three as the
-commands the launcher calls.
+commands the launcher calls. `journal.py` and the `ceiling` command ask git about a directory
+through `git_at.py`, so the repository that answers is the directory's own, not one a git hook's
+`GIT_DIR` names.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the
