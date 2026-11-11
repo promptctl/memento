@@ -32,14 +32,15 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAUNCHER = os.path.join(HERE, "finalize-session")
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(HERE))))
-# The journal's command, as the launcher names it in a refusal, and the hook that respells a
-# launcher command.
+# The journal's command, as the launcher names it in a refusal, the hook that respells a
+# launcher command, and the hook that journals the wake of a session a handoff reaches.
 JOURNAL_BIN = os.path.join(PLUGIN_ROOT, "skills", "journal", "bin")
 JOURNAL_CLI = os.path.join(JOURNAL_BIN, "journal")
 HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "hyphenate-handoff.py")
+WAKE_HOOK = os.path.join(PLUGIN_ROOT, "hooks", "scripts", "journal-wake.py")
 # A plugin is a directory rather than an installed package, so the path comes before the import.
 sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
-from journal import Close, Summary, entries  # noqa: E402
+from journal import Close, Summary, chain, entries  # noqa: E402
 
 REAL_DIRS = "/usr/bin:/bin:/usr/sbin:/sbin"
 failures = []
@@ -1924,6 +1925,31 @@ check("and with a summary recorded again it gets as far as it did before",
       AFTER_CLOSE in done.stderr and len(again) == 2
       and entries(journal)[-1].summary == "tried again",
       f"rc={done.returncode} err={done.stderr!r} handoffs={again!r}")
+shutil.rmtree(case, ignore_errors=True)
+
+# The handoff a real run writes is the prompt its successor wakes with, and the wake hook knows a
+# handoff by the lines this launcher frames it with. The hook is given that handoff here, in the
+# suite a change to the framing is run against: the wake it journals leads back to this run's
+# close-out, which is all a later `journal recall` follows.
+case, journal = close_case()
+summarize(journal, DID)
+done, written = closing(case)
+WOKEN_ID = "0c4e7d1a-9b2f-4a6c-8e3d-7f5a2b9c1d60"
+woken = subprocess.run(
+    [WAKE_HOOK], text=True, capture_output=True,
+    input=json.dumps({"session_id": WOKEN_ID, "hook_event_name": "UserPromptSubmit", "cwd": case,
+                      "prompt": open(written[0]).read() if written else ""}),
+    env={**os.environ, "MEMENTO_JOURNAL": journal,
+         "MEMENTO_CEILING_LOG": os.path.join(case, "hook.log")})
+kept = entries(journal)
+links, ending = chain(kept, WOKEN_ID)
+check("the handoff a real run writes wakes a session whose chain leads back to that run's close-out",
+      woken.returncode == 0 and woken.stdout == "" and len(written) == 1
+      and [kept[at] for at in links] == [entry for entry in kept if isinstance(entry, Close)]
+      and [(entry.session, entry.handoff) for entry in kept if isinstance(entry, Close)]
+      == [(SESSION_ID, written[0])],
+      f"rc={woken.returncode} out={woken.stdout!r} err={woken.stderr!r} journal={kept!r} "
+      f"ending={ending!r}")
 shutil.rmtree(case, ignore_errors=True)
 
 

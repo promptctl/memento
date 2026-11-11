@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Writes the context-ceiling log: one line per hook run, in the same format from every hook.
 
-The Stop gate and the SessionStart clear hook both write here, so a grep for a session matches
-lines from either. The writer lives in this module because each hook script runs its logic at
-import time and cannot be imported by the other.
+Every hook that logs writes its line here, so a grep for a session matches lines from all of
+them. The writer lives in this module because each hook script runs its logic at import time and
+cannot be imported by another.
 """
 
 import fcntl

@@ -144,6 +144,19 @@ history is its chain of handoffs: its wake names a handoff, the close that wrote
 handoff names the session before, and so on back. A wake finds its close by the handoff
 file's path alone, so `close` takes only an absolute path.
 
+No command records a wake. `memento/hooks/scripts/journal-wake.py`, registered on
+`UserPromptSubmit`, journals one when a prompt is a handoff and nothing else: its first line
+is the one the launcher opens every handoff with and its last names the handoff file, as a
+session's opening prompt or as Claude Code wraps a paste. Any other prompt journals nothing,
+and that includes one that quotes a handoff among other text. The hook never holds a prompt
+back or adds to it. A wake it cannot record, such as one whose handoff names a path that is
+not absolute, is a hook error Claude Code shows you while the prompt goes through. Each run
+writes one line to `~/.claude/memento/context-ceiling.log` — `woke from <path>`,
+`not a handoff` or `stopped: <reason>` — which is where a chain that ends early is told
+from a hook that never ran. A prompt that names a handoff's file without being one is
+logged `not a handoff, though it names a handoff's file`: that is a handoff quoted, or one
+Claude Code delivered in a wrapping the hook does not know, whose wake went unrecorded.
+
 Writing is open and reading is narrow. `note` is for an agent to use freely. `recall` is all
 an agent reads back: the summaries of the nearest five close-outs in its own chain, oldest
 first, and never a note, so looking back costs about 6,000 characters at most. `show` is for
@@ -411,6 +424,7 @@ memento/hooks/hooks.json
 memento/hooks/scripts/context-ceiling.py
 memento/hooks/scripts/clear-session-ceiling.py
 memento/hooks/scripts/session-status.py
+memento/hooks/scripts/journal-wake.py
 memento/cc-candybar/plugin.json5
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
@@ -427,7 +441,9 @@ memento/skills/journal/
 `ceiling_config.py`, so the program that gates a session on its ceiling and the program
 that moves one cannot disagree about the file format or about which layer wins, and both
 hooks write the ceiling log through `ceiling_log.py`, so their lines read alike. Each of them
-also publishes the session's status for cc-candybar through `candybar.py`.
+also publishes the session's status for cc-candybar through `candybar.py`. `journal-wake.py`
+writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
+`journal` command is the command line of.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the
