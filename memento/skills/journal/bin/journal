@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Writes to the journal and reads it back: a session's notes and close-out, and its chain's history.
+
+The entries, the record and the chain live in `lib/journal.py`; this is the command line over them.
+`note` and `close` append for the calling session, `recall` prints what that session may read of its
+predecessors, and `show` prints the record for the user. Exit codes: 0 done; 1 it could not be done,
+with the reason: the journal or a note's file cannot be read or written, or `recall` has no session
+to recall for; 2 the command line does not parse or its text is refused, and nothing was written.
+"""
+
+import argparse
+import os
+import signal
+import sys
+from pathlib import Path
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+# A plugin is a directory rather than an installed package, so the path comes before the import.
+sys.path.insert(0, os.path.join(PLUGIN_ROOT, "lib"))
+from journal import (FIELDS, JOURNAL, RECALLED, SUMMARY_CAP, Refused, Unreadable,  # noqa: E402
+                     chain, closed, entries, having, inside, noted, origin, recalled, record, shown)
+
+SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+
+
+def field_and_text(written):
+    """One `FIELD=TEXT` filter as its two parts. The field is one an entry can have."""
+    field, given, text = written.partition("=")
+    if not given or field not in FIELDS:
+        raise argparse.ArgumentTypeError(f"{written!r} should read FIELD=TEXT, where FIELD is one "
+                                         f"of: {' '.join(FIELDS)}")
+    return field, text
+
+
+def here():
+    """The origin of an entry this command writes: the calling session, if the environment names
+    one, and the directory it is working in. A directory removed under the session, as a worktree is
+    when its lane ends, has no name the system can give, so its name is the one the shell holds."""
+    try:
+        cwd = os.getcwd()
+    except FileNotFoundError:
+        cwd = os.environ["PWD"]
+    return origin(os.environ.get(SESSION_VARIABLE), cwd)
+
+
+def note(args):
+    """The note is the words on the command line or the contents of `--file`. A file is how text
+    reaches the journal as written when Claude Code's worktree guard, which reads a command's text
+    and not a file's, would refuse the command that carried it."""
+    if args.file is not None and args.text:
+        raise Refused("the note is given both as words and as --file. Give it one way.")
+    text = (" ".join(args.text) if args.file is None
+            else Path(args.file).read_text(encoding="utf-8"))
+    record(noted(here(), text), JOURNAL)
+
+
+def close(args):
+    record(closed(here(), args.handoff, args.summary), JOURNAL)
+
+
+def recall(args):
+    session = os.environ.get(SESSION_VARIABLE)
+    if not session:
+        sys.exit(f"journal: {SESSION_VARIABLE} is not set, so there is no session whose history "
+                 f"to recall. Run it from inside a Claude Code session.")
+    print("\n".join(recalled(entries(JOURNAL), session)))
+
+
+def show(args):
+    """A chain is shown with the reason it goes no further as its last line, so a session id the
+    journal has never seen says so instead of printing nothing."""
+    kept = entries(JOURNAL)
+    positions, ending = range(len(kept)), []
+    if args.chain is not None:
+        links, end = chain(kept, args.chain)
+        positions = inside(kept, args.chain, links)
+        ending = [f"The chain goes no further: {end}"]
+    for line in [shown(kept[at]) for at in positions
+                 if all(having(kept[at], field, text) for field, text in args.having)] + ending:
+        print(line)
+
+
+parser = argparse.ArgumentParser(
+    prog="journal", description="Deposit in the journal, and read a session's history back.")
+commands = parser.add_subparsers(dest="command", required=True)
+# A note's words share the command line with its options, so `note` has no short option and takes
+# none abbreviated: argparse reads a dash-opening argument that holds a space as a word, so a note
+# that opens `-h flag` or `--fi=nal answer` is text. A dash-opening argument with no space is refused
+# as an unknown option, and `--file=` is the option whatever follows it; SKILL.md sends a note that
+# opens with a dash to a file.
+noting = commands.add_parser("note", help="record a note for this session", add_help=False,
+                             allow_abbrev=False)
+noting.add_argument("--help", action="help", help="show this help message and exit")
+noting.add_argument("text", nargs="*", help="the note; quote it as one argument")
+noting.add_argument("--file", metavar="PATH", help="read the note from this file instead")
+noting.set_defaults(run=note)
+closing = commands.add_parser(
+    "close", help="record this session's close-out; finalize-session runs this")
+closing.add_argument("--handoff", required=True, metavar="PATH",
+                     help="the handoff file this close-out writes")
+closing.add_argument("--summary", required=True, metavar="TEXT",
+                     help=f"what the session did and what came of it, at most {SUMMARY_CAP:,} "
+                          f"characters")
+closing.set_defaults(run=close)
+commands.add_parser(
+    "recall", help=f"print the close-out summaries of up to {RECALLED} sessions before this one "
+                   f"in its chain of handoffs").set_defaults(run=recall)
+showing = commands.add_parser("show", help="print the journal's entries, oldest first")
+showing.add_argument("--chain", metavar="SESSION",
+                     help="only the entries of this session and of the sessions its chain of "
+                          "handoffs leads back through")
+showing.add_argument("having", nargs="*", type=field_and_text, metavar="FIELD=TEXT",
+                     help="only entries that have FIELD with TEXT in it; FIELD is one of: "
+                          + " ".join(FIELDS))
+showing.set_defaults(run=show)
+
+args = parser.parse_args()
+# `show` prints the whole record, so a reader that stops early (`head`, a pager) ends this command as
+# it ends `cat`: by SIGPIPE, and not as a journal that could not be read.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+try:
+    args.run(args)
+except Refused as refusal:
+    parser.error(str(refusal))
+except (Unreadable, OSError, UnicodeError) as failure:
+    sys.exit(f"journal: {failure}")
