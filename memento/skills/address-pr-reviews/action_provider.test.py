@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib"))
 import hermetic  # noqa: E402
 
-hermetic.home("action-provider-test-")
+hermetic.home()
 sys.path.insert(0, HERE)
 
 import action_provider as ap  # noqa: E402

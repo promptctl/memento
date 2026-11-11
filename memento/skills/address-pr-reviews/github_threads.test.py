@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib"))
 import hermetic  # noqa: E402
 
-hermetic.home("github-threads-test-")
+hermetic.home()
 _spec = importlib.util.spec_from_file_location(
     "github_threads", os.path.join(HERE, "github_threads.py")
 )

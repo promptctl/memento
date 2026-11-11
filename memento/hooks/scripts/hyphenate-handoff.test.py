@@ -12,7 +12,7 @@ HOOK = os.path.join(HERE, "hyphenate-handoff.py")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "lib"))
 import hermetic  # noqa: E402
 
-hermetic.home("hyphenate-handoff-test-")
+hermetic.home()
 
 
 def rewritten(command):

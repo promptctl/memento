@@ -19,7 +19,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import hermetic  # noqa: E402
 
-SCRATCH = hermetic.home("remote-control-test-")
+hermetic.home()
 import fake_session_server  # noqa: E402
 import remote_control  # noqa: E402
 from fake_session_server import SessionLog  # noqa: E402
@@ -409,7 +409,7 @@ check("a wait the log never answered says so, not only that the session did not 
 session, head_a = fresh(holds=True)
 session.end_turn()
 contended = []
-LOCKS = tempfile.mkdtemp(prefix="remote-control-locks.", dir=SCRATCH)
+LOCKS = tempfile.mkdtemp(prefix="remote-control-locks.")
 
 
 def worker(head, goal, handoff):
@@ -514,7 +514,7 @@ check("a redirect is refused, so the login is never sent on to where it points",
 script = os.path.join(LIB, "remote_control.py")
 # A server's first argument is a script named for the subcommand, run from its directory, so the
 # interpreter's argv has the shape a claude binary's does.
-verbs = tempfile.mkdtemp(prefix="remote-control-verbs.", dir=SCRATCH)
+verbs = tempfile.mkdtemp(prefix="remote-control-verbs.")
 with open(os.path.join(verbs, "remote-control"), "w") as handle:
     handle.write(SLEEPS)
 server = started("remote-control", "--spawn", "worktree", cwd=verbs)
@@ -537,7 +537,7 @@ try:
 finally:
     for process in (server, spawned, daemon):
         process.kill()
-missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs.", dir=SCRATCH),
+missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."),
                        "no-such-handoff.md")
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
                        missing, missing, "1", "1"], capture_output=True, text=True)
@@ -552,7 +552,7 @@ check("as is a timeout that is no number",
       (done.returncode, done.stdout, done.stderr))
 # The stored login, as the keychain (a `security` that answers with it) or the config dir's file holds it.
 STORED = '{"claudeAiOauth": {"accessToken": "%s"}}' % fake_session_server.TOKEN
-login_dir = tempfile.mkdtemp(prefix="remote-control-login.", dir=SCRATCH)
+login_dir = tempfile.mkdtemp(prefix="remote-control-login.")
 with open(os.path.join(login_dir, ".credentials.json"), "w") as handle:
     handle.write(STORED)
 with open(os.path.join(login_dir, "security"), "w") as handle:

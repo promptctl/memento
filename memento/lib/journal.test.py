@@ -18,7 +18,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import hermetic  # noqa: E402
 
-SCRATCH = Path(hermetic.home("journal-test-"))
+SCRATCH = Path(hermetic.home())
 import journal  # noqa: E402
 from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Refused,  # noqa: E402
                      Unreadable, Wake, chain, closed, entries, entry_of, having, inside, line_of,

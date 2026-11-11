@@ -17,7 +17,7 @@ PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 import hermetic  # noqa: E402
 
-SCRATCH = Path(hermetic.home("journal-cli-test-"))
+SCRATCH = Path(hermetic.home())
 from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, Summary,  # noqa: E402
                      entries, noted, record, woke)
 
@@ -31,7 +31,7 @@ def check(name, condition, detail=""):
 
 
 def scratch_journal():
-    return Path(tempfile.mkdtemp(dir=SCRATCH)) / "journal.jsonl"
+    return Path(tempfile.mkdtemp()) / "journal.jsonl"
 
 
 def run(journal, *argv, session="session-A", cwd=SCRATCH):
@@ -45,7 +45,7 @@ def run(journal, *argv, session="session-A", cwd=SCRATCH):
 
 def summarize(journal, text, **how):
     """Records a summary as an agent does: written to a file, and given to the command by path."""
-    path = Path(tempfile.mkdtemp(dir=SCRATCH)) / "summary.md"
+    path = Path(tempfile.mkdtemp()) / "summary.md"
     path.write_text(text)
     return run(journal, "summary", "--file", str(path), **how)
 
@@ -101,7 +101,7 @@ check("summary records the file's text for the calling session, without its surr
       (done, kept))
 # A git that cannot list the variables naming a repository cannot say which branch is the directory's,
 # though it names one when asked.
-unlisting = Path(tempfile.mkdtemp(dir=SCRATCH))
+unlisting = Path(tempfile.mkdtemp())
 (unlisting / "git").write_text("#!/bin/sh\n[ \"$1\" = symbolic-ref ] && echo inherited && exit 0\n"
                                "echo 'git: unlistable' >&2\nexit 1\n")
 (unlisting / "git").chmod(0o755)

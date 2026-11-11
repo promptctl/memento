@@ -21,7 +21,7 @@ LAUNCHER = os.path.join(PLUGIN, "skills", "message-in-a-bottle", "bin", "finaliz
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
 import hermetic  # noqa: E402
 
-SCRATCH = Path(hermetic.home("journal-wake-test-"))
+SCRATCH = Path(hermetic.home())
 from journal import Wake, entries  # noqa: E402
 
 # The session that wrote the handoff, which the handoff names, and the one it wakes.
@@ -37,7 +37,7 @@ def check(name, condition, detail=""):
 
 
 def scratch_dir():
-    return Path(tempfile.mkdtemp(dir=SCRATCH))
+    return Path(tempfile.mkdtemp())
 
 
 def launched(message):

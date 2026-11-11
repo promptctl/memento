@@ -16,7 +16,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import hermetic  # noqa: E402
 
-SCRATCH = hermetic.home("transcript-test-")
+hermetic.home()
 import transcript  # noqa: E402
 from transcript import Settings, Unrecorded, recorded_settings  # noqa: E402
 
@@ -54,7 +54,7 @@ def tool_result():
 def config(*transcripts, session=SESSION, tail=""):
     """A config directory holding one transcript per entry, each a list of records, in its own project
     slug. `tail` is appended raw to the last one, as a partial append leaves it."""
-    root = tempfile.mkdtemp(dir=SCRATCH)
+    root = tempfile.mkdtemp()
     for slug, records in enumerate(transcripts):
         project = os.path.join(root, "projects", f"-project-{slug}")
         os.makedirs(project)

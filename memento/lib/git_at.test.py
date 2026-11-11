@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hermetic  # noqa: E402
 
-SCRATCH = hermetic.home("git-at-test-")
+SCRATCH = hermetic.home()
 from git_at import git_at  # noqa: E402
 
 failures = []

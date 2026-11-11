@@ -16,7 +16,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import hermetic  # noqa: E402
 
-SCRATCH = hermetic.home("candybar-test-")
+hermetic.home()
 PLUGIN = os.path.dirname(LIB)
 STOP_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "context-ceiling.py")
 CLEAR_HOOK = os.path.join(PLUGIN, "hooks", "scripts", "clear-session-ceiling.py")
@@ -42,7 +42,7 @@ class World:
     session folder exists, as it does once cc-candybar has loaded the plugin."""
 
     def __init__(self, storage=True, user_conf=None):
-        self.root = tempfile.mkdtemp(dir=SCRATCH)
+        self.root = tempfile.mkdtemp()
         self.home = os.path.join(self.root, "home")
         self.project = os.path.join(self.root, "project")
         self.data = os.path.join(self.root, "data")
@@ -225,7 +225,7 @@ check("a status that cannot be written exits 3, and the move it follows stands",
       (done.returncode, done.stderr, done.stdout))
 # A publish that fails for any reason, not only a filesystem error, also exits 3. Here the manifest
 # has no version, so the definition cannot be stamped.
-broken = os.path.join(tempfile.mkdtemp(dir=SCRATCH), "memento")
+broken = os.path.join(tempfile.mkdtemp(), "memento")
 shutil.copytree(PLUGIN, broken)
 with open(os.path.join(broken, ".claude-plugin", "plugin.json"), "w") as handle:
     handle.write("{}")

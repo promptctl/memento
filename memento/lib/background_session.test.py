@@ -17,7 +17,7 @@ LIB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LIB)
 import hermetic  # noqa: E402
 
-SCRATCH = hermetic.home("background-session-test-")
+hermetic.home()
 from background_session import DaemonError, ask, background_id  # noqa: E402
 
 SESSION = "b08daab6-66a8-47af-9d13-aaa85780e908"
@@ -71,7 +71,7 @@ for name, bad, reason in (
 
 # Stands in for claude: `agents --json` prints $FAKE_AGENTS, `stop <id>` says it stopped it, and either
 # exits $FAKE_STATUS after sleeping $FAKE_SLEEP seconds.
-CLAUDE = os.path.join(tempfile.mkdtemp(prefix="background-session.", dir=SCRATCH), "claude")
+CLAUDE = os.path.join(tempfile.mkdtemp(prefix="background-session."), "claude")
 with open(CLAUDE, "w") as handle:
     handle.write("""#!/bin/sh
 sleep "${FAKE_SLEEP:-0}"
