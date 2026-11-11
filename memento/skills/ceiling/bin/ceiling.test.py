@@ -124,13 +124,17 @@ def meddling_writer(text, target=None):
     return directory
 
 
-ECHOING_GIT = """#!/bin/sh
-# Echoes any `--` option back and exits 0, as an old `git rev-parse` does for unknown options.
-for argument in "$@"; do
+ECHOING = """for argument in "$@"; do
   case "$argument" in --*) echo "$argument" ;; esac
 done
 exit 0
 """
+# Echoes any `--` option back and exits 0, as an old `git rev-parse` does for unknown options. One
+# older than 2.13 still lists the variables naming a repository, as git has since 1.7.
+ECHOING_GIT = """#!/bin/sh
+[ "$*" = "rev-parse --local-env-vars" ] && echo GIT_DIR && exit 0
+""" + ECHOING
+ECHOING_EVERYTHING_GIT = "#!/bin/sh\n" + ECHOING
 
 FAILING_GIT = """#!/bin/sh
 echo "git: unlistable" >&2
@@ -365,13 +369,16 @@ check("and no config lands in a directory named after a flag",
       f"{project_conf(repo)} {sorted(os.listdir(repo))}")
 
 # A git that runs but cannot list the variables naming a repository cannot be asked about one.
-home, repo = world()
-code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(FAILING_GIT))
-check("a git that cannot list the repository variables is refused in one line",
-      code == 1 and err.startswith("ceiling: git cannot list") and "unlistable" in err
-      and "Traceback" not in err, f"{code} {err}")
-check("and nothing is written", project_conf(repo) is None and session_conf(home) is None,
-      f"{project_conf(repo)} {session_conf(home)}")
+for name, git, said in (("fails", FAILING_GIT, "unlistable"),
+                        ("hands that question back", ECHOING_EVERYTHING_GIT, "--local-env-vars")):
+    home, repo = world()
+    code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(git))
+    check(f"a git that {name} when asked for the repository variables is refused in one line",
+          code == 1 and err.startswith("ceiling: cannot run git")
+          and "cannot list the variables" in err and said in err and "Traceback" not in err,
+          f"{code} {err}")
+    check("and nothing is written", project_conf(repo) is None and session_conf(home) is None,
+          f"{project_conf(repo)} {session_conf(home)}")
 
 # The project is the anchored one, not the working directory. Other cases run with both in one place,
 # so this case is the one that tells them apart.

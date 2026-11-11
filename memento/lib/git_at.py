@@ -18,17 +18,20 @@ CONFIG_SETTINGS = frozenset({"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
 @functools.cache
 def _naming_a_repository():
     """The variables that name the repository git works in: those git lists as local to a repository,
-    less the config settings it carries into another. Raises CalledProcessError where git cannot list
-    them: without the list, the inherited repository would answer."""
-    listed = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True,
-                            check=True)
-    return frozenset(listed.stdout.split()) - CONFIG_SETTINGS
+    less the config settings it carries into another. Raises OSError where git cannot list them, a git
+    that hands the question back among them: without the list, the inherited repository would answer."""
+    listed = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True)
+    named = frozenset(listed.stdout.split())
+    if listed.returncode != 0 or "GIT_DIR" not in named:
+        raise OSError(f"git cannot list the variables that name a repository: "
+                      f"{listed.stderr.strip() or listed.stdout.strip()}")
+    return named - CONFIG_SETTINGS
 
 
 def git_at(directory, *arguments):
     """Runs `git <arguments>` in `directory`, returning the completed process with its output captured
-    as text. Raises OSError where git cannot be run, and CalledProcessError where it runs but cannot
-    list the variables that name a repository."""
+    as text. Raises OSError where git cannot be run, or cannot list the variables that name a
+    repository."""
     naming = _naming_a_repository()
     return subprocess.run(["git", *arguments], cwd=directory, capture_output=True, text=True,
                           env={name: value for name, value in os.environ.items() if name not in naming})

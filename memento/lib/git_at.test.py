@@ -14,6 +14,12 @@ import tempfile
 
 SCRATCH = tempfile.mkdtemp(prefix="git-at-test-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+# The suite's environment is PATH of the one it runs in and SCRATCH as HOME, nothing else, so the
+# repositories it sets up are its own though it runs from a git hook, and each case adds only what
+# it inherits.
+path = os.environ["PATH"]
+os.environ.clear()
+os.environ.update(PATH=path, HOME=SCRATCH)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_at import git_at  # noqa: E402
 
@@ -47,9 +53,7 @@ here, other = repository("here"), repository("other")
 WHERE = ("rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir",
          "--git-path", "index", "--git-path", "objects")
 # What git says of `here` with no GIT_ variable at all: the answer owed whatever is inherited.
-own = subprocess.run(["git", *WHERE], cwd=here, capture_output=True, text=True, check=True,
-                     env={name: value for name, value in os.environ.items()
-                          if not name.startswith("GIT_")}).stdout
+own = subprocess.run(["git", *WHERE], cwd=here, capture_output=True, text=True, check=True).stdout
 
 # A hook in a linked worktree runs with more than GIT_DIR set: each of these names the other repository.
 asked = inheriting({"GIT_DIR": os.path.join(other, ".git"), "GIT_WORK_TREE": other,
