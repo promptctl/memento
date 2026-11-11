@@ -24,7 +24,9 @@ from journal import JOURNAL, origin, record, woke  # noqa: E402
 OPENING = "=== Below is a message from an agent on behalf of the user ===\n"
 NAMING = "This handoff verbatim on disk: "
 # How Claude Code 2.1.299 delivers a paste. An initial prompt, and a paste on 2.1.197, arrive bare.
-PASTED = re.compile(r'\s*<pasted_content id="([^"]*)">\n(.*)\n</pasted_content id="\1">\s*',
+# This matches one paste from the start of a prompt: its text ends at the first closing tag with
+# its id.
+PASTED = re.compile(r'\s*<pasted_content id="([^"]*)">\n(.*?)\n</pasted_content id="\1">\s*',
                     re.DOTALL)
 
 
@@ -33,9 +35,10 @@ def handoff_named(prompt):
 
     [LAW:parse-dont-validate] A handoff is the whole of its prompt, bare or pasted: the first line
     is the launcher's and the last names the file. A prompt that quotes one among other text is
-    not a handoff, since the session it reaches did not wake from it."""
-    pasted = PASTED.fullmatch(prompt)
-    text = (pasted[2] if pasted else prompt).strip()
+    not a handoff, since the session it reaches did not wake from it. A paste that ends before its
+    prompt does is among other text too, a second paste included."""
+    pasted = PASTED.match(prompt)
+    text = (pasted[2] if pasted and pasted.end() == len(prompt) else prompt).strip()
     last = text.rpartition("\n")[2]
     return last[len(NAMING):] if text.startswith(OPENING) and last.startswith(NAMING) else None
 
@@ -44,7 +47,11 @@ hook = None
 try:
     hook = hook_payload("journal-wake", "UserPromptSubmit")
     handoff = handoff_named(hook["prompt"])
-    verdict = "not a handoff"
+    # [LAW:nothing-unseen] A prompt that names a handoff's file and is not a handoff quotes one, or
+    # is one in a wrapping this does not know, which ends its chain: the log tells it from a prompt
+    # that names none.
+    verdict = "not a handoff" + (", though it names a handoff's file" if NAMING in hook["prompt"]
+                                 else "")
     if handoff is not None:
         # The path is recorded as the handoff gives it: a wake finds its close-out by this text.
         # [LAW:single-enforcer] Whether it is a path the journal keeps is `woke`'s to say.

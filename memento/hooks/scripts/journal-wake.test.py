@@ -110,21 +110,30 @@ for how, prompt in (("as a session's initial prompt", handoff),
 
 # --- any other prompt journals nothing -----------------------------------------------------------
 # A handoff is the whole of its prompt. One that is quoted is something the session was shown, not
-# what it woke from, wherever in the prompt the quote stands.
+# what it woke from, wherever in the prompt the quote stands. The log tells a prompt that names a
+# handoff's file from one that names none: a handoff that arrives in a wrapping the hook does not
+# know is the first kind, and that line is how a chain it ended is found.
 
-for what, prompt in (
-        ("an ordinary prompt", "what did the last session do?"),
-        ("a handoff quoted in the middle of other text", f"Look at this:\n{handoff}\nWhat woke it?"),
-        ("a handoff quoted after other text", f"Look at this:\n{handoff}"),
-        ("a handoff quoted before other text", f"{handoff}\nWhat woke it?"),
+NAMES_ONE = "not a handoff, though it names a handoff's file"
+for what, prompt, verdict in (
+        ("an ordinary prompt", "what did the last session do?", "not a handoff"),
+        ("a handoff quoted in the middle of other text", f"Look at this:\n{handoff}\nWhat woke it?",
+         NAMES_ONE),
+        ("a handoff quoted after other text", f"Look at this:\n{handoff}", NAMES_ONE),
+        ("a handoff quoted before other text", f"{handoff}\nWhat woke it?", NAMES_ONE),
         ("a paste that quotes a handoff in the middle of other text",
-         pasted(f"Look at this:\n{handoff}\nWhat woke it?")),
-        ("a pasted handoff with words typed before it", "Look at this: " + pasted(handoff))):
+         pasted(f"Look at this:\n{handoff}\nWhat woke it?"), NAMES_ONE),
+        ("a pasted handoff with words typed before it", "Look at this: " + pasted(handoff),
+         NAMES_ONE),
+        ("two pasted handoffs with words typed between them",
+         pasted(handoff) + "compare with" + pasted(handoff), NAMES_ONE),
+        ("a handoff in a wrapping the hook does not know",
+         f'<pasted-text id="df66">\n{handoff}\n</pasted-text>', NAMES_ONE)):
     journal = scratch_dir() / "journal.jsonl"
     done, logged = run(prompt, journal)
-    check(f"{what} journals nothing and is passed on, logged as no handoff",
+    check(f"{what} journals nothing and is passed on, logged as: {verdict}",
           done.returncode == 0 and passed_on(done) and entries(journal) == []
-          and len(logged) == 1 and logged[0].endswith("-> not a handoff"), (done, logged))
+          and len(logged) == 1 and logged[0].endswith(f"-> {verdict}"), (done, logged))
 
 # --- a wake that cannot be recorded fails where it shows, and holds nothing back --------------------
 # Each of these is a hook error Claude Code shows the user, with the prompt delivered as it was.

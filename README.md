@@ -153,7 +153,9 @@ back or adds to it. A wake it cannot record, such as one whose handoff names a p
 not absolute, is a hook error Claude Code shows you while the prompt goes through. Each run
 writes one line to `~/.claude/memento/context-ceiling.log` — `woke from <path>`,
 `not a handoff` or `stopped: <reason>` — which is where a chain that ends early is told
-from a hook that never ran.
+from a hook that never ran. A prompt that names a handoff's file without being one is
+logged `not a handoff, though it names a handoff's file`: that is a handoff quoted, or one
+Claude Code delivered in a wrapping the hook does not know, whose wake went unrecorded.
 
 Writing is open and reading is narrow. `note` is for an agent to use freely. `recall` is all
 an agent reads back: the summaries of the nearest five close-outs in its own chain, oldest
