@@ -103,9 +103,12 @@ The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. The first two are scheduled and the launcher returns at once. The detached one
 waits up to 30s for the new session to take the message before it answers, so a Bash call
-that runs it needs a timeout of 60s or more. Once it returns, the old session is retired: one a
-daemon hosts (`claude --bg`) through `claude stop`, since the daemon respawns a session whose process
-is signalled, and any other with a signal. A session `claude remote-control` spawned is
+that runs it needs a timeout of 60s or more. Once its new session has taken the message, any tool call
+the old session makes is denied and its turn is ended, which pauses its `/goal`: a session with no terminal
+has no other way to end the goal, which would otherwise go on working beside its successor. Once the
+launcher returns, the old session is retired: one a daemon hosts (`claude --bg`) through `claude stop`,
+since the daemon respawns a session whose process is signalled, and any other with a signal. One whose
+retirement cannot be checked stays fenced, and each stop names the file to remove to lift it. A session `claude remote-control` spawned is
 reached through the session server instead: once the turn ends, a worker posts `/clear` and
 then the message into it, as claude.ai does, under your claude.ai login, and the launcher
 returns at once. Prefix `FINALIZE_DRY_RUN=1` to see which one
@@ -439,12 +442,14 @@ memento/hooks/scripts/clear-session-ceiling.py
 memento/hooks/scripts/session-status.py
 memento/hooks/scripts/journal-wake.py
 memento/hooks/scripts/close-out-call.py
+memento/hooks/scripts/handed-off.py
 memento/cc-candybar/plugin.json5
 memento/lib/background_session.py
 memento/lib/candybar.py
 memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
 memento/lib/git_at.py
+memento/lib/handed_off.py
 memento/lib/journal.py
 memento/lib/launcher.py
 memento/lib/remote_control.py
@@ -467,8 +472,9 @@ writes its line through `ceiling_log.py` too, and its wake through `journal.py`,
 `journal` command is the command line of. The ceiling hook and the `finalize-session`
 launcher both read a session's transcript through `transcript.py`, the launcher posts into
 a Remote Control session through `remote_control.py`, and it reads a daemon-hosted session's
-background session id, and stops it, through `background_session.py`; `script.py` runs those three as the
-commands the launcher calls. `journal.py` and the `ceiling` command ask git about a directory
+background session id, and stops it, through `background_session.py`. Its detached worker marks a
+session that has handed off through `handed_off.py`, the record `handed-off.py` denies that session's
+tool calls on; `script.py` runs those four as the commands the launcher calls. `journal.py` and the `ceiling` command ask git about a directory
 through `git_at.py`, so the repository that answers is the directory's own, not one a git hook's
 `GIT_DIR` names. `close-out-call.py` and the ceiling hook both tell a command that runs the
 launcher through `launcher.py`, so the call the ceiling credits as a close-out is the call that

@@ -10,9 +10,11 @@
 #   detached  - for a session that no pane or iTerm2 session owns, such as one hosted by `claude daemon
 #               run`. A worker starts a new detached tmux window running claude with the message as its
 #               initial prompt, and the launcher returns only once that claude has taken the message, or
-#               refuses. The worker retires the old process once the launcher has returned: a hosted
-#               session through its daemon (`claude stop`), since the daemon respawns one whose process
-#               exits any other way, and any other session with a signal.
+#               refuses. From the take on, the old session's tool calls are denied and end its turn
+#               (lib/handed_off.py), which pauses its goal, since it has no input to end the goal with.
+#               The worker retires the old process once the launcher has returned: a hosted session
+#               through its daemon (`claude stop`), since the daemon respawns one whose process exits any
+#               other way, and any other session with a signal.
 #   remote-control - for a session `claude remote-control` spawned, whose input is the server's pipe. A
 #               worker posts into the session's event log on the session server, where claude.ai posts
 #               prompts (lib/remote_control.py): once the launcher has exited, an interrupt aimed at the
@@ -36,7 +38,7 @@
 #   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
-#   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
+#   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <old session id> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
 #   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> <launcher pid> <launcher ident> [<slash-command>...]
 
 set -euo pipefail
@@ -295,16 +297,18 @@ _relaunch_target() { # <transport name>
 }
 
 # Returns what a pid holds, as its start time and executable name. Those survive the pid being reissued.
-# Empty output means the pid holds nothing, and that is a failure to identify.
+# Empty output means the pid holds nothing, and that is a failure to identify. So does a zombie: it has
+# exited and keeps its start time and name only until its parent reaps it.
 #
 # A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
 # time tells the two apart. The detached worker acts on a pid up to a minute after capturing it, so this
 # check is as strict as the ancestry walk's pid-reuse guard.
 _process_identity() {
-  local pid="${1:-}" raw
+  local pid="${1:-}" raw state
   [ -n "$pid" ] || return 1
-  raw=$(ps -o lstart=,ucomm= -p "$pid" 2>/dev/null) || return 1
-  [ -n "$raw" ] || return 1
+  raw=$(ps -o stat=,lstart=,ucomm= -p "$pid" 2>/dev/null) || return 1
+  read -r state raw <<<"$raw"
+  [[ -n "$raw" && "$state" != Z* ]] || return 1
   printf '%s' "$raw"
 }
 
@@ -320,12 +324,18 @@ _still_captured_process() { # <pid> <identity captured at launch>
 
 # Retires the claude captured at launch, TERM first and KILL if it lingers. Both relaunching workers use
 # this, so neither signals a pid that no longer holds the captured process. Reports through the worker's log.
+# [LAW:no-silent-failure] Returns 1 when the process still holds its pid after KILL, which is also where a
+# signal refused for permission ends up, so a caller never takes a live claude for a retired one.
 _retire() { # <pid> <identity captured at launch>
   if _still_captured_process "$1" "$2"; then
     kill -TERM "$1" 2>/dev/null || true
     if ! _await_exit "$1" "$2"; then
       log "old claude $1 survived TERM; sending KILL"
       kill -KILL "$1" 2>/dev/null || true
+      if ! _await_exit "$1" "$2"; then
+        log "ERROR: old claude $1 survived KILL and still runs [${IDENT_NOW}]"
+        return 1
+      fi
     fi
     log "old claude $1 terminated"
   else
@@ -338,15 +348,21 @@ _retire() { # <pid> <identity captured at launch>
 # crash, and respawns it with a prompt to continue, beside its successor. So this never signals: a session
 # whose stop failed sits idle at the end of the turn that handed off, where a respawned one goes on with the
 # work. It is stopped by its id even when the old process has already left its pid, since the daemon may
-# have respawned it under another. Reports through the worker's log.
+# have respawned it under another, whose exit nothing here can watch. Reports through the worker's log, and
+# returns 1 when the session may still run, a respawn included.
 _stop_background() {
-  local said seen="still running"
-  _still_captured_process "$3" "$4" || seen="already gone, so any process the daemon now runs for it is a respawn"
-  log "asking the daemon to stop background session $2 (old claude $3: $seen)"
+  local said gone=""
+  _still_captured_process "$3" "$4" || gone=": already gone, so any process the daemon now runs for it is a respawn"
+  log "asking the daemon to stop background session $2 (old claude $3${gone:-: still running})"
   if ! said=$(python3 -I "$BACKGROUND" stop "$1" "$2" 2>&1); then
     log "ERROR: the daemon did not stop background session $2: $said. Old claude $3 is still live beside its successor; stop it with: claude stop $2"
+    return 1
+  elif [[ -n "$gone" ]]; then
+    log "the daemon accepted the stop of background session $2 ($said), but its old claude $3 had already gone, so whether a respawn of it still runs cannot be checked"
+    return 1
   elif ! _await_exit "$3" "$4"; then
     log "ERROR: the daemon accepted the stop of background session $2 ($said), but old claude $3 still runs 10s later, beside its successor; stop it with: claude stop $2"
+    return 1
   else
     log "the daemon stopped background session $2, and old claude $3 no longer runs"
   fi
@@ -516,6 +532,7 @@ READER="$SELFDIR/../../../lib/transcript.py"
 JOURNAL="${SELFDIR%/*/*}/journal/bin/journal"
 REMOTE="$SELFDIR/../../../lib/remote_control.py"
 BACKGROUND="$SELFDIR/../../../lib/background_session.py"
+HANDED_OFF="$SELFDIR/../../../lib/handed_off.py"
 
 # Selects the mode once, from the first argument.
 case "${1:-}" in
@@ -820,13 +837,14 @@ case "$MODE" in
       # verdict or dies without one. No clock and no liveness poll here: the worker's deadline is the one
       # bound on the wait.
       VERDICT=$(nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$RELAUNCH" "$CONFIG_DIR" "$SUCCESSOR_ID" \
-        "$MSGFILE" "$GOALFILE" "$CLAUDE_PID" "$CLAUDE_IDENT" "$$" "$LAUNCHER_IDENT" "${RETIREMENT[@]}" \
+        "$MSGFILE" "$GOALFILE" "$CLAUDE_PID" "$CLAUDE_IDENT" "$CLAUDE_CODE_SESSION_ID" "$$" "$LAUNCHER_IDENT" "${RETIREMENT[@]}" \
         3>&1 </dev/null >>"$LOGFILE" 2>&1 &)
       # An empty verdict is a worker that died without one, which the case below names.
       { IFS= read -r OUTCOME || OUTCOME=""; DETAIL=$(cat); } <<<"$VERDICT"
       case "${OUTCOME:-}" in
         taken)
-          echo "handoff delivered → session $SUCCESSOR_ID in detached tmux window '$SESSION'; this session is retired once this call returns (log: $LOGFILE)" ;;
+          echo "handoff delivered → session $SUCCESSOR_ID in detached tmux window '$SESSION'; this session is retired once this call returns (log: $LOGFILE)"
+          [[ -z "$DETAIL" ]] || echo "WARNING: $DETAIL" >&2 ;;
         refused)
           _refuse "detached transport: $DETAIL" ;;
         *)
@@ -935,8 +953,15 @@ Nothing on this machine to deliver the close-out into."
     log "waking; iterm uuid=$UUID claude_pid=$CLAUDE_PID relaunch=[$RELAUNCH]"
     sleep "$HANDOFF_DELAY_SECONDS"
 
-    # Stop the running claude so the shell regains the session.
-    _retire "$CLAUDE_PID" "$CLAUDE_IDENT"
+    # Stop the running claude so the shell regains the session. One that survives would read the relaunch
+    # line as a prompt, so nothing is written to the session then.
+    if ! _retire "$CLAUDE_PID" "$CLAUDE_IDENT"; then
+      log "ERROR: the relaunch was NOT sent, since claude $CLAUDE_PID still runs in iTerm2 session $UUID; that session is unchanged. Run the handoff by hand: $RELAUNCH"
+      if [[ -s "$GOALFILE" ]]; then
+        log "carried goal NOT delivered: /goal $(cat "$GOALFILE")"
+      fi
+      exit 1
+    fi
 
     # Let the shell draw its prompt before typing into it.
     sleep 2
@@ -965,8 +990,8 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   detached-worker)
-    if [[ $# -lt 12 ]]; then
-      echo "internal error: detached-worker expects at least 12 args" >&2
+    if [[ $# -lt 13 ]]; then
+      echo "internal error: detached-worker expects at least 13 args" >&2
       exit 2
     fi
     { true >&3; } 2>/dev/null \
@@ -980,22 +1005,24 @@ Nothing on this machine to deliver the close-out into."
     GOALFILE="$7"
     OLD_CLAUDE_PID="$8"
     OLD_CLAUDE_IDENT="$9"
-    LAUNCHER_PID="${10}"
-    LAUNCHER_IDENT="${11}"
+    OLD_SESSION_ID="${10}"
+    LAUNCHER_PID="${11}"
+    LAUNCHER_IDENT="${12}"
     # [LAW:parse-dont-validate] The retirement, the arguments after the launcher's, is parsed once, before
     # anything is started, into the command that retires the old process.
-    if [[ $# -eq 12 && "${12}" == signal ]]; then
+    if [[ $# -eq 13 && "${13}" == signal ]]; then
       RETIRE=(_retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT")
-    elif [[ $# -eq 14 && "${12}" == stop && -n "${13}" && -n "${14}" ]]; then
-      RETIRE=(_stop_background "${13}" "${14}" "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT")
+    elif [[ $# -eq 15 && "${13}" == stop && -n "${14}" && -n "${15}" ]]; then
+      RETIRE=(_stop_background "${14}" "${15}" "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT")
     else
-      echo "internal error: detached-worker's retirement is 'signal' or 'stop <claude> <background session id>', got '${*:12}'" >&2
+      echo "internal error: detached-worker's retirement is 'signal' or 'stop <claude> <background session id>', got '${*:13}'" >&2
       exit 2
     fi
 
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
-    # The verdict the launcher reports: an outcome line, `taken` or `refused`, then the reason. Closing
+    # The verdict the launcher reports: an outcome line, `taken` or `refused`, then the reason, which a
+    # `taken` carries only when this session could not be fenced off from the work. Closing
     # fd 3 is the launcher's EOF. A launcher that is gone fails the write with EPIPE, ignored here so it
     # cannot kill the worker: the worker still decides, and the log says no one heard.
     _verdict() {
@@ -1004,7 +1031,7 @@ Nothing on this machine to deliver the close-out into."
       exec 3>&-
     }
 
-    log "waking; detached session=$SESSION successor=$SUCCESSOR_ID cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID retirement=[${*:12}] relaunch=[$RELAUNCH]"
+    log "waking; detached session=$SESSION successor=$SUCCESSOR_ID cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID old_session=$OLD_SESSION_ID retirement=[${*:13}] relaunch=[$RELAUNCH]"
 
     # The new window's shell reads the message from the file, so the message never reaches argv or tmux
     # quoting. remain-on-exit is set in the same tmux command, so a claude that exits at boot leaves its
@@ -1036,7 +1063,21 @@ Nothing on this machine to deliver the close-out into."
     fi
 
     log "claude took the message in $SESSION (session $SUCCESSOR_ID)"
-    _verdict taken
+    # [LAW:no-ambient-temporal-coupling] From the take on, the work is the successor's, and the old
+    # context may still run model calls until its retirement below lands: the one that reads the
+    # launcher's result, and a goal's Stop-hook turns. So it is fenced before the launcher hears the
+    # verdict, by the record on which the handed-off hook denies its tool calls and ends its turn, which
+    # pauses its goal, and never earlier, so a session whose handoff is refused keeps its tools. A mark
+    # that fails cannot undo the take, so the verdict says the session is not fenced. The mark prints only
+    # the record's path; why one failed goes to this log, which is the worker's stderr.
+    if FENCE=$(python3 -I "$HANDED_OFF" mark "$OLD_SESSION_ID" "its successor is session $SUCCESSOR_ID, in detached tmux window '$SESSION'."); then
+      log "session $OLD_SESSION_ID fenced: its tool calls are denied while $FENCE stands"
+      _verdict taken
+    else
+      log "ERROR: session $OLD_SESSION_ID could not be fenced off from the work, for the reason above"
+      _verdict taken "this session could not be fenced off from the work (the log says why), so its tool calls still run until it is retired. Its successor holds the work: do nothing more."
+      FENCE=""
+    fi
 
     # [LAW:no-ambient-temporal-coupling] The goal goes in as soon as the successor has taken the message,
     # while that turn runs, where /goal is an immediate command (see the tmux worker). After the
@@ -1048,15 +1089,22 @@ Nothing on this machine to deliver the close-out into."
         || log "ERROR: could not re-establish the carried goal in $SESSION; deliver it by hand: /goal $(cat "$GOALFILE")"
     fi
 
-    # [LAW:no-ambient-temporal-coupling] The old process is retired once the launcher, which runs inside
-    # its Bash call, has returned: retiring while the call runs would have claude tear down that call.
-    # Waiting on the launcher, not a delay, keeps the overlap to the old session's next model call.
+    # The old process is retired once the launcher, which runs inside its Bash call, has returned, so the
+    # call's result reaches the old session's transcript; what that session does after it, the fence denies.
     while _still_captured_process "$LAUNCHER_PID" "$LAUNCHER_IDENT"; do
       sleep 0.2
     done
     # Nothing between the verdict and here can exit the worker, so a successor that took the message
-    # always has its predecessor retired.
-    "${RETIRE[@]}"
+    # always has its predecessor retired. The fence comes down only once the retirement is checked: a
+    # session reopened after it is the user's to drive, and one that may still run stays fenced.
+    if "${RETIRE[@]}"; then
+      if [[ -n "$FENCE" ]]; then
+        python3 -I "$HANDED_OFF" clear "$OLD_SESSION_ID" \
+          || log "ERROR: could not remove $FENCE, so session $OLD_SESSION_ID, if reopened, has its tool calls denied until it is removed"
+      fi
+    elif [[ -n "$FENCE" ]]; then
+      log "session $OLD_SESSION_ID may still run, so it stays fenced: its tool calls are denied while $FENCE stands"
+    fi
 
     # A successor that later exits normally leaves no dead window behind. Losing this costs a dead window,
     # not a handoff, so it is logged, not fatal.
