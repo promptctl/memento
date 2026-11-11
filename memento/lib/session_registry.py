@@ -7,7 +7,7 @@ another process's. Run as a script:
 
   session_registry.py changed <config dir> <pid> <before> <timeout seconds> <poll seconds>
       waits for claude process <pid> to leave session <before>, prints the move and exits 0.
-      A process with no entry has exited, so the wait ends there.
+      A process with no entry shows no move, so the wait ends there.
 
 It prints why it cannot answer on stderr and exits 2.
 """
@@ -49,7 +49,7 @@ def current(config_dir, pid):
         with open(path, "rb") as handle:
             data = handle.read()
     except FileNotFoundError:
-        raise Unregistered(f"no registry entry {path}, so claude process {pid} is not running "
+        raise Unregistered(f"no registry entry {path}, so claude process {pid} is not registered "
                            "under this config dir") from None
     try:
         # A read torn inside a multibyte character fails to decode, which is a ValueError too.
@@ -66,7 +66,7 @@ def changed(config_dir, pid, before, timeout, interval, sleep=time.sleep):
     its entry every `interval` seconds for up to `timeout`.
 
     A torn read is not yet, and the last one's reason is kept for the Unchanged the wait ends in. Any
-    other Unregistered ends the wait: a process with no entry has exited, and its pid may be reissued. No
+    other Unregistered ends the wait: a process whose entry is gone may have exited, and its pid be reissued. No
     `before` is refused, since any session would read as a move."""
     if not before:
         raise Unchanged(f"no session was named for claude process {pid} to leave, so its move cannot be seen")
