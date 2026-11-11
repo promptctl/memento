@@ -23,14 +23,12 @@ from ceiling_log import run  # noqa: E402
 # cannot be updated does not stop the gate.
 from candybar import published  # noqa: E402
 from journal import SUMMARY_CAP  # noqa: E402
+from launcher import names_launcher  # noqa: E402
 from transcript import records_newest_first  # noqa: E402
 
 LAUNCHER = os.path.join(PLUGIN_ROOT, "skills", "message-in-a-bottle", "bin", "finalize-session")
 # The journal's command, which records the summary the launcher's close-out takes.
 JOURNAL = os.path.join(PLUGIN_ROOT, "skills", "journal", "bin", "journal")
-# Matched by basename rather than absolute path, because an agent may reach the launcher by name or
-# through a wrapper. The basename is a substring of the full path, so it covers both.
-LAUNCHER_NAME = os.path.basename(LAUNCHER)
 EVERY_PROMPT_COMPONENT = ("input_tokens", "cache_creation_input_tokens",
                           "cache_read_input_tokens", "output_tokens")
 # The rendered report the launcher prints when a handoff is scheduled (tmux, iTerm2) or delivered
@@ -104,12 +102,14 @@ def result_text(block):
     return text_of(block.get("content"))
 
 def launcher_ran(command):
-    """Whether a Bash command invokes the launcher rather than printing its report. A real
-    invocation cannot contain the rendered report line, because the log path in it is created
-    while the command runs, so a command that carries the line is treated as printing it. The
-    check is a substring test, so a handoff message quoting the line verbatim is not credited
-    and the next stop blocks again."""
-    return LAUNCHER_NAME in command and not RESET_MARKER.search(command)
+    """Whether a Bash command invokes the launcher rather than printing its report. The launcher is
+    matched as a word by `names_launcher`, the definition the close-out-call hook shares, so a call by
+    path, by name or inside a wrapper's command counts. A real invocation cannot contain the rendered
+    report line, because the log path in it is created while the command runs, so a command that
+    carries the line is treated as printing it, and a handoff message quoting the line verbatim is not
+    credited and the next stop blocks again."""
+    return names_launcher(command) and not RESET_MARKER.search(command)
+
 
 def closed_out(transcript_path):
     """Whether a close-out ran in the turn now ending and reset the session. It needs three facts

@@ -15,10 +15,11 @@
 #               exits any other way, and any other session with a signal.
 #   remote-control - for a session `claude remote-control` spawned, whose input is the server's pipe. A
 #               worker posts into the session's event log on the session server, where claude.ai posts
-#               prompts (lib/remote_control.py): /clear once the log shows the asking turn ended, the
-#               handoff once it shows the reset, and the goal once the handoff's turn ended. The launcher
-#               reads the log before it returns, so a session it cannot reach is refused, and returns at
-#               once.
+#               prompts (lib/remote_control.py): once the launcher has exited, an interrupt aimed at the
+#               asking turn, then /clear once the log shows that turn ended, the handoff once it shows the
+#               reset, and the goal once the handoff's turn ended, unless a close-out in that turn claimed
+#               it. The launcher reads the log and claims a goal an earlier handoff left for this session
+#               before it returns, so a session it cannot reach is refused, and returns at once.
 #
 # A relaunched claude is started under a session id the launcher chooses, and it has taken the message
 # when that id's transcript records a prompt holding the handoff file's path (lib/transcript.py). Nothing
@@ -36,7 +37,7 @@
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
-#   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> [<slash-command>...]
+#   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> <launcher pid> <launcher ident> [<slash-command>...]
 
 set -euo pipefail
 
@@ -675,9 +676,10 @@ case "$MODE" in
     # A `claude remote-control` server hosts this session, so its input is the server's pipe and no pane or
     # relaunch reaches it: its prompts come through its log on the session server.
     if [[ -n "$REMOTE_SESSION" ]]; then
-      # [LAW:no-ambient-temporal-coupling] Nothing is posted during this turn: a prompt posted now can be
-      # handed to this turn as text at its next tool call, so a /clear would be read, not run. The worker
-      # waits for the turn's end from the log's last event now.
+      # [LAW:no-ambient-temporal-coupling] No prompt is posted during this turn: one posted now can be
+      # handed to this turn as text at its next tool call, so a /clear would be read, not run. Once this
+      # launcher has exited, the worker interrupts this turn, which a goal would otherwise hold working,
+      # and waits for its end from the log's last event now.
       # Reading it here puts a refusal (no login, a 401 or 403) in front of the agent that asked, in a dry
       # run too.
       HEAD=$(python3 -I "$REMOTE" head "$REMOTE_SESSION") \
@@ -689,13 +691,29 @@ case "$MODE" in
         exit 0
       fi
       _mktemp_or_exit LOGFILE log
+      LAUNCHER_IDENT=$(_process_identity $$) \
+        || _refuse "remote-control transport: cannot read this launcher's own identity, which the worker waits on"
+      # [LAW:one-source-of-truth] A goal an earlier handoff's worker published for this session is still to
+      # be posted into this context once this turn ends, which would start a turn in a context that has
+      # handed off. It is claimed here, as the last step that can refuse, so a refusal before it leaves the
+      # goal with its worker, and one after it names the goal. A goal of this close-out's own is the newer
+      # intention, so a claimed one is then dropped, saying so.
+      CLAIMED=$(python3 -I "$REMOTE" claim "$REMOTE_SESSION" "${MSGFILE%/*}") \
+        || _refuse "remote-control transport: cannot claim the goal an earlier handoff published for $REMOTE_SESSION"
+      if [[ -n "$CLAIMED" && -n "$GOAL" ]]; then
+        echo "the goal an earlier handoff carried is dropped for this close-out's own: /goal $CLAIMED"
+      elif [[ -n "$CLAIMED" ]]; then
+        printf '%s' "$CLAIMED" > "$GOALFILE" \
+          || _refuse "cannot write the carried goal to $GOALFILE, so it was NOT carried on; deliver it by hand once the session is up: /goal $CLAIMED"
+      fi
+      # The worker reads the goal and writes to the log after this launcher exits, so they are its own.
+      trap - EXIT
       # The worker waits through the agent's turns, up to a day, so it is double-forked out of this Bash
       # call's process tree, as the detached worker is: Claude Code kills a stopped call's tree by
       # parentage, and nohup guards only against hangup.
-      ( nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
+      ( nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" "$$" "$LAUNCHER_IDENT" \
           ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 & )
-      trap - EXIT
-      echo "handoff scheduled → remote-control session $REMOTE_SESSION: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
+      echo "handoff scheduled → remote-control session $REMOTE_SESSION: once this call returns, this turn is interrupted, then /clear and the handoff are posted, and a carried goal once the handoff's turn ends (log: $LOGFILE)"
 
     # The pane id is the target: tmux keeps it for the pane's life, where a session:window.pane index can
     # shift before the worker wakes.
@@ -1045,14 +1063,19 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   remote-worker)
-    if [[ $# -lt 4 ]]; then
-      echo "internal error: remote-worker expects at least 4 args" >&2
+    if [[ $# -lt 6 ]]; then
+      echo "internal error: remote-worker expects at least 6 args" >&2
       exit 2
     fi
     trap 'rm -f "$4"' EXIT
+    # [LAW:no-ambient-temporal-coupling] The worker's first post interrupts the asking turn, which would
+    # abort the launcher's Bash call if it were still running, so it waits for the launcher to exit.
+    while _still_captured_process "$5" "$6"; do
+      sleep 0.2
+    done
     # One process makes every post, since the order of the posts, the login, and how far the log has been
     # read are state the steps share (lib/remote_control.py).
     python3 -I "$REMOTE" deliver "$1" "$2" "$3" "$4" "$REMOTE_IDLE_TIMEOUT_SECONDS" \
-      "$RESET_REGISTER_TIMEOUT_SECONDS" "${@:5}"
+      "$RESET_REGISTER_TIMEOUT_SECONDS" "${@:7}"
     ;;
 esac

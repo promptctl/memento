@@ -438,7 +438,7 @@ memento/hooks/scripts/context-ceiling.py
 memento/hooks/scripts/clear-session-ceiling.py
 memento/hooks/scripts/session-status.py
 memento/hooks/scripts/journal-wake.py
-memento/hooks/scripts/hyphenate-handoff.py
+memento/hooks/scripts/close-out-call.py
 memento/cc-candybar/plugin.json5
 memento/lib/background_session.py
 memento/lib/candybar.py
@@ -446,6 +446,7 @@ memento/lib/ceiling_config.py
 memento/lib/ceiling_log.py
 memento/lib/git_at.py
 memento/lib/journal.py
+memento/lib/launcher.py
 memento/lib/remote_control.py
 memento/lib/script.py
 memento/lib/transcript.py
@@ -469,7 +470,9 @@ a Remote Control session through `remote_control.py`, and it reads a daemon-host
 background session id, and stops it, through `background_session.py`; `script.py` runs those three as the
 commands the launcher calls. `journal.py` and the `ceiling` command ask git about a directory
 through `git_at.py`, so the repository that answers is the directory's own, not one a git hook's
-`GIT_DIR` names.
+`GIT_DIR` names. `close-out-call.py` and the ceiling hook both tell a command that runs the
+launcher through `launcher.py`, so the call the ceiling credits as a close-out is the call that
+hook keeps in the foreground.
 
 Nothing in this repo is a symlink, and no skill exists twice. To change the text of
 `message-in-a-bottle`, edit `memento/skills/message-in-a-bottle/SKILL.md` — the file the
