@@ -71,7 +71,7 @@ The contract for writing another is in
 it at the end of a unit of work (PR merged, ticket closed, task delivered) or when the
 context is running out. It calls
 `memento/skills/message-in-a-bottle/bin/finalize-session`, which records the handoff to
-disk and schedules a delayed handoff into your own session: the session resets, and the
+disk and delivers it past a reset: the session resets, and the
 message you wrote arrives as the next agent's opening prompt. Every run resets; a handoff
 hands off.
 
@@ -101,8 +101,10 @@ word, whatever comes after it: `finalize-session -- --already-fixed see PR 123`.
 
 The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
-window. Prefix `FINALIZE_DRY_RUN=1` to see which one it would choose without scheduling
-or journaling anything.
+window. The first two are scheduled and the launcher returns at once. The detached one
+waits up to 30s for the new session to take the message before it answers, so a Bash call
+that runs it needs a timeout of 60s or more. Prefix `FINALIZE_DRY_RUN=1` to see which one
+it would choose without scheduling or journaling anything.
 
 **`ceiling`** — moves the context ceiling, for the session running right now or for its
 whole project: off, up or down by a signed amount, or pinned to a number. It calls
@@ -441,10 +443,11 @@ memento/skills/ceiling/
 memento/skills/journal/
 ```
 
-`memento/lib/` is the one thing several parts of the plugin share: the hooks and
+`memento/lib/` is the one thing several parts of the plugin share: the three ceiling hooks
+(`context-ceiling.py`, `clear-session-ceiling.py`, `session-status.py`) and
 `memento/skills/ceiling/bin/ceiling` all read the config layers through
 `ceiling_config.py`, so the program that gates a session on its ceiling and the program
-that moves one cannot disagree about the file format or about which layer wins, and both
+that moves one cannot disagree about the file format or about which layer wins, and those
 hooks write the ceiling log through `ceiling_log.py`, so their lines read alike. Each of them
 also publishes the session's status for cc-candybar through `candybar.py`. `journal-wake.py`
 writes its line through `ceiling_log.py` too, and its wake through `journal.py`, which the
