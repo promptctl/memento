@@ -10,7 +10,9 @@
 #   detached  - for a session that no pane or iTerm2 session owns, such as one hosted by `claude daemon
 #               run`. A worker starts a new detached tmux window running claude with the message as its
 #               initial prompt, and the launcher returns only once that claude has taken the message, or
-#               refuses. The worker retires the old process once the launcher has returned.
+#               refuses. The worker retires the old process once the launcher has returned: a hosted
+#               session through its daemon (`claude stop`), since the daemon respawns one whose process
+#               exits any other way, and any other session with a signal.
 #   remote-control - for a session `claude remote-control` spawned, whose input is the server's pipe. A
 #               worker posts into the session's event log on the session server, where claude.ai posts
 #               prompts (lib/remote_control.py): /clear once the log shows the asking turn ended, the
@@ -33,7 +35,7 @@
 #   launcher:         see --help
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
-#   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> 3><verdict pipe>
+#   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
 #   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> [<slash-command>...]
 
 set -euo pipefail
@@ -265,12 +267,7 @@ _still_captured_process() { # <pid> <identity captured at launch>
 _retire() { # <pid> <identity captured at launch>
   if _still_captured_process "$1" "$2"; then
     kill -TERM "$1" 2>/dev/null || true
-    # The poll stops when the captured process has exited or the pid holds another process.
-    for _ in $(seq 1 20); do
-      _still_captured_process "$1" "$2" || break
-      sleep 0.5
-    done
-    if _still_captured_process "$1" "$2"; then
+    if ! _await_exit "$1" "$2"; then
       log "old claude $1 survived TERM; sending KILL"
       kill -KILL "$1" 2>/dev/null || true
     fi
@@ -278,6 +275,33 @@ _retire() { # <pid> <identity captured at launch>
   else
     log "old claude $1 is gone: pid now holds [${IDENT_NOW:-nothing}], not the process captured at launch [$2]. Nothing to retire."
   fi
+}
+
+# Retires a daemon-hosted session through its daemon: _stop_background <claude> <background session id>
+# <pid> <identity captured at launch>. The daemon reads its session's process exiting on a signal as a
+# crash, and respawns it with a prompt to continue, beside its successor. So this never signals: a session
+# whose stop failed sits idle at the end of the turn that handed off, where a respawned one goes on with the
+# work. Reports through the worker's log.
+_stop_background() {
+  local said
+  log "asking the daemon to stop background session $2 (old claude $3)"
+  if ! said=$("$1" stop "$2" 2>&1); then
+    log "ERROR: the daemon did not stop background session $2: $said. Old claude $3 is still live beside its successor; stop it with: claude stop $2"
+  elif ! _await_exit "$3" "$4"; then
+    log "ERROR: the daemon accepted the stop of background session $2 ($said), but old claude $3 still runs 10s later, beside its successor; stop it with: claude stop $2"
+  else
+    log "old claude $3 stopped by its daemon (background session $2)"
+  fi
+}
+
+# Waits up to 10s for the process captured at launch to leave its pid, by exiting or by the pid holding
+# another process: _await_exit <pid> <identity captured at launch>. Returns 1 when it still holds it.
+_await_exit() {
+  for _ in $(seq 1 20); do
+    _still_captured_process "$1" "$2" || return 0
+    sleep 0.5
+  done
+  ! _still_captured_process "$1" "$2"
 }
 
 # The command line every relaunch runs: _relaunch_line <claude> <successor id>. It states this session's
@@ -432,6 +456,7 @@ READER="$SELFDIR/../../../lib/transcript.py"
 # so it is spelled without `..`.
 JOURNAL="${SELFDIR%/*/*}/journal/bin/journal"
 REMOTE="$SELFDIR/../../../lib/remote_control.py"
+BACKGROUND="$SELFDIR/../../../lib/background_session.py"
 
 # Selects the mode once, from the first argument.
 case "${1:-}" in
@@ -663,6 +688,20 @@ case "$MODE" in
       # here and passed down as data. An unresolvable `claude` is a refusal, not a fallback to a bare name.
       CLAUDE_BIN=$(command -v claude) \
         || _refuse "detached transport: 'claude' is not resolvable on PATH; cannot name what to relaunch"
+      # How the worker retires the old process. A session the walk found hosted is taken here for a daemon's,
+      # since a remote-control server's took its own transport above, and a daemon respawns a session whose
+      # process exits on a signal, beside its successor. So it is retired through `claude stop`, by the id
+      # the daemon's session listing gives it, and a listing that gives none refuses the handoff: so is a
+      # claude another claude's tool call started, which no daemon lists, in the safe direction.
+      RETIREMENT=(signal)
+      if [[ "$KIND" == hosted ]]; then
+        HOSTED_BY="detached transport: this session is hosted by claude process $HOST_PID, so it is retired through \`claude stop\`: a daemon would respawn it if it were signalled"
+        AGENTS=$("$CLAUDE_BIN" agents --json) \
+          || _refuse "$HOSTED_BY, and '$CLAUDE_BIN agents --json' failed, so the id to stop it by cannot be read"
+        BACKGROUND_ID=$(python3 -I "$BACKGROUND" id "$CLAUDE_CODE_SESSION_ID" <<<"$AGENTS") \
+          || _refuse "$HOSTED_BY, and the session listing gives no background session id to stop it by"
+        RETIREMENT=(stop "$CLAUDE_BIN" "$BACKGROUND_ID")
+      fi
       CWD=$(pwd -P)
       # tmux session names cannot contain ':' or '.'. The pid and epoch seconds are digits only.
       SESSION="finalize-$$-$(date +%s)"
@@ -673,6 +712,7 @@ case "$MODE" in
         echo "[dry-run] transport=detached session=$SESSION cwd=$CWD claude_pid=$CLAUDE_PID claude_bin=$CLAUDE_BIN flags=[$FLAGS]"
         echo "[dry-run] would launch: $RELAUNCH in a fresh detached tmux window"
         echo "[dry-run] old-process identity: $CLAUDE_IDENT"
+        echo "[dry-run] retirement: ${RETIREMENT[*]}"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         exit 0
       fi
@@ -691,7 +731,7 @@ case "$MODE" in
       # verdict or dies without one. No clock and no liveness poll here: the worker's deadline is the one
       # bound on the wait.
       VERDICT=$(nohup "$SELF" --detached-worker "$SESSION" "$CWD" "$RELAUNCH" "$CONFIG_DIR" "$SUCCESSOR_ID" \
-        "$MSGFILE" "$GOALFILE" "$CLAUDE_PID" "$CLAUDE_IDENT" "$$" "$LAUNCHER_IDENT" \
+        "$MSGFILE" "$GOALFILE" "$CLAUDE_PID" "$CLAUDE_IDENT" "$$" "$LAUNCHER_IDENT" "${RETIREMENT[@]}" \
         3>&1 </dev/null >>"$LOGFILE" 2>&1 &)
       # An empty verdict is a worker that died without one, which the case below names.
       { IFS= read -r OUTCOME || OUTCOME=""; DETAIL=$(cat); } <<<"$VERDICT"
@@ -878,8 +918,8 @@ OSA2
     ;;
 
   detached-worker)
-    if [[ $# -ne 11 ]]; then
-      echo "internal error: detached-worker expects exactly 11 args" >&2
+    if [[ $# -lt 12 ]]; then
+      echo "internal error: detached-worker expects at least 12 args" >&2
       exit 2
     fi
     { true >&3; } 2>/dev/null \
@@ -895,6 +935,16 @@ OSA2
     OLD_CLAUDE_IDENT="$9"
     LAUNCHER_PID="${10}"
     LAUNCHER_IDENT="${11}"
+    # [LAW:parse-dont-validate] The retirement, the arguments after the launcher's, is parsed once, before
+    # anything is started, into the command that retires the old process.
+    if [[ $# -eq 12 && "${12}" == signal ]]; then
+      RETIRE=(_retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT")
+    elif [[ $# -eq 14 && "${12}" == stop && -n "${13}" && -n "${14}" ]]; then
+      RETIRE=(_stop_background "${13}" "${14}" "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT")
+    else
+      echo "internal error: detached-worker's retirement is 'signal' or 'stop <claude> <background session id>', got '${*:12}'" >&2
+      exit 2
+    fi
 
     GOALBUF="finalize-goal-$$"
     trap 'rm -f "$GOALFILE"' EXIT
@@ -908,7 +958,7 @@ OSA2
       exec 3>&-
     }
 
-    log "waking; detached session=$SESSION successor=$SUCCESSOR_ID cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID relaunch=[$RELAUNCH]"
+    log "waking; detached session=$SESSION successor=$SUCCESSOR_ID cwd=$CWD old_claude_pid=$OLD_CLAUDE_PID retirement=[${*:12}] relaunch=[$RELAUNCH]"
 
     # The new window's shell reads the message from the file, so the message never reaches argv or tmux
     # quoting. remain-on-exit is set in the same tmux command, so a claude that exits at boot leaves its
@@ -949,7 +999,7 @@ OSA2
       sleep 0.2
     done
     # Retirement runs before the optional steps, so a failure there cannot leave the old process running.
-    _retire "$OLD_CLAUDE_PID" "$OLD_CLAUDE_IDENT"
+    "${RETIRE[@]}"
 
     # A successor that later exits normally leaves no dead window behind. Losing this costs a dead window,
     # not a handoff, so it is logged, not fatal.
