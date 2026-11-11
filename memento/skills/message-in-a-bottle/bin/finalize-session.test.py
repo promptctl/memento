@@ -1942,21 +1942,19 @@ def unspoil(journal):
 # Every way the journal does not record the close-out is one refusal: the journal's reason, its
 # command, and no file in the handoff directory, under a handoff's name or any other. The
 # record is left as it was, so the summary is there for the run that follows the repair.
-for what, summarized, broken, reason, mended, handoff_dir in (
+for what, summarized, broken, reason, mended in (
         ("no summary recorded", False, lambda journal: None, "has recorded no summary",
-         lambda journal: summarize(journal, "handed off"), None),
+         lambda journal: summarize(journal, "handed off")),
         ("a journal with a line that is not an entry", True, spoil,
-         "journal.jsonl line 2 is not a journal entry", unspoil, None),
+         "journal.jsonl line 2 is not a journal entry", unspoil),
         ("a journal that cannot be written", True, lambda journal: os.chmod(journal, 0o400),
-         "Permission denied", lambda journal: os.chmod(journal, 0o600), None),
-        ("a handoff directory that is not a full path", True, lambda journal: None,
-         "is not absolute", lambda journal: None, "handoffs")):
+         "Permission denied", lambda journal: os.chmod(journal, 0o600))):
     case, journal = close_case()
     if summarized:
         summarize(journal, "handed off")
     broken(journal)
     before = open(journal, "rb").read() if os.path.exists(journal) else None
-    done, written = closing(case, handoff_dir=handoff_dir)
+    done, written = closing(case)
     after = open(journal, "rb").read() if os.path.exists(journal) else None
     check(f"{what} is refused with the journal's reason and its command, and no handoff is written",
           done.returncode == REFUSED_RC and reason in done.stderr and NAMES_JOURNAL in done.stderr
@@ -1970,6 +1968,20 @@ for what, summarized, broken, reason, mended, handoff_dir in (
           and (last.handoff, last.summary) == (written[0], "handed off"),
           f"rc={done.returncode} err={done.stderr!r} handoffs={written!r} last={last!r}")
     shutil.rmtree(case, ignore_errors=True)
+
+# A handoff directory given relative to the launcher's own is the launcher's to make whole: the
+# close-out and the handoff's last line both name the file by its full path, the one path a wake
+# can find the close-out by from any directory.
+case, journal = close_case()
+summarize(journal, "handed off")
+done, written = closing(case, handoff_dir="handoffs")
+last = entries(journal)[-1]
+check("a handoff directory given as a relative path is closed out and named by its full path",
+      AFTER_CLOSE in done.stderr and len(written) == 1 and isinstance(last, Close)
+      and os.path.isabs(last.handoff) and os.path.samefile(last.handoff, written[0])
+      and open(written[0]).read().endswith(f"This handoff verbatim on disk: {last.handoff}"),
+      f"rc={done.returncode} err={done.stderr!r} handoffs={written!r} last={last!r}")
+shutil.rmtree(case, ignore_errors=True)
 
 # A run with no session id hands off on the pane transport, so its close-out must not fail for
 # the id: it holds the summary recorded the same way, and never a named session's.

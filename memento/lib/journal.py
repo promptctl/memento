@@ -215,7 +215,8 @@ def pending(entries, session):
 
     [LAW:one-source-of-truth] Whether a summary is still to be taken is read off the record's order
     and marked nowhere else: the close that follows a summary has taken it, so a session whose id
-    survived a reset closes out with its own words and not its predecessor's.
+    survived the reset its close-out made closes out with its own words and not its predecessor's.
+    A summary that no close-out took is taken by the session's next one, through any other reset.
 
     A session is the id its entries carry. Entries that carry none are one session here, and here
     only: a close-out must not fail because its environment names no session, so the summary it

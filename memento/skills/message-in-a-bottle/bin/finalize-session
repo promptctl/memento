@@ -479,6 +479,11 @@ case "$MODE" in
     trap '_refuse "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
     mkdir -p -- "$HANDOFF_DIR" \
       || _refuse "cannot create handoff directory $HANDOFF_DIR"
+    # [LAW:parse-dont-validate] A handoff's path is its file's whole name from here on: the footer gives it
+    # to a reader in any directory, and the journal joins a wake to its close-out by it. So a directory
+    # given relative to this one is made absolute here, once, where the environment is read.
+    HANDOFF_DIR=$(CDPATH= cd -- "$HANDOFF_DIR" && pwd) \
+      || _refuse "cannot resolve handoff directory $HANDOFF_DIR"
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
     # The wrapped message is built once and includes the handoff file's path, so every copy points to the
