@@ -1101,8 +1101,11 @@ for flags, name in (((), "without --goal"), (("--goal", "the tests pass"), "with
 # four. With no session id a carried goal could never be typed, so the close-out refuses rather than
 # dropping it in a log the session never reads.
 done = run(dry_run="")
+# The identity is the claude's start time and executable name, so it ends in the planted claude's name,
+# where the launcher's own would end in bash's.
 check("a tmux close-out hands its worker the config dir, claude pid, its identity and the session id",
-      re.search(rf" {re.escape(done.config_dir)} {done.root_pid} \S.* \S+ {SESSION_ID} ", done.worker_argv.rstrip("\n") + " "),
+      re.search(rf" {re.escape(done.config_dir)} {done.root_pid} \S.* {re.escape(os.path.basename(CLAUDE_BIN))} "
+                rf"{SESSION_ID} ", done.worker_argv.rstrip("\n") + " "),
       f"argv={done.worker_argv!r} config={done.config_dir} pid={done.root_pid}")
 done = run(session_id=None, launcher_flags=("--goal", "the tests pass"))
 check("a tmux close-out carrying a goal with no session id refuses, naming the variable",
@@ -2515,7 +2518,6 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
     that never runs, so how the reset lands is a value, not a mode. `goal` is the
     carried goal, "" for none, and `fail` the tmux subcommand that fails, "" for none.
     """
-    workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     if claude == "background":
         # Its own session, so it holds no terminal, whatever terminal runs this suite.
         reaper = subprocess.Popen(["sleep", "600"], start_new_session=True)
@@ -2524,6 +2526,8 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
         reaper = subprocess.Popen([sys.executable, "-I", "-c", FOREGROUND_HOLDER], stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE, text=True)
         pid = int(reaper.stdout.readline())
+    # Made once the stand-in runs, so a holder that fails, and raises above, leaves nothing on disk.
+    workdir = tempfile.mkdtemp(prefix="finalize-tmux.")
     msgfile = os.path.join(workdir, "handoff.md")
     goalfile = os.path.join(workdir, "goal")
     with open(msgfile, "w") as handle:

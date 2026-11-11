@@ -2,8 +2,9 @@
 # finalize-session: hands the current session off to a fresh one holding the message.
 #
 # Transports, most reliable first:
-#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, verifies it by
-#               reading the pane back, then pastes the message. The launcher returns at once.
+#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, sees it as its
+#               claude leaving this session, then pastes the message, typing nothing once that claude
+#               stops reading the pane. The launcher returns at once.
 #   iTerm2    - schedules a worker that, after the delay, kills the running claude and relaunches it with
 #               the message as its initial prompt, sent with `write text` to the exact session. The
 #               launcher returns at once.
