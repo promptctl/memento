@@ -15,14 +15,15 @@
 #               worker posts into the session's event log on the session server, where claude.ai posts
 #               prompts (lib/remote_control.py): /clear once the log shows the asking turn ended, the
 #               handoff once it shows the reset, and the goal once the handoff's turn ended. The launcher
-#               reads the log before it returns, so a session it cannot reach is refused.
+#               reads the log before it returns, so a session it cannot reach is refused, and returns at
+#               once.
 #
 # A relaunched claude is started under a session id the launcher chooses, and it has taken the message
 # when that id's transcript records a prompt holding the handoff file's path (lib/transcript.py). Nothing
 # about readiness is read off a screen, whose rows a long message scrolls past.
 #
 # Every session can continue an autonomy chain. A launcher that cannot hand off refuses through _refuse
-# (reason on stderr, exit 2). Exit 0 means the worker is scheduled (tmux, iTerm2), whose later failures go
+# (reason on stderr, exit 2). Exit 0 means the worker is scheduled (tmux, iTerm2, remote-control), whose later failures go
 # to its log, or that the successor took the message (detached).
 #
 # Modes:
@@ -30,15 +31,19 @@
 #   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <launcher pid> <launcher ident> 3><verdict pipe>
-#   remote worker:    finalize-session --remote-worker <cse id> <log head> <msgfile> <goalfile> [<slash-command>...]
+#   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> [<slash-command>...]
 
 set -euo pipefail
 
 # HANDOFF_DELAY_SECONDS is the wait before the tmux and iTerm2 workers act on the asking session's own
 # pane or claude, so the asking turn has ended first. RESET_REGISTER_* bound the poll that waits for the
-# reset to appear in the pane (tmux); the timeout also bounds each wait in the session's log for the
-# asking turn to end and for the reset (remote-control).
+# reset to appear in the pane (tmux); the timeout also bounds each wait in the session's log for a
+# command's effect (remote-control).
 HANDOFF_DELAY_SECONDS=10
+# How long the remote-control worker waits for a turn whose length is the agent's work to end: the asking
+# turn, an earlier handoff's carried goal, the handoff's own turn. A day bounds a dead session. Overridable
+# so tests reach the timeout quickly.
+REMOTE_IDLE_TIMEOUT_SECONDS="${MEMENTO_IDLE_TIMEOUT_SECONDS:-86400}"
 # The reset is typed while the agent is usually still mid-turn, and Claude runs queued input only when
 # the turn ends. So the worker polls for the reset to appear instead of waiting a fixed time. The timeout
 # can be overridden so tests can reach the timeout path.
@@ -78,8 +83,8 @@ _clear_box() {
 # server `tmux: server`.
 #
 # No argv is read for what a session was started with: that is read from its transcript, never its
-# command line. The one argv read is a Remote Control session's id, which nothing else a tool call can
-# see carries (the remote-control transport).
+# command line. The one argv the launcher reads is the own claude's, for the Remote Control session it
+# names, which nothing else a tool call can see carries (the remote-control transport).
 _process_table() {
   ps -eo pid=,ppid=,etime=,ucomm=
 }
@@ -111,9 +116,9 @@ _process_table() {
 #     sits below that pane, and an unsound row or the hop bound leaves $CLAUDE_PID unproven, so
 #     relaunching it could signal a session that never asked.
 #   - Any other claude ends the walk: directly above the own one it is the host, further above it the
-#     walk is confined, and below it the walk is refused. Only a direct host is read as one, since a
-#     claude started from a hosted session's shell inherits that session's environment and is not it. A claude is checked before its pane, since a pane's process is
-#     usually the claude it shows.
+#     walk is confined, and below it the walk is refused. Only a direct host is read as one, since the
+#     claude further above a claude started from a hosted session's shell is that session's, not its own.
+#     A claude is checked before its pane, since a pane's process is usually the claude it shows.
 #   - The walk examines this process and 15 ancestors. At that bound it ends as confined.
 # A wrong confinement costs a relaunch, and a wrong pane costs a /clear in someone else's session, so every
 # doubt resolves to confined.
@@ -187,7 +192,9 @@ _ancestry() {
         if (pid "" == own "") passed = 1
         else if (isclaude(pid))
           answer(below "" == own "" ? "hosted" : "confined", "",
-                 passed ? "hosted by another claude (process " pid ")" : "it met claude process " pid " first")
+                 !passed ? "it met claude process " pid " first" \
+                 : below "" == own "" ? "hosted by another claude (process " pid ")" \
+                 : "another claude (process " pid ") is further up")
         if (pid in pane) answer("pane", pane[pid], "process " pid " is the process of pane " pane[pid])
         # A pane process sits directly below its tmux server, so reaching the server means tmux listed
         # no live pane of this session: whatever terminal shows it, that terminal does not belong to this session.
@@ -521,7 +528,8 @@ case "$MODE" in
     # re-detect.
     #
     # [LAW:effects-at-boundaries] The process table and the panes are each read once, here, and _ancestry
-    # decides every transport question from those two readings. No tmux binary, or no server, means no
+    # decides every transport question but one from those two readings: the own claude's command line,
+    # read once below, names the Remote Control session it is, if any. No tmux binary, or no server, means no
     # panes. The environment's $TMUX_PANE is never read: it is inherited, so a daemon passes its spawner's
     # down, and a pane the walk did not reach is not this session's whatever the environment says.
     [[ -n "${CLAUDE_PID:-}" ]] \
@@ -535,6 +543,14 @@ case "$MODE" in
       <<<"$WALK"
     [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] ancestry: $KIND, $REASON"
     [[ "$KIND" != refused ]] || _refuse "$REASON"
+    # [LAW:one-source-of-truth] The session's URL on the session server is in one place a tool call can
+    # read: the --sdk-url the server started this session's claude with. The walk proved $CLAUDE_PID is
+    # that claude. The environment's CLAUDE_CODE_ENVIRONMENT_KIND is never read: it is inherited, so a
+    # daemon started from a remote-control session's shell passes it down to sessions that are not one.
+    ARGS=$(ps -ww -o args= -p "$CLAUDE_PID") \
+      || _refuse "cannot read the command line of claude process $CLAUDE_PID"
+    REMOTE_SESSION=$(python3 -I "$REMOTE" session "$ARGS") \
+      || _refuse "cannot tell which Remote Control session claude process $CLAUDE_PID is"
     # The pane id is the target: tmux keeps it for the pane's life, where a session:window.pane index can
     # shift before the worker wakes.
     if [[ "$KIND" == pane ]]; then
@@ -551,18 +567,12 @@ case "$MODE" in
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
-    # A `claude remote-control` server hosts this session, which Claude Code marks with the bridge
-    # environment kind, so the session's input is that server's pipe and no pane or relaunch reaches it.
-    # Its prompts come through its log on the session server instead.
-    elif [[ "$KIND" == hosted && "${CLAUDE_CODE_ENVIRONMENT_KIND:-}" == bridge ]]; then
-      # [LAW:one-source-of-truth] The session's id on the server is in one place a tool call can read:
-      # the URL the server started this session's claude with. The walk proved $CLAUDE_PID is that claude.
-      ARGS=$(ps -ww -o args= -p "$CLAUDE_PID") \
-        || _refuse "remote-control transport: cannot read the command line of claude process $CLAUDE_PID"
-      REMOTE_ID=$(python3 -I "$REMOTE" session-id "$ARGS") \
-        || _refuse "remote-control transport: cannot name this session on the session server"
+    # A `claude remote-control` server hosts this session, whose claude it started with the session's URL,
+    # so the session's input is that server's pipe and no pane or relaunch reaches it. Its prompts come
+    # through its log on the session server instead.
+    elif [[ "$KIND" == hosted && -n "$REMOTE_SESSION" ]]; then
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
-        echo "[dry-run] transport=remote-control session=$REMOTE_ID msgfile=$MSGFILE"
+        echo "[dry-run] transport=remote-control session=$REMOTE_SESSION msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         echo "[dry-run] requested model: ${MODEL:-(none)} effort: ${EFFORT:-(none)}"
         exit 0
@@ -571,13 +581,13 @@ case "$MODE" in
       # handed to this turn as text at its next tool call, so a /clear would be read, not run. The worker
       # waits for the turn's end from the log's last event now.
       # Reading it here puts a refusal (no login, a 401 or 403) in front of the agent that asked.
-      HEAD=$(python3 -I "$REMOTE" head "$REMOTE_ID") \
-        || _refuse "remote-control transport: cannot read session $REMOTE_ID's log on the session server"
+      HEAD=$(python3 -I "$REMOTE" head "$REMOTE_SESSION") \
+        || _refuse "remote-control transport: cannot read the log of $REMOTE_SESSION"
       _mktemp_or_exit LOGFILE log
-      nohup "$SELF" --remote-worker "$REMOTE_ID" "$HEAD" "$MSGFILE" "$GOALFILE" \
+      nohup "$SELF" --remote-worker "$REMOTE_SESSION" "$HEAD" "$MSGFILE" "$GOALFILE" \
         ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
-      echo "handoff scheduled → remote-control session $REMOTE_ID: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
+      echo "handoff scheduled → remote-control session $REMOTE_SESSION: /clear and the handoff are posted once this turn ends (log: $LOGFILE)"
 
     # $ITERM_SESSION_ID is inherited like $TMUX_PANE, so it names this session's terminal only when the walk
     # showed nothing above this session that could own it.
@@ -920,56 +930,10 @@ OSA2
       echo "internal error: remote-worker expects at least 4 args" >&2
       exit 2
     fi
-    REMOTE_ID="$1"
-    HEAD="$2"
-    MSGFILE="$3"
-    GOALFILE="$4"
-    shift 4
-
-    trap 'rm -f "$GOALFILE"' EXIT
-    log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
-    # Posts one prompt and leaves its log sequence in POSTED, or logs why not and stops: nothing after a
-    # lost prompt may land, since it would run in a session that never got what came before it.
-    _post() {
-      POSTED=$(python3 -I "$REMOTE" post "$REMOTE_ID" "$1") \
-        || { log "ERROR: could not post $2; nothing after it was posted. The handoff is preserved at $MSGFILE"; exit 1; }
-      log "posted $2 (log sequence $POSTED)"
-    }
-    # Waits for an event of a type after a log sequence, or logs what did not happen and stops:
-    # _await <after seq> <event type> <timeout> <what it means> <what was withheld>.
-    _await() {
-      local status=0
-      python3 -I "$REMOTE" await "$REMOTE_ID" "$1" "$2" "$3" || status=$?
-      case "$status" in
-        0) log "$4" ;;
-        1) log "ERROR: the log recorded no $2 within ${3}s; $5 was NOT posted. The handoff is preserved at $MSGFILE"
-           exit 1 ;;
-        *) log "ERROR: cannot read session $REMOTE_ID's log; $5 was NOT posted. The handoff is preserved at $MSGFILE"
-           exit 1 ;;
-      esac
-    }
-
-    log "waking; remote-control session=$REMOTE_ID, log head $HEAD"
-    # [LAW:no-ambient-temporal-coupling] Each slash command goes in only while the session is idle, which
-    # the log shows: a command posted mid-turn is handed to that turn as text (lib/remote_control.py).
-    # A command has finished when the log records its `result`, so the next is posted to an idle session
-    # and no earlier command's `result` can be read as a later turn's end.
-    _await "$HEAD" result "$RESET_REGISTER_TIMEOUT_SECONDS" "the asking turn ended" "the /clear"
-    _post /clear /clear
-    _await "$POSTED" conversation_reset "$RESET_REGISTER_TIMEOUT_SECONDS" "the session reset" "the handoff"
-    _await "$POSTED" result "$RESET_REGISTER_TIMEOUT_SECONDS" "the /clear finished" "the handoff"
-
-    # The requested /model and /effort go in before the handoff, so its first turn already runs on them.
-    for SETTING in "$@"; do
-      _post "$SETTING" "$SETTING"
-      _await "$POSTED" result "$RESET_REGISTER_TIMEOUT_SECONDS" "$SETTING finished" "the handoff"
-    done
-    _post "$(cat "$MSGFILE")" "the handoff"
-    # The reset wiped the goal, so it is re-issued once the handoff's turn has ended: posted during that
-    # turn it would arrive as text. The turn runs as long as its work does; a day bounds a dead session.
-    if [[ -s "$GOALFILE" ]]; then
-      _await "$POSTED" result 86400 "the handoff's turn ended" "the carried goal"
-      _post "/goal $(cat "$GOALFILE")" "the carried goal"
-    fi
+    trap 'rm -f "$4"' EXIT
+    # One process makes every post, since the order of the posts, the login, and how far the log has been
+    # read are state the steps share (lib/remote_control.py deliver).
+    python3 -I "$REMOTE" deliver "$1" "$2" "$3" "$4" "$REMOTE_IDLE_TIMEOUT_SECONDS" \
+      "$RESET_REGISTER_TIMEOUT_SECONDS" "${@:5}"
     ;;
 esac

@@ -16,7 +16,6 @@ Run: python3 finalize-session.test.py
 """
 
 import concurrent.futures
-import http.server
 import json
 import os
 import shlex
@@ -352,73 +351,21 @@ NOT_CLAUDE_BIN, ZSH_BIN = exe("2.1"), exe("zsh")
 
 # A Remote Control session's login and session server. `security` answers the keychain read with a
 # login, so the poster finds one on macOS, and the same login is written as .credentials.json where it
-# looks elsewhere. The session server is a fake on localhost holding each session's log as a running
-# session would write it: the asking turn ends with a `result` once its log head has been read, a /clear
-# brings a conversation_reset and a `result`, and any other prompt a `result`. The session id chooses
-# where that stops, so each case differs only in the id it hands the launcher:
-#   cse_resets...   nothing stops
-#   cse_stalls...   a /clear brings no reset
-#   cse_busy...     the asking turn never ends
-#   cse_refuses...  every request is refused with 403
+# looks elsewhere. The session server is the shared fake (lib/fake_session_server.py), whose session id
+# chooses how the session behaves, so each case differs only in the id it hands the launcher.
+sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "lib"))
+import fake_session_server  # noqa: E402
+
 KEYCHAIN_DIR = os.path.join(FIXTURES, "keychain")
 os.mkdir(KEYCHAIN_DIR)
-LOGIN = '{"claudeAiOauth": {"accessToken": "fixture-login"}}'
+LOGIN = '{"claudeAiOauth": {"accessToken": "%s"}}' % fake_session_server.TOKEN
 install(KEYCHAIN_DIR, "security", f"#!/bin/bash\nprintf '%s' '{LOGIN}'\n")
-# Per session: the requests it received, as (method, prompt or path, Authorization), and its log.
-SESSION_SERVER_LOG = {}
-SESSION_LOGS = {}
+SESSION_SERVER = fake_session_server.serve()
 
 
-class SessionServer(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def answer(self, status, body):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(body).encode())
-
-    def session(self):
-        return self.path.split("/")[4].split("?")[0]
-
-    def append(self, session, *kinds):
-        events = SESSION_LOGS.setdefault(session, [{"sequence_num": "10", "payload": {"type": "assistant"}}])
-        for kind in kinds:
-            events.append({"sequence_num": str(int(events[-1]["sequence_num"]) + 1), "payload": {"type": kind}})
-        return int(events[-1]["sequence_num"])
-
-    def do_POST(self):
-        prompt = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["events"][0]["payload"]["message"]["content"]
-        session = self.session()
-        SESSION_SERVER_LOG.setdefault(session, []).append(("POST", prompt, self.headers.get("Authorization")))
-        if session.startswith("cse_refuses"):
-            return self.answer(403, {"error": {"type": "permission_error", "message": "fixture refuses"}})
-        seq = self.append(session, "user")
-        if prompt == "/clear":
-            self.append(session, *(() if session.startswith("cse_stalls") else ("conversation_reset", "result")))
-        else:
-            self.append(session, "assistant", "result")
-        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq), "duplicate": False}]})
-
-    def do_GET(self):
-        session = self.session()
-        SESSION_SERVER_LOG.setdefault(session, []).append(("GET", self.path, self.headers.get("Authorization")))
-        if session.startswith("cse_refuses"):
-            return self.answer(403, {"error": {"type": "permission_error", "message": "fixture refuses"}})
-        self.append(session)
-        events = SESSION_LOGS[session]
-        if "sort_order=desc" in self.path:
-            head = events[-1]
-            if not session.startswith("cse_busy"):
-                self.append(session, "result")
-            return self.answer(200, {"data": [head]})
-        after = int(self.path.rpartition("cursor=")[2])
-        self.answer(200, {"data": [e for e in events if int(e["sequence_num"]) > after]})
-
-
-SESSION_SERVER = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SessionServer)
-threading.Thread(target=SESSION_SERVER.serve_forever, daemon=True).start()
+def session_url(id):
+    """The URL a remote-control server starts a session's claude with, on the fake session server."""
+    return f"{SESSION_SERVER}/v1/code/sessions/{id}"
 
 
 SESSION_ID = "6a1f9e2c-3b7d-4e8a-9c0f-5d2b1a7e3c94"
@@ -605,13 +552,13 @@ def settle_detached(done, workdir, tmux_state):
         pass
 
 
-def settle_remote(done, session):
+def settle_remote(done, url):
     """After a real remote-control run: the remote worker's log, read once the worker has exited, so the
     case sees every post it made. The worker is known by the session it posts to, which each case names
     uniquely: its files are mktemp's, which on macOS sit outside the case's TMPDIR."""
     def worker_running():
         rows = subprocess.run(["/bin/ps", "-eo", "args="], capture_output=True, text=True).stdout
-        return any(f"--remote-worker {session} " in row for row in rows.split("\n"))
+        return any(f"--remote-worker {url} " in row for row in rows.split("\n"))
 
     wait_for(lambda: not worker_running(), 30)
     logged = done.stdout.rpartition("(log: ")[2].rpartition(")")[0]
@@ -711,11 +658,10 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         env["FIXTURE_TMUX_SERVER_CONFIG_DIR"] = server_config_dir
     if bridge is not None:
         env["PATH"] = KEYCHAIN_DIR + ":" + env["PATH"]
-        url = f"https://api.anthropic.com/v1/code/sessions/{bridge}"
+        url = session_url(bridge)
         env.update(CLAUDE_CODE_ENVIRONMENT_KIND="bridge",
                    NEST_CLAUDE_ARGV0=f"claude --print --sdk-url {url} --session-id {bridge} --resume={url}",
-                   MEMENTO_REMOTE_API_URL=f"http://127.0.0.1:{SESSION_SERVER.server_address[1]}",
-                   MEMENTO_REMOTE_POLL_SECONDS="0.2", MEMENTO_RESET_TIMEOUT_SECONDS="2")
+                   MEMENTO_RESET_TIMEOUT_SECONDS="2", MEMENTO_IDLE_TIMEOUT_SECONDS="2")
         if not config_unset:
             with open(os.path.join(config_dir, ".credentials.json"), "w") as handle:
                 handle.write(LOGIN)
@@ -774,7 +720,7 @@ def run(depth=1, panes="%99 ROOTPID 0", tmux_on_path=True, forge_age=None,
         if successor is not None:
             settle_detached(done, workdir, tmux_state)
         if bridge is not None and not env["FINALIZE_DRY_RUN"]:
-            settle_remote(done, bridge)
+            settle_remote(done, session_url(bridge))
         # The chain's top pid, read before the workdir is removed. It is both the pane
         # fixtures' ROOTPID and the planted claude, so assertions can name the exact
         # process the launcher picked.
@@ -1140,12 +1086,13 @@ check("a handoff message containing --bg-pty-host does not trip the boundary",
 
 # --- a session `claude remote-control` spawned ----------------------------------
 # The server is the host: the session's claude is a `--print` child directly below it, whose input is
-# the server's pipe. Claude Code marks its environment with the bridge kind, and its command line names
-# the session's URL. The chain is pane shell, the server claude, the session claude, shell.
+# the server's pipe, and whose command line names the session's URL. Claude Code also marks its
+# environment with the bridge kind, which is inherited and so decides nothing. The chain is pane shell,
+# the server claude, the session claude, shell.
 
 
 def remote_picked(done):
-    """The session id the launcher would post to, or None when it picked another transport."""
+    """The session URL the launcher would post to, or None when it picked another transport."""
     for line in done.stdout.splitlines():
         if line.startswith("[dry-run] transport=remote-control session="):
             return line.split("session=", 1)[1].split(" ", 1)[0]
@@ -1155,18 +1102,21 @@ def remote_picked(done):
 done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
            bridge="cse_resets01")
 check("a session a remote-control server spawned posts to its own session, not a pane or a relaunch",
-      remote_picked(done) == "cse_resets01" and ancestry(done).startswith("hosted, "),
+      remote_picked(done) == session_url("cse_resets01") and ancestry(done).startswith("hosted, "),
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# The control: the same host without the bridge kind is a daemon host, whose session is relaunched.
-done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST)
-check("the same direct host without the bridge kind is a daemon host, relaunched in a detached window",
-      picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
-      f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
-# A claude started from the remote session's shell inherits its bridge kind and worker token, but the
-# session is the outer one's: posting its /clear would reset the session that started this one.
+# The control: the same host, whose claude names no session, is a daemon host, whose session is
+# relaunched. A daemon started from a remote-control session's shell passes the bridge kind down to it.
+for name, bridge in (("", None), (" though it inherited the bridge kind", "not-a-cse-id")):
+    done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, bridge=bridge)
+    check(f"the same direct host whose claude names no session is a daemon host{name}, relaunched in a detached window",
+          picked(done) == DETACHED and remote_picked(done) is None and ancestry(done).startswith("hosted, "),
+          f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
+# A claude started from the remote session's shell inherits its environment, but the session is the
+# outer one's: posting its /clear would reset the session that started this one.
 done = run(depth=4, rehost_at=4, claude_at=[2], panes=PANES_ABOVE_HOST, bridge="cse_resets02")
 check("a claude started inside a remote-control session never posts to that session",
-      remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, "),
+      remote_picked(done) is None and picked(done) == DETACHED and ancestry(done).startswith("confined, ")
+      and "another claude (process " in ancestry(done) and "is further up" in ancestry(done),
       f"ancestry={ancestry(done)!r} out={done.stdout!r} err={done.stderr!r}")
 done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
            bridge="cse_resets03", launcher_flags=("--goal", "the tests pass"))
@@ -1179,12 +1129,13 @@ check("the dry run carries the goal it would post",
 
 
 def requests(session):
-    """What the session server received, as (method, prompt or path)."""
-    return [(method, what) for method, what, _ in SESSION_SERVER_LOG.get(session, [])]
+    """What the session server received, as (method, path, Authorization)."""
+    return [received[:3] for received in fake_session_server.REQUESTS.get(session, [])]
 
 
 def posted(session):
-    return [what for method, what in requests(session) if method == "POST"]
+    log = fake_session_server.LOGS.get(session)
+    return log.prompts() if log else []
 
 
 handoffs = tempfile.mkdtemp(prefix="finalize-remote.")
@@ -1195,19 +1146,26 @@ try:
     seen = requests("cse_resets04")
     written = [open(os.path.join(handoffs, name)).read() for name in os.listdir(handoffs)]
     check("the launcher reads the log's head and schedules the handoff for the turn's end",
-          done.returncode == 0 and "handoff scheduled → remote-control session cse_resets04" in done.stdout
+          done.returncode == 0
+          and f"handoff scheduled → remote-control session {session_url('cse_resets04')}" in done.stdout
           and seen and "sort_order=desc" in seen[0][1],
           f"rc={done.returncode} out={done.stdout!r} err={done.stderr!r} seen={seen!r}")
     check("then posts /clear, the setting, the handoff from its file, and the goal, in that order",
           posted("cse_resets04") == ["/clear", "/effort high", written[0] if written else None,
                                      "/goal the tests pass"], f"seen={seen!r} log={done.worker_log!r}")
-    check("and reads the log after each step before posting the next, so each goes to an idle session",
-          all(seen[i - 1][0] == "GET" for i, (method, _) in enumerate(seen) if method == "POST"), seen)
+    check("each to a session the log shows idle",
+          all(idle for _, idle in fake_session_server.LOGS["cse_resets04"].posts),
+          fake_session_server.LOGS["cse_resets04"].posts)
     check("every request carries the stored login",
-          {auth for _, _, auth in SESSION_SERVER_LOG["cse_resets04"]} == {"Bearer fixture-login"},
-          SESSION_SERVER_LOG["cse_resets04"])
+          {auth for _, _, auth in seen} == {f"Bearer {fake_session_server.TOKEN}"}, seen)
 finally:
     shutil.rmtree(handoffs, ignore_errors=True)
+
+done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
+           bridge="cse_flaky01", dry_run="")
+check("a read of the log that gets no answer is retried, and the handoff still lands",
+      posted("cse_flaky01")[:1] == ["/clear"] and len(posted("cse_flaky01")) == 2
+      and "HTTP 502" in done.worker_log and "retrying" in done.worker_log,f"seen={requests('cse_flaky01')!r} log={done.worker_log!r}")
 
 done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
            bridge="cse_busy01", dry_run="")
@@ -1229,14 +1187,6 @@ check("a session whose log refuses the login refuses the handoff in front of the
       done.returncode == REFUSED_RC and "HTTP 403" in done.stderr and "fixture refuses" in done.stderr
       and "NOT delivered" in done.stderr, f"rc={done.returncode} err={done.stderr!r}")
 check("and nothing is posted to it", posted("cse_refuses01") == [], requests("cse_refuses01"))
-
-# A bridge session whose claude's command line names no session cannot be found on the server, and no
-# other transport reaches it, so it refuses rather than relaunching the server's child.
-done = run(depth=3, rehost_at=3, claude_at=[2], panes=PANES_ABOVE_HOST, entrypoint="sdk-cli",
-           bridge="not-a-cse-id")
-check("a remote-control session whose command line names no session refuses",
-      done.returncode == REFUSED_RC and "cannot name this session" in done.stderr,
-      f"rc={done.returncode} err={done.stderr!r}")
 
 # The boundary is read from the shape of the tree: a claude other than this session's
 # own, met before a live pane, means the pane shows that claude's session.
