@@ -103,12 +103,12 @@ The launcher picks its transport by capability: reset the tmux pane
 in place, else kill and relaunch the iTerm2 session, else spawn a fresh detached tmux
 window. The first two are scheduled and the launcher returns at once. The detached one
 waits up to 30s for the new session to take the message before it answers, so a Bash call
-that runs it needs a timeout of 60s or more. Once the new session has taken the message, every tool call
-the old one makes is denied, since a session with no terminal has no way to end its `/goal`, which would
-otherwise go on working beside its successor. Once the launcher returns, the old session is retired: one a
-daemon hosts (`claude --bg`) through `claude stop`, since the daemon respawns a session whose process
-is signalled, and any other with a signal. One whose retirement cannot be checked stays fenced, and each
-call it is denied names the file to remove to lift it. A session `claude remote-control` spawned is
+that runs it needs a timeout of 60s or more. Once its new session has taken the message, any tool call
+the old session makes is denied and its turn is ended, which pauses its `/goal`: a session with no terminal
+has no other way to end the goal, which would otherwise go on working beside its successor. Once the
+launcher returns, the old session is retired: one a daemon hosts (`claude --bg`) through `claude stop`,
+since the daemon respawns a session whose process is signalled, and any other with a signal. One whose
+retirement cannot be checked stays fenced, and each stop names the file to remove to lift it. A session `claude remote-control` spawned is
 reached through the session server instead: once the turn ends, a worker posts `/clear` and
 then the message into it, as claude.ai does, under your claude.ai login, and the launcher
 returns at once. Prefix `FINALIZE_DRY_RUN=1` to see which one

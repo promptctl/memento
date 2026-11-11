@@ -10,10 +10,11 @@
 #   detached  - for a session that no pane or iTerm2 session owns, such as one hosted by `claude daemon
 #               run`. A worker starts a new detached tmux window running claude with the message as its
 #               initial prompt, and the launcher returns only once that claude has taken the message, or
-#               refuses. From the take on, the old session's tool calls are denied (lib/handed_off.py),
-#               since it has no input to end its goal with. The worker retires the old process once the
-#               launcher has returned: a hosted session through its daemon (`claude stop`), since the daemon
-#               respawns one whose process exits any other way, and any other session with a signal.
+#               refuses. From the take on, the old session's tool calls are denied and end its turn
+#               (lib/handed_off.py), which pauses its goal, since it has no input to end the goal with.
+#               The worker retires the old process once the launcher has returned: a hosted session
+#               through its daemon (`claude stop`), since the daemon respawns one whose process exits any
+#               other way, and any other session with a signal.
 #   remote-control - for a session `claude remote-control` spawned, whose input is the server's pipe. A
 #               worker posts into the session's event log on the session server, where claude.ai posts
 #               prompts (lib/remote_control.py): once the launcher has exited, an interrupt aimed at the
@@ -1065,7 +1066,8 @@ Nothing on this machine to deliver the close-out into."
     # [LAW:no-ambient-temporal-coupling] From the take on, the work is the successor's, and the old
     # context may still run model calls until its retirement below lands: the one that reads the
     # launcher's result, and a goal's Stop-hook turns. So it is fenced before the launcher hears the
-    # verdict, by the record the handed-off hook denies its every tool call on, and never earlier, so a
+    # verdict, by the record on which the handed-off hook denies its tool calls and ends its turn, which
+    # pauses its goal, and never earlier, so a
     # session whose handoff is refused keeps its tools. A mark that fails cannot undo the take, so the
     # verdict says the session is not fenced.
     if FENCE=$(python3 -I "$HANDED_OFF" mark "$OLD_SESSION_ID" "its successor is session $SUCCESSOR_ID, in detached tmux window '$SESSION'." 2>&1); then

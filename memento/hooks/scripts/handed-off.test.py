@@ -20,10 +20,17 @@ import handed_off  # noqa: E402
 
 
 def decided(session_id, tool_name="Bash"):
-    """The hook's hookSpecificOutput for a call of `session_id`, or None where it prints nothing."""
+    """The reason the hook stops a call of `session_id` with, or None where it prints nothing. A stop both
+    denies the call and ends the turn, with one reason shown to the model and to the user."""
     payload = json.dumps({"session_id": session_id, "tool_name": tool_name, "tool_input": {}})
     result = subprocess.run([HOOK], input=payload, capture_output=True, text=True, check=True)
-    return json.loads(result.stdout)["hookSpecificOutput"] if result.stdout else None
+    if not result.stdout:
+        return None
+    output = json.loads(result.stdout)
+    assert output["continue"] is False, output
+    assert output["hookSpecificOutput"]["permissionDecision"] == "deny", output
+    assert output["hookSpecificOutput"]["permissionDecisionReason"] == output["stopReason"], output
+    return output["stopReason"]
 
 
 def script(*args, home=None):
@@ -33,15 +40,14 @@ def script(*args, home=None):
 
 
 class Fence(unittest.TestCase):
-    def test_a_session_that_handed_off_has_every_tool_call_denied_naming_its_successor(self):
+    def test_a_session_that_handed_off_has_its_turn_stopped_at_any_tool_call_naming_its_successor(self):
         marked = script("mark", "old-1", "its successor is session new-1.")
         self.assertEqual(marked.returncode, 0, marked.stderr)
         self.assertEqual(marked.stdout.strip(), handed_off.path("old-1"))
         for tool in ("Bash", "Edit", "mcp__github__create_pull_request"):
-            output = decided("old-1", tool)
-            self.assertEqual(output["permissionDecision"], "deny")
-            self.assertIn("its successor is session new-1.", output["permissionDecisionReason"])
-            self.assertIn(handed_off.path("old-1"), output["permissionDecisionReason"])
+            reason = decided("old-1", tool)
+            self.assertIn("its successor is session new-1.", reason)
+            self.assertIn(handed_off.path("old-1"), reason)
 
     def test_a_session_with_no_record_is_left_to_the_normal_permission_flow(self):
         script("mark", "old-2", "its successor is session new-2.")
@@ -53,16 +59,15 @@ class Fence(unittest.TestCase):
         self.assertIsNone(decided("old-3"))
         self.assertEqual(script("clear", "old-3").returncode, 0)
 
-    def test_a_record_that_stands_but_cannot_be_read_still_denies_naming_why(self):
+    def test_a_record_that_stands_but_cannot_be_read_still_stops_naming_why(self):
         script("mark", "old-5", "its successor is session new-5.")
         os.chmod(handed_off.path("old-5"), 0)
         try:
-            output = decided("old-5")
+            reason = decided("old-5")
         finally:
             os.chmod(handed_off.path("old-5"), 0o600)
-        self.assertEqual(output["permissionDecision"], "deny")
-        self.assertIn("could not be read", output["permissionDecisionReason"])
-        self.assertIn(handed_off.path("old-5"), output["permissionDecisionReason"])
+        self.assertIn("could not be read", reason)
+        self.assertIn(handed_off.path("old-5"), reason)
 
     def test_a_mark_that_cannot_be_written_fails_naming_why(self):
         # A HOME of its own, where a file stands where the records' directory goes.
