@@ -285,8 +285,9 @@ never falls back quietly to the default, on the grounds that a ceiling you belie
 is worse than no ceiling. Every decision the hook makes — and every stop that keeps it from
 reaching one — is appended to `~/.claude/memento/context-ceiling.log` (`MEMENTO_CEILING_LOG`),
 which is the only place you can tell an allow apart from a hook that never ran. Each run is one
-line: a backslash, a control character or a line separator in it is written as its Python
-backslash escape (`\\`, `\n`, ` `), so a value copied out of the log is unescaped before use.
+line: a backslash, a control character, a line or paragraph separator and a lone surrogate in
+it are written as their Python backslash escapes (`\\`, `\n`, `\u2028`), and everything else,
+non-ASCII included, as it is.
 
 `ceiling set project` moves the project's ceiling instead, writing the one project file. The
 hook reads it live, so that write reaches the session that asked at its next stop and every

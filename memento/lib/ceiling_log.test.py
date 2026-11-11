@@ -129,10 +129,11 @@ check("a run whose fields and stopped reason carry line breaks logs one line, re
                             "shot=Shot 10.00\u202fAM \U0001f468\u200d\U0001f469.png "
                             "-> stopped: ValueError: cannot read\\nthe transcript"), (lines, written))
 
-raised, lines, _ = ran(lambda hook, facts: "allow\u2028under\x1b[0m")
-check("a verdict carrying a line separator or a control character logs one line, both escaped",
-      raised is None and len(lines) == 1 and lines[0].endswith(" -> allow\\u2028under\\x1b[0m"),
-      (raised, lines))
+raised, lines, _ = ran(lambda hook, facts: "allow\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029under\x1b[0m")
+check("a verdict carrying every character str.splitlines breaks a line at, and a control character, "
+      "logs one line, each escaped",
+      raised is None and len(lines) == 1 and lines[0].endswith(
+          " -> allow\\n\\r\\x0b\\x0c\\x1c\\x1d\\x1e\\x85\\u2028\\u2029under\\x1b[0m"), (raised, lines))
 
 full = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
 seeded = [f"line {n:07d} " + "x" * 80 for n in range(ceiling_log.LOG_CAP // 90 + 1)]
