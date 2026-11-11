@@ -20,7 +20,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "journal")
 PLUGIN = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.join(PLUGIN, "lib"))
-from journal import SUMMARY_CAP, Close, Note, Origin, entries, noted, record, woke  # noqa: E402
+from journal import (NOTE_CAP, RECALLED, SUMMARY_CAP, Close, Note, Origin, entries,  # noqa: E402
+                     noted, record, woke)
 
 failures = []
 
@@ -128,12 +129,12 @@ done = run(journal, "recall", session="session-B")
 check("recall prints the summary of the session whose handoff woke this one, and not its note",
       done.returncode == 0 and "  shipped the parser\n" in done.stdout
       and "(journal-lane)" in done.stdout and "dead end" not in done.stdout
-      and done.stdout.endswith("Nothing earlier: session session-A did not wake from a handoff.\n"),
-      done)
+      and done.stdout.endswith("Nothing earlier: the journal holds no wake for session session-A "
+                               "before the earliest close-out shown.\n"), done)
 done = run(journal, "recall", session="session-A")
-check("recall in a session that did not wake from a handoff says so and exits 0",
+check("recall in a session the journal holds no wake for says so and exits 0",
       done.returncode == 0
-      and done.stdout == "Nothing earlier: session session-A did not wake from a handoff.\n", done)
+      and done.stdout == "Nothing earlier: the journal holds no wake for session session-A.\n", done)
 done = run(journal, "recall", session=None)
 check("recall with no session named exits 1 and says what is missing",
       done.returncode == 1 and "CLAUDE_CODE_SESSION_ID is not set" in done.stderr
@@ -151,12 +152,12 @@ done = run(journal, "show", "--chain", "session-B")
 check("show --chain keeps the entries of that session's chain and no other session's",
       done.returncode == 0 and "a dead end worth keeping" in done.stdout
       and "shipped the parser" in done.stdout and "another agent" not in done.stdout
-      and done.stdout.endswith("The chain goes no further: session session-A did not wake from a "
-                               "handoff.\n"), done)
+      and done.stdout.endswith("The chain goes no further: the journal holds no wake for session "
+                               "session-A before the earliest close-out shown.\n"), done)
 done = run(journal, "show", "--chain", "session-nobody")
 check("show --chain of a session the journal has never seen says so instead of printing nothing",
-      done.returncode == 0 and done.stdout == "The chain goes no further: session session-nobody "
-                                              "did not wake from a handoff.\n", done)
+      done.returncode == 0 and done.stdout == "The chain goes no further: the journal holds no "
+                                              "wake for session session-nobody.\n", done)
 done = run(journal, "show", "--chain", "")
 check("show --chain of an empty session id shows no entry, where it showed the whole journal",
       done.returncode == 0 and done.stdout.startswith("The chain goes no further: ")
@@ -208,8 +209,25 @@ for name, path in (("is not there", SCRATCH / "absent.md"), ("is not text", SCRA
           done.returncode == 1 and done.stderr.startswith("journal: ") and not journal.exists(),
           done)
 
-check("the skill that documents it names it",
-      "bin/journal" in open(os.path.join(os.path.dirname(HERE), "SKILL.md")).read())
+# A session that removed its worktree closes out from a directory that is no longer there.
+gone = SCRATCH / "gone"
+gone.mkdir()
+journal = scratch_journal()
+done = subprocess.run(
+    ["sh", "-c", 'cd "$1" && rmdir "$1" && exec "$2" "$3" close --handoff /handoffs/9.md '
+                 '--summary "removed the worktree"', "sh", str(gone), sys.executable, CLI],
+    text=True, capture_output=True,
+    env=dict(os.environ, MEMENTO_JOURNAL=str(journal), CLAUDE_CODE_SESSION_ID="session-A"))
+check("a close-out from a working directory since removed is recorded under the name the shell holds",
+      done.returncode == 0 and [entry.cwd for entry in entries(journal)] == [str(gone)], done)
+
+skill = open(os.path.join(os.path.dirname(HERE), "SKILL.md")).read()
+check("the skill that documents it names it", "bin/journal" in skill)
+for what, stated in (("a note's cap", f"{NOTE_CAP:,} characters"),
+                     ("a summary's cap", f"{SUMMARY_CAP:,} characters"),
+                     ("how many close-outs recall prints", f"the nearest {RECALLED},"),
+                     ("the size of a recall", f"about {SUMMARY_CAP * RECALLED:,}")):
+    check(f"the skill states {what} as the journal has it", stated in skill, stated)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

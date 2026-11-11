@@ -76,25 +76,30 @@ kept = handed("ABC")[:-2]  # C has woken and written nothing since.
 links, end = chain(kept, "C")
 check("a chain is followed from a session back through each handoff to the session that began it",
       [kept[at].summary for at in links] == ["did B", "did A"]
-      and "A did not wake from a handoff" in end, (links, end))
+      and "no wake for session A" in end, (links, end))
 lines = recalled(kept, "C")
 check("recall prints the earlier sessions' summaries, oldest first",
       [line.strip() for line in lines if line.startswith("  ")] == ["did A", "did B"], lines)
 check("recall never prints a note", not any("note of" in line for line in lines), lines)
 check("recall says where the chain begins",
-      lines[-1] == "Nothing earlier: session A did not wake from a handoff.", lines)
+      lines[-1] == "Nothing earlier: the journal holds no wake for session A before the earliest "
+                   "close-out shown.", lines)
 check("a summary's header says when and where it was written",
       lines[0] == "2026-11-10T00:00:00Z  /work  (trunk)", lines[0])
 
 lines = recalled(handed("A"), "A")
-check("a session that did not wake from a handoff has nothing to recall, and is told why",
-      lines == ["Nothing earlier: session A did not wake from a handoff."], lines)
+check("a session the journal holds no wake for has nothing to recall, and is told what is known",
+      lines == ["Nothing earlier: the journal holds no wake for session A."], lines)
 
+told = ["Nothing earlier: session B woke from /handoffs/old.md, which no close-out before it in "
+        "the journal wrote."]
 kept = [woke(by("B"), "/handoffs/old.md"), noted(by("B"), "n")]
 lines = recalled(kept, "B")
-check("a session woken by a handoff no close-out journaled is told which handoff",
-      lines == ["Nothing earlier: session B woke from /handoffs/old.md, which no journaled "
-                "close-out wrote."], lines)
+check("a session woken by a handoff no close-out journaled is told which handoff", lines == told,
+      lines)
+lines = recalled(kept + [closed(by("A"), "/handoffs/old.md", "journaled late")], "B")
+check("a close-out journaled after the wake it wrote for is not that wake's link", lines == told,
+      lines)
 
 kept = [closed(by(None), "/handoffs/1.md", "did it unnamed"), woke(by("B"), "/handoffs/1.md")]
 lines = recalled(kept, "B")
@@ -114,7 +119,8 @@ kept = [noted(by("S"), "before"), closed(by("S"), "/handoffs/1.md", "did the fir
         woke(by("S"), "/handoffs/1.md"), noted(by("S"), "after")]
 check("a session id that survives a reset recalls its own earlier close-out once",
       recalled(kept, "S")[1:] == ["  did the first stretch", "",
-                                  "Nothing earlier: session S did not wake from a handoff."],
+                                  "Nothing earlier: the journal holds no wake for session S before "
+                                  "the earliest close-out shown."],
       recalled(kept, "S"))
 check("and its chain is everything it wrote on both sides of the reset", chained(kept, "S") == kept,
       chained(kept, "S"))

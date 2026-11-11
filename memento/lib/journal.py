@@ -100,7 +100,8 @@ def noted(origin, text):
 def closed(origin, handoff, summary):
     """A close entry for the handoff a session wrote. Raises Refused for a handoff path that is not
     absolute, and for a summary that is empty or over SUMMARY_CAP, the size later sessions read
-    back."""
+    back. Its writer records it before the handoff can wake anyone: a wake finds its close-out only
+    earlier in the record."""
     return Close(*origin, _named(handoff),
                  _said(summary, "the summary", SUMMARY_CAP,
                        "Say what the session did and what came of it in a few sentences; the "
@@ -201,19 +202,21 @@ def chain(entries, session):
     session's latest wake before the link that follows, then the latest close before that wake
     naming the same handoff, and on from the session that wrote it. Each step lands earlier in the
     record, so the walk ends even where a session id survived a reset or a handoff was delivered
-    twice."""
+    twice. The sentence says what the record holds and no more: a session it holds no wake for may
+    have started fresh, or woken where nothing journaled it."""
     links, until = [], len(entries)
     while True:
         woken = _latest(entries, until,
                         lambda entry: isinstance(entry, Wake) and entry.session == session)
         if woken is None:
-            return links, f"session {session} did not wake from a handoff."
+            return links, (f"the journal holds no wake for session {session}"
+                           + (" before the earliest close-out shown." if links else "."))
         handoff = entries[woken].handoff
         wrote = _latest(entries, woken,
                         lambda entry: isinstance(entry, Close) and entry.handoff == handoff)
         if wrote is None:
-            return links, (f"session {session} woke from {handoff}, which no journaled close-out "
-                           f"wrote.")
+            return links, (f"session {session} woke from {handoff}, which no close-out before it in "
+                           f"the journal wrote.")
         links.append(wrote)
         session, until = entries[wrote].session, wrote + 1
         if session is None:
@@ -227,7 +230,8 @@ def inside(entries, session, links):
     A link that names no session is in the chain alone, since an absent session is nobody whose
     other entries could be told from anyone else's."""
     sessions = {session, *(entries[at].session for at in links)} - {None}
-    return [at for at, entry in enumerate(entries) if entry.session in sessions or at in links]
+    linked = set(links)
+    return [at for at, entry in enumerate(entries) if entry.session in sessions or at in linked]
 
 
 def having(entry, field, text):

@@ -39,7 +39,8 @@ in doubt, deposit.
 Claude Code's worktree guard reads the text of a Bash command, not files, and refuses a
 command it cannot verify when that text names git or a shell (bash, sh, zsh and the like).
 A one-line single-quoted note generally passes even so. A note of several lines, one that
-needs an apostrophe or other quoting, or one the guard refused goes in a file: create it
+needs an apostrophe or other quoting, one that opens with a dash (the command reads it as
+an option), or one the guard refused goes in a file: create it
 with the Write tool outside the repository (under `/tmp`, say), since a heredoc or `echo`
 puts the same text back into a command, and pass `--file <path>`. The journal stores the
 file's contents as written, minus surrounding whitespace, and does not delete the file.
@@ -64,8 +65,8 @@ prints a note.
 
 The last line is either
 `Earlier close-outs in this chain, not shown: N.` or
-`Nothing earlier: <why the chain goes no further>` — for example, that this session did not
-wake from a handoff. That is an ordinary answer with exit 0, not an error. Exit 1 comes with
+`Nothing earlier: <why the chain goes no further>` — for example, that the journal holds no
+wake for this session. That is an ordinary answer with exit 0, not an error. Exit 1 comes with
 its reason: the journal could not be read, or `CLAUDE_CODE_SESSION_ID` is not set (a Claude
 Code session's Bash tool sets it).
 

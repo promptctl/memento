@@ -35,8 +35,13 @@ def field_and_text(written):
 
 def here():
     """The origin of an entry this command writes: the calling session, if the environment names
-    one, and the directory it is working in."""
-    return origin(os.environ.get(SESSION_VARIABLE), os.getcwd())
+    one, and the directory it is working in. A directory removed under the session, as a worktree is
+    when its lane ends, has no name the system can give, so its name is the one the shell holds."""
+    try:
+        cwd = os.getcwd()
+    except FileNotFoundError:
+        cwd = os.environ["PWD"]
+    return origin(os.environ.get(SESSION_VARIABLE), cwd)
 
 
 def note(args):
@@ -80,7 +85,10 @@ parser = argparse.ArgumentParser(
     prog="journal", description="Deposit in the journal, and read a session's history back.")
 commands = parser.add_subparsers(dest="command", required=True)
 # A note's words share the command line with its options, so `note` has no short option and takes
-# none abbreviated: a note that opens with `-h` or `--fi=` is text.
+# none abbreviated: argparse reads a dash-opening argument that holds a space as a word, so a note
+# that opens `-h flag` or `--fi=nal answer` is text. A dash-opening argument with no space is refused
+# as an unknown option, and `--file=` is the option whatever follows it; SKILL.md sends a note that
+# opens with a dash to a file.
 noting = commands.add_parser("note", help="record a note for this session", add_help=False,
                              allow_abbrev=False)
 noting.add_argument("--help", action="help", help="show this help message and exit")
