@@ -115,11 +115,12 @@ ran(decided, log=full)
 lines = full.read_text().splitlines()
 newest = lines[1:-1]
 check("a log over the cap, written once more, says older lines were dropped, then holds its newest "
-      "lines whole and the new line, and is under the cap",
+      "lines whole, as many as fit in half the cap, and the new line",
       lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
-      and newest and newest == seeded[-len(newest):] and len(newest) < len(seeded)
-      and lines[-1].endswith(" -> allow-under")
-      and full.stat().st_size < ceiling_log.LOG_CAP, (lines[:2], lines[-2:], full.stat().st_size))
+      and newest == seeded[-len(newest):]
+      and ceiling_log.LOG_CAP // 2 - len(seeded[0]) - 1 < sum(len(line) + 1 for line in newest)
+      <= ceiling_log.LOG_CAP // 2
+      and lines[-1].endswith(" -> allow-under"), (lines[:2], lines[-2:], full.stat().st_size))
 
 full.write_text(full.read_text() + "".join(f"{line}\n" for line in seeded))
 ran(decided, log=full)
@@ -127,6 +128,15 @@ lines = full.read_text().splitlines()
 check("a log over the cap a second time holds one dropped-lines line, at its top",
       [n for n, line in enumerate(lines) if line.startswith("[older lines dropped")] == [0],
       lines[:2])
+
+unended = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
+unended.write_text("x" * (ceiling_log.LOG_CAP + 1))
+ran(decided, log=unended)
+lines = unended.read_text().splitlines()
+check("a log over the cap with no line ending in its newest half keeps none of it",
+      len(lines) == 2 and lines[0] == f"[older lines dropped at {ceiling_log.LOG_CAP} bytes]"
+      and not lines[1].startswith("x") and lines[1].endswith(" -> allow-under"),
+      [line[:60] for line in lines])
 
 under = Path(tempfile.mkdtemp(dir=SCRATCH)) / "hook.log"
 under.write_text("an older line\n")

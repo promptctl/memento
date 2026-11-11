@@ -63,16 +63,19 @@ def reason_of(failure):
             else f"{type(failure).__name__}: {failure}")
 
 
-def kept(log):
-    """What a log over the cap keeps: a line saying older lines were dropped, then the newest whole
-    lines that fit in half the cap, so the log is rewritten once per half-cap of new lines, not on
-    every line once it sits at the cap."""
-    start = log.find(b"\n", len(log) - LOG_CAP // 2 - 1) + 1
-    return f"[older lines dropped at {LOG_CAP} bytes]\n".encode() + log[start:]
+def kept(tail):
+    """What a log over the cap keeps, given its last half-cap and one bytes: a line saying older
+    lines were dropped, then the newest whole lines that fit in half the cap, none when no line ends
+    there, so the log is rewritten once per half-cap of new lines, not on every line once it sits at
+    the cap."""
+    newline = tail.find(b"\n")
+    return (f"[older lines dropped at {LOG_CAP} bytes]\n".encode()
+            + (tail[newline + 1:] if newline >= 0 else b""))
 
 
 def _write(name, hook, verdict, fields):
-    """Appends one line with the time, session, event, the `key=value` fields, and the verdict.
+    """Appends one line with the time, session, event, the `key=value` fields, and the verdict,
+    first rewriting a log over the cap to what it `kept`.
 
     A write failure is printed to stderr, naming the hook, and not raised, so logging cannot disable
     the hook."""
@@ -82,16 +85,21 @@ def _write(name, hook, verdict, fields):
             f"{' '.join(f'{key}={value}' for key, value in fields.items())} -> {verdict}\n")
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with LOG_FILE.open("a+b") as handle:
+        # [LAW:no-ambient-temporal-coupling] every write is made under the lock, so the end of the
+        # log is where the last holder left it; opened without O_APPEND so it can be rewritten in
+        # place, never moved into place: a hook waiting on the lock holds this inode, and would
+        # append to an unlinked file.
+        with open(LOG_FILE, "r+b",
+                  opener=lambda path, flags: os.open(path, flags | os.O_CREAT, 0o666)) as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
-            if os.fstat(handle.fileno()).st_size > LOG_CAP:
-                # [LAW:no-ambient-temporal-coupling] rewritten in place under the lock, never moved
-                # into place: a hook waiting on the lock holds this inode, and would append to an
-                # unlinked file.
+            if handle.seek(0, os.SEEK_END) > LOG_CAP:
+                handle.seek(-(LOG_CAP // 2 + 1), os.SEEK_END)
+                rewritten = kept(handle.read())
+                # Written over the log's start before the log is cut, so a hook killed between the
+                # two leaves the newest lines where they were, for the next write to keep.
                 handle.seek(0)
-                log = handle.read()
-                handle.truncate(0)
-                handle.write(kept(log))
+                handle.write(rewritten)
+                handle.truncate()
             handle.write(line.encode())
     except OSError as failure:
         print(f"memento {name}: cannot write {LOG_FILE}: {failure}", file=sys.stderr)
