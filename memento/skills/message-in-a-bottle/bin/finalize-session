@@ -36,7 +36,7 @@
 #
 # Modes:
 #   launcher:         see --help
-#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> [<slash-command>...]
+#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <config dir> <claude pid> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <old session id> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
 #   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> <launcher pid> <launcher ident> [<slash-command>...]
@@ -45,7 +45,7 @@ set -euo pipefail
 
 # HANDOFF_DELAY_SECONDS is the wait before the tmux and iTerm2 workers act on the asking session's own
 # pane or claude, so the asking turn has ended first. RESET_REGISTER_* bound the poll that waits for the
-# reset to appear in the pane (tmux); the timeout also bounds each wait in the session's log for a
+# reset to land in the pane's claude (tmux); the timeout also bounds each wait in the session's log for a
 # command's effect (remote-control).
 HANDOFF_DELAY_SECONDS=10
 # How long the remote-control worker waits for a turn whose length is the agent's work to end: the asking
@@ -533,6 +533,7 @@ JOURNAL="${SELFDIR%/*/*}/journal/bin/journal"
 REMOTE="$SELFDIR/../../../lib/remote_control.py"
 BACKGROUND="$SELFDIR/../../../lib/background_session.py"
 HANDED_OFF="$SELFDIR/../../../lib/handed_off.py"
+REGISTRY="$SELFDIR/../../../lib/session_registry.py"
 
 # Selects the mode once, from the first argument.
 case "${1:-}" in
@@ -755,7 +756,7 @@ case "$MODE" in
       # types into this pane the same way.
       printf '/goal clear' | _tmux_type "$TARGET" \
         || _refuse "tmux transport: cannot type /goal clear into pane $TARGET, which the handoff is typed into too"
-      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
+      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$CONFIG_DIR" "$CLAUDE_PID" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
       echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
@@ -862,41 +863,55 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   tmux-worker)
-    if [[ $# -lt 3 ]]; then
-      echo "internal error: worker expects at least 3 args" >&2
+    if [[ $# -lt 5 ]]; then
+      echo "internal error: worker expects at least 5 args" >&2
       exit 2
     fi
     TARGET="$1"
     MSGFILE="$2"
     GOALFILE="$3"
-    shift 3
+    CONFIG_DIR="$4"
+    CLAUDE_PID="$5"
+    shift 5
 
     trap 'rm -f "$GOALFILE"' EXIT
     log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
-    # The banner a fresh session prints; seeing it is what confirms /clear landed.
-    REGISTERED_RE='Claude Code v[0-9]'
-
-    log "waking; target=$TARGET"
+    log "waking; target=$TARGET claude_pid=$CLAUDE_PID"
     sleep "$HANDOFF_DELAY_SECONDS"
 
     tmux send-keys -t "$TARGET" Escape
     sleep 1
-    printf /clear | _tmux_type "$TARGET"
 
-    # Polls for the reset to appear, up to the timeout. The poll count is integer arithmetic, since bash 3.2
-    # (the /bin/bash on macOS) has no floats.
-    POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
-    POLLS=0
+    # [LAW:one-source-of-truth] The reset is seen as the pane's own claude moving to a new session, which
+    # its registry entry names. A banner on the screen can be the old session's own, drawn at its start,
+    # and another pane's /clear is another process's. The session it is in is read just before /clear is
+    # typed, so a reset anyone else made during the delay is not taken for this one. With no session to
+    # start from, the reset cannot be seen.
     RESET_SEEN=""
     OBSERVED="WARNING: not observed within ${RESET_REGISTER_TIMEOUT_SECONDS}s"
-    while :; do
-      if tmux capture-pane -t "$TARGET" -p | grep -qE "$REGISTERED_RE"; then
-        RESET_SEEN=1
-        OBSERVED="registered after $(awk "BEGIN{printf \"%.1f\", $POLLS * $RESET_REGISTER_POLL_SECONDS}")s"
-        break
+    BEFORE=$(python3 -I "$REGISTRY" current "$CONFIG_DIR" "$CLAUDE_PID" 2>&1) \
+      || { OBSERVED="WARNING: cannot tell whether it ran, since the session claude $CLAUDE_PID is in cannot be read: $BEFORE"; BEFORE=""; }
+    printf /clear | _tmux_type "$TARGET"
+
+    # Polls for the reset to land, up to the timeout. The poll count is integer arithmetic, since bash 3.2
+    # (the /bin/bash on macOS) has no floats. Claude rewrites its entry in place, so a read can meet a
+    # rewrite in progress: a failed read is not yet, and the last one's reason is kept for the timeout.
+    POLL_BUDGET=$(awk "BEGIN{printf \"%d\", $RESET_REGISTER_TIMEOUT_SECONDS / $RESET_REGISTER_POLL_SECONDS}")
+    POLLS=0
+    UNREAD=""
+    while [[ -n "$BEFORE" ]]; do
+      if NOW=$(python3 -I "$REGISTRY" current "$CONFIG_DIR" "$CLAUDE_PID" 2>&1); then
+        UNREAD=""
+        if [[ "$NOW" != "$BEFORE" ]]; then
+          RESET_SEEN=1
+          OBSERVED="seen after $(awk "BEGIN{printf \"%.1f\", $POLLS * $RESET_REGISTER_POLL_SECONDS}")s: claude $CLAUDE_PID moved from session $BEFORE to $NOW"
+          break
+        fi
+      else
+        UNREAD="; the last read failed: $NOW"
       fi
-      [[ "$POLLS" -ge "$POLL_BUDGET" ]] && break
+      [[ "$POLLS" -ge "$POLL_BUDGET" ]] && { OBSERVED+="$UNREAD"; break; }
       sleep "$RESET_REGISTER_POLL_SECONDS"
       POLLS=$((POLLS + 1))
     done
