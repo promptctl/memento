@@ -132,7 +132,8 @@ def woke(origin, handoff):
 
 def branch_at(cwd):
     """The branch checked out at a directory, or None where git names none: outside a repository,
-    on a detached HEAD, or with no git to ask."""
+    on a detached HEAD, or with no git to ask. Raises CalledProcessError where git runs but cannot
+    list the variables that name a repository, as its answer could be another repository's."""
     try:
         asked = git_at(cwd, "symbolic-ref", "--short", "-q", "HEAD")
     except OSError:

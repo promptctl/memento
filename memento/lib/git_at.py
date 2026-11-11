@@ -10,20 +10,25 @@ import functools
 import os
 import subprocess
 
+# The settings `git -c` and GIT_CONFIG_COUNT carry, a safe.directory among them, are the user's for
+# every repository: git keeps these two as it enters a submodule, so they reach the directory's too.
+CONFIG_SETTINGS = frozenset({"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
+
 
 @functools.cache
-def _local_to_a_repository():
-    """The variables git lists as local to a repository, the ones git clears itself before it works in
-    another repository. Raises CalledProcessError where git cannot list them: without the list, the
-    inherited repository would answer."""
+def _naming_a_repository():
+    """The variables that name the repository git works in: those git lists as local to a repository,
+    less the config settings it carries into another. Raises CalledProcessError where git cannot list
+    them: without the list, the inherited repository would answer."""
     listed = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True,
                             check=True)
-    return frozenset(listed.stdout.split())
+    return frozenset(listed.stdout.split()) - CONFIG_SETTINGS
 
 
 def git_at(directory, *arguments):
     """Runs `git <arguments>` in `directory`, returning the completed process with its output captured
-    as text. Raises OSError where git cannot be run."""
-    local = _local_to_a_repository()
+    as text. Raises OSError where git cannot be run, and CalledProcessError where it runs but cannot
+    list the variables that name a repository."""
+    naming = _naming_a_repository()
     return subprocess.run(["git", *arguments], cwd=directory, capture_output=True, text=True,
-                          env={name: value for name, value in os.environ.items() if name not in local})
+                          env={name: value for name, value in os.environ.items() if name not in naming})

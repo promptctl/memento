@@ -15,6 +15,7 @@ import collections
 import functools
 import math
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +67,9 @@ def asked_of_git(anchor, question):
         done = git_at(anchor, "rev-parse", question)
     except OSError as failure:
         sys.exit(f"ceiling: cannot run git to find the project root: {failure}")
+    except subprocess.CalledProcessError as failure:
+        sys.exit(f"ceiling: git cannot list the variables that name a repository, so it cannot be "
+                 f"asked which project {anchor} is in: {failure.stderr.strip()}")
     if done.returncode != 0:
         sys.exit(f"ceiling: git could not say where the project is, asked from {anchor}: "
                  f"{done.stderr.strip()}\nIf that is because this is not a git repository, there "

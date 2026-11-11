@@ -132,6 +132,11 @@ done
 exit 0
 """
 
+FAILING_GIT = """#!/bin/sh
+echo "git: unlistable" >&2
+exit 1
+"""
+
 
 def stub_git(behaviour):
     """Returns a directory holding a `git` with the given script, for placing first on PATH."""
@@ -358,6 +363,15 @@ check("and no config lands in a directory named after a flag",
       project_conf(repo) is None and session_conf(home) is None
       and [name for name in os.listdir(repo) if name.startswith("--")] == [],
       f"{project_conf(repo)} {sorted(os.listdir(repo))}")
+
+# A git that runs but cannot list the variables naming a repository cannot be asked about one.
+home, repo = world()
+code, out, err = run(home, repo, "set", "project", "300_000", shadowing=stub_git(FAILING_GIT))
+check("a git that cannot list the repository variables is refused in one line",
+      code == 1 and err.startswith("ceiling: git cannot list") and "unlistable" in err
+      and "Traceback" not in err, f"{code} {err}")
+check("and nothing is written", project_conf(repo) is None and session_conf(home) is None,
+      f"{project_conf(repo)} {session_conf(home)}")
 
 # The project is the anchored one, not the working directory. Other cases run with both in one place,
 # so this case is the one that tells them apart.
