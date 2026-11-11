@@ -77,7 +77,7 @@ class Transient(Refused):
 
 
 class Withheld(Exception):
-    """A prompt was not posted, so nothing after it was either: (what, why)."""
+    """A prompt did not go through, so nothing after it was posted: (what, why)."""
 
 
 def argv(pid):
@@ -292,18 +292,13 @@ class Session:
             raise unread(f"{where} answered with no JSON: {text[:400]!r}") from None
 
     def post(self, event):
-        """Appends an event to the log and returns the sequence number it was given, and whether the log
-        already held its uuid, which the server then drops and answers with the first copy's number
-        (2.1.299). Transient when the server took it without saying where."""
+        """Appends an event to the log and returns the sequence number it was given. Transient when the
+        server took it without saying where."""
         answer = self.request("POST", "/events", {"events": [event]})
         try:
-            result = answer["results"][0]
-            seq, duplicate = int(result["sequence_num"]), result["duplicate"]
+            return int(answer["results"][0]["sequence_num"])
         except (KeyError, IndexError, TypeError, ValueError):
-            duplicate = None
-        if not isinstance(duplicate, bool):
-            raise Transient(f"the log took the event but did not say where: {answer!r}")
-        return seq, duplicate
+            raise Transient(f"the log took the event but returned no sequence number: {answer!r}") from None
 
     def head(self):
         """The sequence number of the last event in the log."""
@@ -474,22 +469,15 @@ def await_state(log, settled, timeout, note, clock=time.monotonic, sleep=time.sl
 def posted(session, event, what, timeout, note, clock=time.monotonic, sleep=time.sleep):
     """Posts `event`, which notes name as `what`, and returns its sequence number. One whose answer was
     lost is sent again as the same event until one is answered within `timeout`, and the server keeps one
-    copy: it drops a repeated uuid, answering with the first copy's number (2.1.299). Every copy goes out
-    before this returns, so before anything posted after it, and a copy the server takes late is that
-    same uuid.
+    copy: it drops a repeated uuid, answering with the first copy's number (2.1.299). Every copy is sent
+    before this returns, so before anything posted after it; one the server takes late is dropped only
+    if it checks the uuid against the whole log, which was seen only back to back.
     [LAW:one-type-per-behavior] Prompts and interrupts are posted alike."""
     try:
-        seq, duplicate = retried(lambda: session.post(event), timeout, note, f"posting {what}", clock, sleep)
+        return retried(lambda: session.post(event), timeout, note, f"posting {what}", clock, sleep)
     except Transient as error:
-        raise Refused(f"no answer to {what} within {timeout:g}s: {error}") from None
-    if duplicate:
-        note(f"the log already held {what}, at sequence {seq}: a copy whose answer was lost had landed")
-    return seq
-
-
-def interrupt(session, prompts, timeout, note, clock=time.monotonic, sleep=time.sleep):
-    """Posts an interrupt aimed at `prompts` and returns its sequence number (`posted`)."""
-    return posted(session, interrupt_event(prompts), "the interrupt", timeout, note, clock, sleep)
+        raise Refused(f"no answer to {what} within {timeout:g}s, though a copy may have landed: "
+                      f"{error}") from None
 
 
 def stopping_asking_turn(session, log, reset_timeout, note):
@@ -507,8 +495,8 @@ def stopping_asking_turn(session, log, reset_timeout, note):
     def aim_at(prompts):
         aimed.append(prompts)
         try:
-            note(f"posted an interrupt aimed at the asking turn's prompts {list(prompts)} "
-                 f"(log sequence {interrupt(session, prompts, reset_timeout, note)})")
+            seq = posted(session, interrupt_event(prompts), "the interrupt", reset_timeout, note)
+            note(f"posted an interrupt aimed at the asking turn's prompts {list(prompts)} (log sequence {seq})")
         except Refused as error:
             note(f"ERROR: the asking turn was not interrupted ({error}), so a goal can hold it working "
                  f"until its block cap before the /clear")

@@ -49,9 +49,8 @@ class SessionLog:
     - An interrupt whose for_user_message_uuids name the running turn ends it in a `result`, with the
       goal kept; one naming no running turn stops nothing, as does every one when `deaf` is on.
 
-    A post whose uuid the log already holds is dropped, answered with the first one's sequence number and
-    as a duplicate, as the server does: post() answers what remote_control.Session.post does, a sequence
-    number and whether the post was a duplicate.
+    A post whose uuid the log already holds is dropped, answered with the first one's sequence number, as
+    the server does.
 
     It records each post with whether the session was idle and how many resets came before it, each
     prompt's turn with the goal in force when it started, and each interrupt with the turn it stopped."""
@@ -110,7 +109,7 @@ class SessionLog:
         with self.lock:
             for earlier in self.events:
                 if earlier["payload"].get("uuid") == payload["uuid"]:
-                    return int(earlier["sequence_num"]), True
+                    return int(earlier["sequence_num"])
             if payload["type"] == "control_request":
                 seq = self.append(payload)
                 named = payload["request"]["for_user_message_uuids"]
@@ -119,7 +118,7 @@ class SessionLog:
                 if stopped:
                     self.running = None
                     self.append({"type": "result", "terminal_reason": "aborted_streaming"})
-                return seq, False
+                return seq
             text = payload["message"]["content"]
             self.posts.append((text, self.idle(), self.reset_count))
             seq = self.append(payload)
@@ -141,7 +140,7 @@ class SessionLog:
                 if not self.holds and self.goal is None:
                     self.running = None
                     self.append({"type": "result"})
-        return seq, False
+        return seq
 
     def head(self):
         with self.lock:
@@ -218,12 +217,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(*refused)
         if id.startswith("cse_garbled"):
             return self.sign_in()
-        seq, duplicate = log_of(id).post(body["events"][0])
+        seq = log_of(id).post(body["events"][0])
         if id.startswith("cse_drops") and [r[0] for r in REQUESTS[id]].count("POST") == 1:
             # A lost answer: the connection closes with the event taken and nothing said.
             self.close_connection = True
             return
-        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq), "duplicate": duplicate}]})
+        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq)}]})
 
     def do_GET(self):
         id = self.session()
