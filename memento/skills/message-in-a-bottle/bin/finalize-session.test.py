@@ -957,7 +957,6 @@ check("an ordinary message is still recorded",
 # transcript back, on the line above the path, which stays last. Without an id the
 # handoff still goes, and that line names the variable it was looked for in. The
 # checks hold the line's place and content, not its wording.
-SESSION_ID = "0f3c9a52-7d1e-4b6a-9c28-5e4d3b2a1f07"
 for session_id, expected, what in (
         (SESSION_ID, SESSION_ID, "names the outgoing session's id"),
         (None, "CLAUDE_CODE_SESSION_ID", "with no session id still hands off, naming the variable"),
