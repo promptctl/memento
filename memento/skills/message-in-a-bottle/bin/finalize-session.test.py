@@ -2006,6 +2006,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
     stop_leaves = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM, BACKGROUND_ID),
                               stop_leaves=True)
     no_retirement = pool.submit(worker_case, "match", retirement=("stop", HOST_SHIM))
+    stop_after_gone = pool.submit(worker_case, "reused", retirement=("stop", HOST_SHIM, BACKGROUND_ID))
 
 
 def worker_detail(done):
@@ -2063,7 +2064,11 @@ check("a session retired by signal is never stopped through a daemon",
 retired, done = stopped.result()
 check("a background session is retired by its daemon's stop, not by a signal",
       done.verdict == "taken\n" and done.victim_signal == signal.SIGUSR1
-      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude {done.args[13]} no longer runs" in done.stdout,
+      and f"the daemon stopped background session {BACKGROUND_ID}, and old claude {done.args[13]} no longer runs" in done.stdout
+      and f"(old claude {done.args[13]}: still running)" in done.stdout, worker_detail(done))
+retired, done = stop_after_gone.result()
+check("a background session whose old process has already gone is still stopped by its id, saying so",
+      done.victim_signal == signal.SIGUSR1 and f"(old claude {done.args[13]}: already gone" in done.stdout,
       worker_detail(done))
 retired, done = stop_refused.result()
 check("a stop the daemon refuses leaves the old process unsignalled, and the log says it is still live",

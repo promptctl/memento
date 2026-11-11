@@ -242,8 +242,8 @@ _relaunch_target() { # <transport name>
 # Empty output means the pid holds nothing, and that is a failure to identify.
 #
 # A pid alone does not identify a process, since the kernel can reissue it after its holder exits. Start
-# time tells the two apart. The detached worker signals a pid up to about 41 seconds after capturing it, so
-# this check is as strict as the ancestry walk's pid-reuse guard.
+# time tells the two apart. The detached worker acts on a pid up to a minute after capturing it, so this
+# check is as strict as the ancestry walk's pid-reuse guard.
 _process_identity() {
   local pid="${1:-}" raw
   [ -n "$pid" ] || return 1
@@ -281,10 +281,12 @@ _retire() { # <pid> <identity captured at launch>
 # <pid> <identity captured at launch>. The daemon reads its session's process exiting on a signal as a
 # crash, and respawns it with a prompt to continue, beside its successor. So this never signals: a session
 # whose stop failed sits idle at the end of the turn that handed off, where a respawned one goes on with the
-# work. Reports through the worker's log.
+# work. It is stopped by its id even when the old process has already left its pid, since the daemon may
+# have respawned it under another. Reports through the worker's log.
 _stop_background() {
-  local said
-  log "asking the daemon to stop background session $2 (old claude $3)"
+  local said seen="still running"
+  _still_captured_process "$3" "$4" || seen="already gone, so any process the daemon now runs for it is a respawn"
+  log "asking the daemon to stop background session $2 (old claude $3: $seen)"
   if ! said=$(python3 -I "$BACKGROUND" stop "$1" "$2" 2>&1); then
     log "ERROR: the daemon did not stop background session $2: $said. Old claude $3 is still live beside its successor; stop it with: claude stop $2"
   elif ! _await_exit "$3" "$4"; then

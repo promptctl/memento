@@ -54,7 +54,8 @@ def ask(claude, *args, timeout=ANSWER_SECONDS):
     except subprocess.TimeoutExpired:
         raise DaemonError(f"'{asked}' did not answer within {timeout}s") from None
     if done.returncode != 0:
-        raise DaemonError(f"'{asked}' exited {done.returncode}: {(done.stderr + done.stdout).strip()}")
+        said = "; ".join(stream.strip() for stream in (done.stderr, done.stdout) if stream.strip())
+        raise DaemonError(f"'{asked}' exited {done.returncode}: {said}")
     return done.stdout
 
 
