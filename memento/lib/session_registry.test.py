@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the session registry reader: which session a claude process is in, and every way its entry
 can fail to say. The reader runs in process against entries written under a scratch config directory,
-and the script form runs as the launcher runs it.
+and the script form runs as the worker runs it.
 
 Run with: python3 session_registry.test.py
 """
@@ -113,6 +113,15 @@ root = registry('{"pid": 74101, "sessionId": "the-n')
 check("an entry still torn when the wait runs out names the last failed read",
       "the last read failed" in unchanged(root, rewrites(root)) and "is not a JSON object" in unchanged(root, rewrites(root)),
       unchanged(root, rewrites(root)))
+root = registry()
+try:
+    outcome = f"no refusal: {changed(root, PID, SESSION, 5, 0.01, rewrites(root, MOVED))}"
+except Unchanged as error:
+    outcome = f"Unchanged: {error}"
+except Unregistered as error:
+    outcome = str(error)
+check("a process with no entry has exited: the wait ends at once, and a claude given its pid is not its move",
+      outcome.startswith("no registry entry"), outcome)
 root = registry('{"pid": 74101, "sessionId": "the-n')
 check("a failed read the next read recovers from is not named when the wait runs out",
       "the last read failed" not in unchanged(root, rewrites(root, json.dumps(ENTRY))),
@@ -127,22 +136,18 @@ def script(*args):
     return subprocess.run([sys.executable, "-I", SCRIPT, *args], capture_output=True, text=True)
 
 
-root = registry(json.dumps(ENTRY))
-done = script("current", root, PID)
-check("current prints the session id and exits 0",
-      done.returncode == 0 and done.stdout == SESSION + "\n" and done.stderr == "", done)
-done = script("current", registry(), PID)
-check("and exits 2 with the reason, printing nothing on stdout",
-      done.returncode == 2 and done.stdout == "" and "no registry entry" in done.stderr, done)
-done = script("current", root)
-check("a malformed call is refused with exit 2", done.returncode == 2 and "usage:" in done.stderr, done)
 done = script("changed", registry(MOVED), PID, SESSION, "1", "0.01")
 check("changed prints the move and exits 0",
       done.returncode == 0 and done.stdout.startswith(f"claude process {PID} moved from session {SESSION} "
                                                       "to the-new-session after ") and done.stderr == "", done)
-done = script("changed", root, PID, SESSION, "0.05", "0.01")
+done = script("changed", registry(json.dumps(ENTRY)), PID, SESSION, "0.05", "0.01")
 check("and a wait that runs out exits 2 with the reason, printing nothing on stdout",
       done.returncode == 2 and done.stdout == "" and "did not leave session" in done.stderr, done)
+done = script("changed", registry(MOVED), PID, "", "1", "0.01")
+check("a wait with no session named to leave is refused, since any session would read as a move",
+      done.returncode == 2 and done.stdout == "" and "no session was named" in done.stderr, done)
+done = script("changed", registry(MOVED), PID, SESSION)
+check("a malformed call is refused with exit 2", done.returncode == 2 and "usage:" in done.stderr, done)
 
 print(f"\n{len(failures)} failed")
 sys.exit(1 if failures else 0)

@@ -2478,7 +2478,7 @@ def tmux_worker_case(cleared=RESET_ENTRY, registered=True, timeout="2", settings
         env.update(FIXTURE_TMUX_CLEAR_ENTRY=entry, FIXTURE_TMUX_CLEARED_TEXT=cleared)
     try:
         done = subprocess.run(
-            [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, "4242", *settings],
+            [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, "4242", "the-old-session", *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -2491,7 +2491,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
     never = pool.submit(tmux_worker_case, cleared=None)
     goal_registered = pool.submit(tmux_worker_case, goal="ship it")
     goal_never = pool.submit(tmux_worker_case, cleared=None, goal="ship it")
-    goal_unregistered = pool.submit(tmux_worker_case, registered=False, goal="ship it")
+    goal_unregistered = pool.submit(tmux_worker_case, registered=False, cleared=None, goal="ship it")
     goal_torn = pool.submit(tmux_worker_case, cleared='{"sessionId": "the-re', goal="ship it")
     with_settings = pool.submit(tmux_worker_case, settings=("/model opus", "/effort high"))
 
@@ -2533,7 +2533,7 @@ check("a reset that never runs, under a banner on screen, has no goal typed, and
       f"out={done.stdout!r} log={log!r}")
 done, _, log = goal_unregistered.result()
 check("a claude with no registry entry cannot have its reset seen: the reason is logged, the handoff sent, no goal typed",
-      "cannot tell whether it ran" in done.stdout and "no registry entry" in done.stderr
+      "WARNING: not seen" in done.stdout and "no registry entry" in done.stderr
       and "buffer: the whole handoff" in log and "/goal" not in log and "carried goal NOT delivered" in done.stdout,
       f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
 done, _, log = goal_torn.result()
