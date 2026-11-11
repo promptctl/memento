@@ -87,8 +87,7 @@ def _write(name, hook, verdict, fields):
         # log is where the last holder left it; opened without O_APPEND so it can be rewritten in
         # place, never moved into place: a hook waiting on the lock holds this inode, and would
         # append to an unlinked file.
-        with open(LOG_FILE, "r+b",
-                  opener=lambda path, flags: os.open(path, flags | os.O_CREAT, 0o666)) as handle:
+        with open(os.open(LOG_FILE, os.O_RDWR | os.O_CREAT, 0o666), "r+b") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             if handle.seek(0, os.SEEK_END) > LOG_CAP:
                 # The rewritten log, its DROPPED line included, fits in half the cap, so the log is
