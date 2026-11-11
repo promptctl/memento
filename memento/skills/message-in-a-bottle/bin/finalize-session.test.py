@@ -1537,23 +1537,23 @@ try:
     done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims01", dry_run="", handoff_dir=claims)
     check("a close-out on a session with a published goal claims it and carries it on",
           done.returncode == 0 and posted("cse_claims01")[-1:] == ["/goal the old goal"]
-          and not publication.take_back(), f"rc={done.returncode} err={done.stderr!r} log={done.worker_log!r}")
+          and not publication.take_back(lambda line: None), f"rc={done.returncode} err={done.stderr!r} log={done.worker_log!r}")
     publication = remote_control.publish(claims, "cse_claims02", "the old goal")
     done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims02", dry_run="", handoff_dir=claims,
                launcher_flags=("--goal", "the new goal"))
     check("one with a goal of its own claims the published one and drops it, saying so",
           done.returncode == 0 and "dropped for this close-out's own: /goal the old goal" in done.stdout
-          and posted("cse_claims02")[-1:] == ["/goal the new goal"] and not publication.take_back(),
+          and posted("cse_claims02")[-1:] == ["/goal the new goal"] and not publication.take_back(lambda line: None),
           f"out={done.stdout!r} log={done.worker_log!r}")
     publication = remote_control.publish(claims, "cse_refuses02", "the old goal")
     done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_refuses02", dry_run="", handoff_dir=claims)
     check("one refused before the claim leaves the published goal with its worker",
-          done.returncode == REFUSED_RC and publication.take_back(), f"rc={done.returncode} err={done.stderr!r}")
+          done.returncode == REFUSED_RC and publication.take_back(lambda line: None), f"rc={done.returncode} err={done.stderr!r}")
     publication = remote_control.publish(claims, "cse_claims03", "the old goal")
     done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_claims03", dry_run="", handoff_dir=claims,
                goal_rewrite_fails=True)
     check("one whose step after the claim fails refuses, naming the claimed goal to set by hand",
-          done.returncode == REFUSED_RC and "/goal the old goal" in done.stderr and not publication.take_back()
+          done.returncode == REFUSED_RC and "/goal the old goal" in done.stderr and not publication.take_back(lambda line: None)
           and posted("cse_claims03") == [], f"rc={done.returncode} err={done.stderr!r}")
 finally:
     shutil.rmtree(claims, ignore_errors=True)

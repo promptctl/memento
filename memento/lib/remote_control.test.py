@@ -483,6 +483,11 @@ check("a goal taken back whose post is refused is given to the human to set by h
       withheld[0] == "the carried goal" and "HTTP 403" in withheld[1] and "/goal the tests pass" in withheld[1]
       and claimed(session) == "", withheld)
 
+session, _ = fresh()
+session.append({"type": "conversation_reset"}, {"type": "assistant", "parent_tool_use_id": None})
+check("a stamp from before the last conversation_reset is not read back as the asking turn's",
+      remote_control.newest_stamp(session, session.head()) is None)
+
 class Unanswered:
     """A session whose first `failing` prompts get no clear answer; `lands` says whether each still
     reaches the log. It records the uuid of every prompt it is sent."""
@@ -588,11 +593,20 @@ finally:
     os.rename = rename
 check("a goal whose publisher exits after the claim tested its lock is still claimed",
       taken == "the tests pass" and not os.listdir(HANDOFFS), (taken, os.listdir(HANDOFFS)))
+publication, stuck = remote_control.publish(HANDOFFS, "cse_stuck", "the tests pass"), []
+os.chmod(HANDOFFS, 0o500)
+try:
+    kept = publication.take_back(stuck.append)
+finally:
+    os.chmod(HANDOFFS, 0o700)
+check("a published goal that cannot be removed is still the worker's, and a claim drops it as a dead publisher's",
+      kept and "could not be removed" in stuck[0]
+      and remote_control.claim(HANDOFFS, "cse_stuck", stuck.append) == "" and not os.listdir(HANDOFFS), stuck)
 remote_control.publish(HANDOFFS, "cse_dead02", "the old goal").held.close()
 publication = remote_control.publish(HANDOFFS, "cse_dead02", "the new goal")
 check("and one a live publisher replaced is claimed as live",
       remote_control.claim(HANDOFFS, "cse_dead02", notes.append) == "the new goal"
-      and not publication.take_back() and not os.listdir(HANDOFFS), os.listdir(HANDOFFS))
+      and not publication.take_back(lambda line: None) and not os.listdir(HANDOFFS), os.listdir(HANDOFFS))
 
 # Two workers on one session: an earlier handoff's, waiting to post its carried goal once the handoff's
 # turn ends, and the next one's, from a close-out in that turn. The next one claims the goal, ends the
@@ -750,7 +764,7 @@ publication = remote_control.publish(os.path.dirname(missing), "cse_live01", "th
 done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",
                        os.path.dirname(missing)], capture_output=True, text=True)
 check("claim prints the goal a live worker published for the session, and takes it",
-      done.returncode == 0 and done.stdout == "the tests pass" and not publication.take_back(),
+      done.returncode == 0 and done.stdout == "the tests pass" and not publication.take_back(lambda line: None),
       (done.returncode, done.stdout, done.stderr))
 done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",
                        os.path.dirname(missing)], capture_output=True, text=True)

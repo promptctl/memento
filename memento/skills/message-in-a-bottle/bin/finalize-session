@@ -702,6 +702,7 @@ case "$MODE" in
         || _refuse "remote-control transport: cannot claim the goal an earlier handoff published for $REMOTE_SESSION"
       if [[ -n "$CLAIMED" && -n "$GOAL" ]]; then
         echo "the goal an earlier handoff carried is dropped for this close-out's own: /goal $CLAIMED"
+        CLAIMED=""
       elif [[ -n "$CLAIMED" ]]; then
         printf '%s' "$CLAIMED" > "$GOALFILE" \
           || _refuse "cannot write the carried goal to $GOALFILE, so it was NOT carried on; deliver it by hand once the session is up: /goal $CLAIMED"

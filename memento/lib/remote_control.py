@@ -393,9 +393,10 @@ def parsed(session_id, event):
 
 
 def newest_stamp(session, head):
-    """What the newest stamp at or before sequence number `head` names, or None when the log holds none
-    there. It is the asking turn's own, or the turn's before it, which an unstamped asking turn keeps as
-    its own (`aim`). A stamp later than `head` is left to the forward read."""
+    """What the newest stamp at or before sequence number `head` names, or None when the current
+    conversation holds none there. It is the asking turn's own, or the turn's before it, which an
+    unstamped asking turn keeps as its own (`aim`); a stamp before the last conversation_reset names a
+    conversation that is gone. A stamp later than `head` is left to the forward read."""
     before = head + 1
     while True:
         events, more = session.history(before)
@@ -405,6 +406,8 @@ def newest_stamp(session, head):
                 raise Refused(f"session {session.id}'s log gave event {seq} reading back from {before}")
             if stamp := aim(payload):
                 return stamp
+            if payload.get("type") == "conversation_reset":
+                return None
             before = seq
         if not more:
             return None
@@ -526,9 +529,11 @@ def stopping_asking_turn(session, log, reset_timeout, note):
         aim_at(stamp)
 
     def ended(log):
-        for stamp in log.asking_stamps:
-            if stamp not in aimed:
-                aim_at(stamp)
+        # A turn the log has seen end needs no aim at a stamp read in the same page.
+        if not log.asking_ended:
+            for stamp in log.asking_stamps:
+                if stamp not in aimed:
+                    aim_at(stamp)
         return log.asking_ended
 
     return ended
@@ -542,19 +547,25 @@ def published_goal(directory, session_id):
 class Publication:
     """The carried goal, published under `path` while the handoff's first turn runs.
     [LAW:one-source-of-truth] One process owns it at a time: a claim renames the name away within the
-    handoff directory and its publisher removes it, and of the two only one finds it there. The publisher holds an flock on it for its life, which is how
-    a claim tells a live publisher from a dead one: a process's locks go when it does."""
+    handoff directory and its publisher removes it, and of the two only one finds it there. The publisher
+    holds an flock on it for its life, which is how a claim tells a live publisher from a dead one: a
+    process's locks go when it does."""
 
     def __init__(self, path, held):
         self.path, self.held = path, held
 
-    def take_back(self):
+    def take_back(self, note):
         """True when the goal is still this worker's, now taken back; False when a close-out claimed it.
-        Removing the name has one winner against a claim's rename of it, as renames do."""
+        Removing the name has one winner against a claim's rename of it, as renames do. A name that cannot
+        be removed is still this worker's goal, and its lock is let go, so a claim drops it as a dead
+        publisher's."""
         try:
             os.remove(self.path)
         except FileNotFoundError:
             return False
+        except OSError as error:
+            self.held.close()
+            note(f"WARNING: the published goal at {self.path} could not be removed ({error}); a claim drops it")
         return True
 
 
@@ -677,25 +688,25 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
         if not goal:
             return
         settle(idle_after(seq), idle_timeout, "the carried goal", "the handoff's turn did not end")
-        if not publication.take_back():
+        if not publication.take_back(note):
             note(f"the carried goal {CLAIMED}")
             return
         publication = None
         send(f"/goal {goal}", "the carried goal")
     except Withheld as error:
         what, why = error.args
-        raise Withheld(what, why + gone(goal, publication)) from None
+        raise Withheld(what, why + gone(goal, publication, note)) from None
 
 
 CLAIMED = "went to the close-out that claimed it, which carries it on"
 
 
-def gone(goal, publication):
+def gone(goal, publication, note):
     """Where the carried goal went when a delivery stopped short, taking it back first if it is still
     published: to the human the ERROR tells, or to a close-out that claimed it."""
     if not goal:
         return ""
-    if publication is None or publication.take_back():
+    if publication is None or publication.take_back(note):
         return f". The carried goal was NOT set; deliver it by hand once the session is up: /goal {goal}"
     return f". The carried goal {CLAIMED}"
 
@@ -739,7 +750,7 @@ def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout,
         what, why = error.args
     # Before the first post: an argument that is no number, no handoff or goal to read, no login, or no lock.
     except (Refused, OSError) as error:
-        what, why = "the /clear", str(error) + gone(goal, None)
+        what, why = "the /clear", str(error) + gone(goal, None, _note)
     else:
         _note("delivered")
         return 0
