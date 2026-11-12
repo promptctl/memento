@@ -15,7 +15,7 @@ way, under the user's own claude.ai login. Run as a script:
   remote_control.py deliver <session> <after seq> <msgfile> <goalfile> <idle timeout> <reset timeout> [<setting>...]
       interrupts the asking turn, then posts /clear, each setting and the handoff, each once the log shows
       the session idle, and the goal once the handoff's turn has ended, unless a close-out in that turn
-      claimed it; logging each step on stdout. Exits 1, saying what was not posted, when one could not be.
+      claimed it; logging each step on stdout. Exits 1, saying what did not go through, when one did not.
   remote_control.py claim <session> <handoff dir>
       prints the goal an earlier handoff's worker published for the session, claimed for this close-out,
       or nothing when there is none.
@@ -737,7 +737,8 @@ def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout,
     else:
         _note("delivered")
         return 0
-    _note(f"ERROR: {why}; {what} was NOT posted, nor anything after it. The handoff is preserved at {msgfile}")
+    _note(f"ERROR: {why}; {what} did NOT go through, so nothing after it was posted. "
+          f"The handoff is preserved at {msgfile}")
     return 1
 
 

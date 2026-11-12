@@ -531,10 +531,10 @@ check("one whose first copy did not land is sent again as the same event, and la
       and len(unanswered.sent) == 3 and unanswered.sent[0] == unanswered.sent[1], (withheld, notes, unanswered.sent))
 session, head = fresh()
 session.end_turn()
-unanswered = Unanswered(session, lands=False)
+unanswered = Unanswered(session, lands=True)
 withheld, notes = run_deliver(unanswered, head, reset_timeout=1)
-check("one never answered within the timeout is withheld saying so, with the last failure",
-      session.prompts() == [] and len(set(unanswered.sent)) == 1 and len(unanswered.sent) > 1
+check("one never answered within the timeout is withheld saying a copy may have landed, with the last failure",
+      session.prompts() == ["/clear"] and len(set(unanswered.sent)) == 1 and len(unanswered.sent) > 1
       and withheld[0] == "the /clear" and "no answer to the /clear within 1s, though a copy may have landed" in withheld[1]
       and "timed out" in withheld[1], (withheld, unanswered.sent))
 session, head = fresh(deaf=True)
@@ -780,12 +780,12 @@ missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."), "no-
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
                        missing, missing, "1", "1"], capture_output=True, text=True)
 check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",
-      done.returncode == 1 and "the /clear was NOT posted" in done.stdout and missing in done.stdout
+      done.returncode == 1 and "the /clear did NOT go through" in done.stdout and missing in done.stdout
       and not fake_session_server.REQUESTS.get("cse_lost01"), (done.returncode, done.stdout, done.stderr))
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost02", "10",
                        missing, missing, "1d", "1"], capture_output=True, text=True)
 check("as is a timeout that is no number",
-      done.returncode == 1 and "is no number" in done.stdout and "the /clear was NOT posted" in done.stdout
+      done.returncode == 1 and "is no number" in done.stdout and "the /clear did NOT go through" in done.stdout
       and missing in done.stdout and not fake_session_server.REQUESTS.get("cse_lost02"),
       (done.returncode, done.stdout, done.stderr))
 goalfile = os.path.join(os.path.dirname(missing), "goal")
@@ -794,7 +794,7 @@ with open(goalfile, "w") as handle:
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost03", "10",
                        missing, goalfile, "1", "1"], capture_output=True, text=True)
 check("and a worker stopped before its first post names the goal it carried, to set by hand",
-      done.returncode == 1 and "the /clear was NOT posted" in done.stdout
+      done.returncode == 1 and "the /clear did NOT go through" in done.stdout
       and "deliver it by hand once the session is up: /goal the tests pass" in done.stdout, done.stdout)
 publication = remote_control.publish(os.path.dirname(missing), "cse_live01", "the tests pass")
 done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",

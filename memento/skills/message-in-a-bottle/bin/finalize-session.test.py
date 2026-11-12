@@ -1556,14 +1556,14 @@ check("a read of the log that gets no answer is retried, and the handoff still l
 done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_busy01", dry_run="")
 check("an asking turn the log never ends gets no /clear, which it would read as text",
       done.returncode == 0 and posted("cse_busy01") == [], f"seen={requests('cse_busy01')!r} out={done.stdout!r}")
-check("and the worker's log says the /clear was not posted and where the handoff is kept",
-      "the /clear was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+check("and the worker's log says the /clear did not go through and where the handoff is kept",
+      "the /clear did NOT go through" in done.worker_log and ".md" in done.worker_log, done.worker_log)
 
 done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_stalls01", dry_run="")
 check("a reset the log never records holds the handoff back, so it never lands in the old conversation",
       done.returncode == 0 and posted("cse_stalls01") == ["/clear"], f"seen={requests('cse_stalls01')!r}")
-check("and the worker's log says the handoff was not posted and where it is kept",
-      "the handoff was NOT posted" in done.worker_log and ".md" in done.worker_log, done.worker_log)
+check("and the worker's log says the handoff did not go through and where it is kept",
+      "the handoff did NOT go through" in done.worker_log and ".md" in done.worker_log, done.worker_log)
 
 done = run(**HOSTED, entrypoint="sdk-cli", bridge="cse_refuses01", dry_run="")
 check("a session whose log refuses the login refuses the handoff in front of the agent, naming the answer",
