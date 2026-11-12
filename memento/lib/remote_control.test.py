@@ -725,6 +725,10 @@ check("a 2xx that is not JSON is a refusal naming what came", type(error) is Ref
 error = raised(lambda: remote("cse_garbled02").post(remote_control.user_event("cse_garbled02", "/clear")))
 check("but for a post it is a passing failure, since the server took the prompt",
       type(error) is Transient and "<html>" in str(error), error)
+error = raised(remote("cse_moved01").head)
+check("a redirect is refused, so the login is never sent on to where it points",
+      type(error) is Refused and "HTTP 302" in str(error) and "cse_elsewhere" not in fake_session_server.REQUESTS,
+      error)
 
 
 class Answering(remote_control.Session):
@@ -743,10 +747,6 @@ for answer in ({"results": []}, {"results": [{"event_id": "e"}]}):
     error = raised(lambda: Answering(answer).post(event))
     check(f"one with no sequence number is a passing failure, since the server took it: {answer}",
           isinstance(error, Transient) and "returned no sequence number" in str(error), error)
-error = raised(remote("cse_moved01").head)
-check("a redirect is refused, so the login is never sent on to where it points",
-      type(error) is Refused and "HTTP 302" in str(error) and "cse_elsewhere" not in fake_session_server.REQUESTS,
-      error)
 
 # --- the script, as the launcher runs it ---------------------------------------
 

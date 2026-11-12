@@ -642,7 +642,7 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
         try:
             seq = posted(session, user_event(session.id, text), what, reset_timeout, note)
         except Refused as error:
-            raise Withheld(what, f"could not post it: {error}") from None
+            raise Withheld(what, str(error)) from None
         note(f"posted {what} (log sequence {seq})")
         return seq
 
