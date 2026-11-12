@@ -470,8 +470,9 @@ def posted(session, event, what, timeout, note, clock=time.monotonic, sleep=time
     """Posts `event`, which notes name as `what`, and returns its sequence number. One whose answer was
     lost is sent again as the same event until one is answered within `timeout`, and the server keeps one
     copy: it drops a repeated uuid, answering with the first copy's number (2.1.299). Every copy is sent
-    before this returns, so before anything posted after it; one the server takes late is dropped only
-    if it checks the uuid against the whole log, which was seen only back to back.
+    before this returns, so before anything posted after it; one the server takes late is dropped too,
+    since it checks a repeated uuid against the whole log: a repeated /clear was dropped after its
+    conversation_reset, and an interrupt seven events after its first copy (2.1.299).
     [LAW:one-type-per-behavior] Prompts and interrupts are posted alike."""
     try:
         return retried(lambda: session.post(event), timeout, note, f"posting {what}", clock, sleep)
