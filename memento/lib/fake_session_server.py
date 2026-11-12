@@ -11,6 +11,7 @@ only in the id it uses:
   cse_refuses...  every request is answered 403
   cse_flaky...    the first read of the log after the head is answered 502
   cse_hiccups...  the first request is answered 502
+  cse_drops...    the first post is taken into the log and its connection closed with no answer
   cse_garbled...  every request is answered 200 with a page of HTML
   cse_moved...    every read is redirected to cse_elsewhere
   anything else   the asking turn ends once the log's head has been read
@@ -217,7 +218,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if id.startswith("cse_garbled"):
             return self.sign_in()
         seq = log_of(id).post(body["events"][0])
-        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq), "duplicate": False}]})
+        if id.startswith("cse_drops") and [r[0] for r in REQUESTS[id]].count("POST") == 1:
+            # A lost answer: the connection closes with the event taken and nothing said.
+            self.close_connection = True
+            return
+        self.answer(200, {"results": [{"event_id": "e", "sequence_num": str(seq)}]})
 
     def do_GET(self):
         id = self.session()

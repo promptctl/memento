@@ -512,21 +512,30 @@ class Unanswered:
         raise Transient("POST got no answer: timed out")
 
 
+# A /clear the log took twice could land behind the handoff and wipe it, so a re-sent post must be the
+# same event, which the log keeps once.
 session, head = fresh()
 session.end_turn()
-unanswered = Unanswered(session, lands=True)
+unanswered = Unanswered(session, lands=True, failing=1)
 withheld, notes = run_deliver(unanswered, head)
-check("a post whose answer was lost but which landed is found in the log by its uuid, and the handoff goes on",
-      withheld is None and session.prompts() == ["/clear", "the handoff"] and len(unanswered.sent) == 2,
+check("a post whose answer was lost but which landed is sent again as the same event, which the log holds once",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and len(unanswered.sent) == 3 and unanswered.sent[0] == unanswered.sent[1],
       (withheld, notes, unanswered.sent))
-# A /clear sent again could land after the handoff and wipe it.
 session, head = fresh()
 session.end_turn()
 unanswered = Unanswered(session, lands=False, failing=1)
+withheld, notes = run_deliver(unanswered, head)
+check("one whose first copy did not land is sent again as the same event, and lands once",
+      withheld is None and session.prompts() == ["/clear", "the handoff"]
+      and len(unanswered.sent) == 3 and unanswered.sent[0] == unanswered.sent[1], (withheld, notes, unanswered.sent))
+session, head = fresh()
+session.end_turn()
+unanswered = Unanswered(session, lands=True)
 withheld, notes = run_deliver(unanswered, head, reset_timeout=1)
-check("one that got no clear answer and did not land is never sent again, and is withheld saying so",
-      session.prompts() == [] and len(unanswered.sent) == 1
-      and withheld[0] == "the /clear" and "did not show the prompt within 1s" in withheld[1]
+check("one never answered within the timeout is withheld saying a copy may have landed, with the last failure",
+      session.prompts() == ["/clear"] and len(set(unanswered.sent)) == 1 and len(unanswered.sent) > 1
+      and withheld[0] == "the /clear" and "no answer to the /clear within 1s, though a copy may have landed" in withheld[1]
       and "timed out" in withheld[1], (withheld, unanswered.sent))
 session, head = fresh(deaf=True)
 withheld, _ = run_deliver(Recording(session, failing=range(1, 1000)), head, idle_timeout=1)
@@ -673,6 +682,15 @@ check("and declares Claude Code's CLI platform, without which the session runs n
       platform == "claude_code_cli", platform)
 check("and returns the sequence number the log gave it",
       fake_session_server.LOGS["cse_served01"].prompts() == ["/clear"] and seq > head, seq)
+dropping = remote("cse_drops01")
+event = remote_control.user_event(dropping.id, "/clear")
+error = raised(lambda: dropping.post(event))
+check("a post whose answer is lost is a passing failure", isinstance(error, Transient), error)
+check("and the same event posted again is answered with the first copy's sequence number, and logged once",
+      dropping.post(event) == next(int(taken["sequence_num"]) for taken in fake_session_server.LOGS["cse_drops01"].events
+                                   if taken["payload"].get("uuid") == event["payload"]["uuid"])
+      and fake_session_server.LOGS["cse_drops01"].prompts() == ["/clear"],
+      fake_session_server.LOGS["cse_drops01"].events)
 log = Log(served, 0)
 log.read()
 check("a read over HTTP takes in every page to the last",
@@ -712,6 +730,24 @@ check("a redirect is refused, so the login is never sent on to where it points",
       type(error) is Refused and "HTTP 302" in str(error) and "cse_elsewhere" not in fake_session_server.REQUESTS,
       error)
 
+
+class Answering(remote_control.Session):
+    """A session whose every request is answered `answer`."""
+    def __init__(self, answer):
+        super().__init__(f"{BASE}/v1/code/sessions/cse_answering", login("tok"))
+        self.answer = answer
+
+    def request(self, method, path, body=None):
+        return self.answer
+
+
+event = remote_control.user_event("cse_answering", "/clear")
+check("a post's answer is its sequence number", Answering({"results": [{"sequence_num": "5"}]}).post(event) == 5)
+for answer in ({"results": []}, {"results": [{"event_id": "e"}]}):
+    error = raised(lambda: Answering(answer).post(event))
+    check(f"one with no sequence number is a passing failure, since the server took it: {answer}",
+          isinstance(error, Transient) and "returned no sequence number" in str(error), error)
+
 # --- the script, as the launcher runs it ---------------------------------------
 
 script = os.path.join(LIB, "remote_control.py")
@@ -744,12 +780,12 @@ missing = os.path.join(tempfile.mkdtemp(prefix="remote-control-handoffs."), "no-
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost01", "10",
                        missing, missing, "1", "1"], capture_output=True, text=True)
 check("a handoff file the worker cannot read is logged as nothing posted, naming where it was kept",
-      done.returncode == 1 and "the /clear was NOT posted" in done.stdout and missing in done.stdout
+      done.returncode == 1 and "the /clear did NOT go through" in done.stdout and missing in done.stdout
       and not fake_session_server.REQUESTS.get("cse_lost01"), (done.returncode, done.stdout, done.stderr))
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost02", "10",
                        missing, missing, "1d", "1"], capture_output=True, text=True)
 check("as is a timeout that is no number",
-      done.returncode == 1 and "is no number" in done.stdout and "the /clear was NOT posted" in done.stdout
+      done.returncode == 1 and "is no number" in done.stdout and "the /clear did NOT go through" in done.stdout
       and missing in done.stdout and not fake_session_server.REQUESTS.get("cse_lost02"),
       (done.returncode, done.stdout, done.stderr))
 goalfile = os.path.join(os.path.dirname(missing), "goal")
@@ -758,7 +794,7 @@ with open(goalfile, "w") as handle:
 done = subprocess.run([sys.executable, "-I", script, "deliver", f"{BASE}/v1/code/sessions/cse_lost03", "10",
                        missing, goalfile, "1", "1"], capture_output=True, text=True)
 check("and a worker stopped before its first post names the goal it carried, to set by hand",
-      done.returncode == 1 and "the /clear was NOT posted" in done.stdout
+      done.returncode == 1 and "the /clear did NOT go through" in done.stdout
       and "deliver it by hand once the session is up: /goal the tests pass" in done.stdout, done.stdout)
 publication = remote_control.publish(os.path.dirname(missing), "cse_live01", "the tests pass")
 done = subprocess.run([sys.executable, "-I", script, "claim", f"{BASE}/v1/code/sessions/cse_live01",

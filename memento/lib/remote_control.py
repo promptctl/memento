@@ -15,7 +15,7 @@ way, under the user's own claude.ai login. Run as a script:
   remote_control.py deliver <session> <after seq> <msgfile> <goalfile> <idle timeout> <reset timeout> [<setting>...]
       interrupts the asking turn, then posts /clear, each setting and the handoff, each once the log shows
       the session idle, and the goal once the handoff's turn has ended, unless a close-out in that turn
-      claimed it; logging each step on stdout. Exits 1, saying what was not posted, when one could not be.
+      claimed it; logging each step on stdout. Exits 1, saying what did not go through, when one did not.
   remote_control.py claim <session> <handoff dir>
       prints the goal an earlier handoff's worker published for the session, claimed for this close-out,
       or nothing when there is none.
@@ -77,7 +77,7 @@ class Transient(Refused):
 
 
 class Withheld(Exception):
-    """A prompt was not posted, so nothing after it was either: (what, why)."""
+    """A prompt did not go through, so nothing after it was posted: (what, why)."""
 
 
 def argv(pid):
@@ -298,7 +298,7 @@ class Session:
         try:
             return int(answer["results"][0]["sequence_num"])
         except (KeyError, IndexError, TypeError, ValueError):
-            raise Transient(f"the log took the prompt but returned no sequence number: {answer!r}") from None
+            raise Transient(f"the log took the event but returned no sequence number: {answer!r}") from None
 
     def head(self):
         """The sequence number of the last event in the log."""
@@ -346,7 +346,6 @@ class Log:
         self.asking_ended = False
         self.asking_stamps = []  # what each stamp read before the asking turn's `result` names
         self.last_reset = 0  # sequence numbers start above 0
-        self.prompts = {}  # a posted prompt's uuid -> its sequence number
         self.unreachable = None  # why the last read got no answer, or None when it got one
 
     def read(self):
@@ -371,7 +370,6 @@ class Log:
         kind, stamp = payload.get("type"), aim(payload)
         if kind == "user":
             self.idle = False
-            self.prompts.setdefault(payload.get("uuid"), seq)
         elif kind == "result":
             self.idle = self.asking_ended = True
         elif kind == "conversation_reset":
@@ -468,33 +466,18 @@ def await_state(log, settled, timeout, note, clock=time.monotonic, sleep=time.sl
     return retry(lambda: read(log, note) or settled(log) or None, timeout, clock, sleep) is not None
 
 
-def post(session, log, text, timeout, note):
-    """Posts a prompt once and returns its sequence number. A post whose answer was lost may still have
-    landed, and a second /clear behind a handoff would wipe it, so a prompt is never sent again: the log
-    settles it by the prompt's uuid within `timeout`, and a prompt the log never shows is a refusal."""
-    event = user_event(session.id, text)
+def posted(session, event, what, timeout, note, clock=time.monotonic, sleep=time.sleep):
+    """Posts `event`, which notes name as `what`, and returns its sequence number. One whose answer was
+    lost is sent again as the same event until one is answered within `timeout`, and the server keeps one
+    copy: it drops a repeated uuid, answering with the first copy's number (2.1.299). Every copy is sent
+    before this returns, so before anything posted after it; one the server takes late is dropped only
+    if it checks the uuid against the whole log, which was seen only back to back.
+    [LAW:one-type-per-behavior] Prompts and interrupts are posted alike."""
     try:
-        return session.post(event)
+        return retried(lambda: session.post(event), timeout, note, f"posting {what}", clock, sleep)
     except Transient as error:
-        note(f"posting got no clear answer, reading the log for the prompt: {error}")
-        unanswered = error
-    posted = event["payload"]["uuid"]
-    if await_state(log, lambda log: posted in log.prompts, timeout, note):
-        return log.prompts[posted]
-    raise Refused(f"posting got no clear answer ({unanswered}), and the log did not show the prompt "
-                  f"within {timeout:g}s")
-
-
-def interrupt(session, prompts, timeout, note, clock=time.monotonic, sleep=time.sleep):
-    """Posts an interrupt aimed at `prompts` and returns its sequence number. One whose answer was lost is
-    sent again as the same event until one is answered within `timeout`: it names one turn that is
-    already stopping, so a second copy stops nothing new, and the server drops a repeated uuid anyway.
-    A prompt is never sent again (`post`), since a repeated /clear could land behind the handoff."""
-    event = interrupt_event(prompts)
-    try:
-        return retried(lambda: session.post(event), timeout, note, "posting the interrupt", clock, sleep)
-    except Transient as error:
-        raise Refused(f"no answer to the interrupt within {timeout:g}s: {error}") from None
+        raise Refused(f"no answer to {what} within {timeout:g}s, though a copy may have landed: "
+                      f"{error}") from None
 
 
 def stopping_asking_turn(session, log, reset_timeout, note):
@@ -512,8 +495,8 @@ def stopping_asking_turn(session, log, reset_timeout, note):
     def aim_at(prompts):
         aimed.append(prompts)
         try:
-            note(f"posted an interrupt aimed at the asking turn's prompts {list(prompts)} "
-                 f"(log sequence {interrupt(session, prompts, reset_timeout, note)})")
+            seq = posted(session, interrupt_event(prompts), "the interrupt", reset_timeout, note)
+            note(f"posted an interrupt aimed at the asking turn's prompts {list(prompts)} (log sequence {seq})")
         except Refused as error:
             note(f"ERROR: the asking turn was not interrupted ({error}), so a goal can hold it working "
                  f"until its block cap before the /clear")
@@ -657,9 +640,9 @@ def deliver(session, log, handoff, goal, settings, idle_timeout, reset_timeout, 
 
     def send(text, what):
         try:
-            seq = post(session, log, text, reset_timeout, note)
+            seq = posted(session, user_event(session.id, text), what, reset_timeout, note)
         except Refused as error:
-            raise Withheld(what, f"could not post it: {error}") from None
+            raise Withheld(what, str(error)) from None
         note(f"posted {what} (log sequence {seq})")
         return seq
 
@@ -754,7 +737,8 @@ def _deliver(session, after_seq, msgfile, goalfile, idle_timeout, reset_timeout,
     else:
         _note("delivered")
         return 0
-    _note(f"ERROR: {why}; {what} was NOT posted, nor anything after it. The handoff is preserved at {msgfile}")
+    _note(f"ERROR: {why}; {what} did NOT go through, so nothing after it was posted. "
+          f"The handoff is preserved at {msgfile}")
     return 1
 
 
