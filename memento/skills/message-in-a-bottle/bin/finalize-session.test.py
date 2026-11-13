@@ -1273,19 +1273,18 @@ check("an ordinary message is still recorded",
       done.returncode == 0 and len(bodies) == 1 and "ordinary handoff text" in bodies[0],
       f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
-# The handoff names the session that wrote it, so the next agent can read that
-# transcript back, on the line above the path, which stays last. Without an id the
-# handoff still goes, and that line names the variable it was looked for in. The
-# checks hold the line's place and content, not its wording.
+# The handoff names the session that wrote it on its opening line, and its path stays
+# the last line. Without an id the handoff still goes, and the opening line says the
+# id is unknown. The checks hold the line's place and content, not its wording.
 for session_id, expected, what in (
         (SESSION_ID, SESSION_ID, "names the outgoing session's id"),
-        (None, "CLAUDE_CODE_SESSION_ID", "with no session id still hands off, naming the variable"),
-        ("", "CLAUDE_CODE_SESSION_ID", "with an empty session id still hands off, naming the variable")):
+        (None, "<unknown>", "with no session id still hands off, saying it is unknown"),
+        ("", "<unknown>", "with an empty session id still hands off, saying it is unknown")):
     done, bodies = argv_case("a handoff", session_id=session_id)
-    tail = bodies[0].splitlines()[-2:] if len(bodies) == 1 else []
-    check(f"the handoff {what} on the line above the path",
-          done.returncode == 0 and len(tail) == 2 and expected in tail[0]
-          and tail[1].startswith("This handoff verbatim on disk: "),
+    lines = bodies[0].splitlines() if len(bodies) == 1 else []
+    check(f"the handoff {what} on its opening line",
+          done.returncode == 0 and len(lines) > 1 and expected in lines[0]
+          and lines[-1].startswith("This handoff verbatim on disk: "),
           f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
 
 # --- resolution through a real ancestry -----------------------------------

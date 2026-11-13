@@ -21,7 +21,8 @@ from journal import JOURNAL, Refused, origin, record, woke  # noqa: E402
 # The first line `finalize-session` frames a handoff with, and the opening of its last.
 # [LAW:one-source-of-truth] The launcher writes them and this reads them, so this hook's suite and
 # the launcher's each give it a handoff the launcher made, and a change to either side fails there.
-OPENING = "=== Below is a message from an agent on behalf of the user ===\n"
+OPENING = "=== Below is a message from an agent on behalf of the user (Sent from CLAUDE_CODE_SESSION_ID: "
+OPENING_END = ") ==="
 NAMING = "This handoff verbatim on disk: "
 # How Claude Code 2.1.299 delivers a paste. An initial prompt, and a paste on 2.1.197, arrive bare.
 # This matches one paste from the start of a prompt: its text ends at the first closing tag with
@@ -39,8 +40,10 @@ def handoff_named(prompt):
     prompt does is among other text too, a second paste included."""
     pasted = PASTED.match(prompt)
     text = (pasted[2] if pasted and pasted.end() == len(prompt) else prompt).strip()
+    first = text.partition("\n")[0]
     last = text.rpartition("\n")[2]
-    return last[len(NAMING):] if text.startswith(OPENING) and last.startswith(NAMING) else None
+    opened = first.startswith(OPENING) and first.endswith(OPENING_END)
+    return last[len(NAMING):] if opened and last.startswith(NAMING) else None
 
 
 def journal_wake(hook, facts):
