@@ -69,12 +69,11 @@ CLAUDE_READY_POLL_SECONDS=0.5
 
 # The framing wrapped around the agent's message. The launcher joins PREFIX, the message, and SUFFIX into
 # one value, and the workers pass it through unchanged.
-HANDOFF_PREFIX=$(cat <<'PREFIX'
-=== Below is a message from an agent on behalf of the user ===
-PREFIX
-)
+HANDOFF_PREFIX="=== Below is a message from an agent on behalf of the user (Sent from CLAUDE_CODE_SESSION_ID: ${CLAUDE_CODE_SESSION_ID:-<unknown>}) ==="
+# No apostrophe in the suffix: macOS's bash 3.2 reads quotes inside a heredoc in $( ), and an odd one fails
+# the parse hundreds of lines below it.
 HANDOFF_SUFFIX=$(cat <<'SUFFIX'
-=== The above message was sent on behalf of the user, but as it was sent from an agent, double checking the claims is wise.  When in doubt, note any divergence and run the '/next' skill to proceed.  Do NOT ask the user if you should run '/next'. ===
+=== The above message was sent on behalf of the user by the agent from the previous session.  Claims may be stale - if they are relevant to your work you must double check them and note any divergence in the chat.  If it is unclear what to do and no other work was specified, run the '/next' skill to pull the next ticket. ===
 SUFFIX
 )
 
@@ -614,16 +613,9 @@ case "$MODE" in
     MSGFILE="$HANDOFF_DIR/$(date -u '+%Y%m%dT%H%M%SZ')-$$.md"
 
     # The wrapped message is built once and includes the handoff file's path, so every copy points to the
-    # full text on disk. It also names the session that wrote it and says what the id is for, since the agent
-    # that reads it never reads this skill. Claude Code exports the id to every tool call; a run without it
-    # still hands off, saying the id is missing. [LAW:no-silent-failure] The path stays the last line.
-    if [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]]; then
-      SENT_FROM="Sent from Claude Code session $CLAUDE_CODE_SESSION_ID; its transcript is the record to check this message's claims against."
-    else
-      SENT_FROM="Sent from a Claude Code session whose id was not in the environment (CLAUDE_CODE_SESSION_ID unset or empty)."
-    fi
-    MESSAGE=$(printf '%s\n%s\n%s\n\n%s\nThis handoff verbatim on disk: %s' \
-      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$SENT_FROM" "$MSGFILE")
+    # full text on disk. The path stays the last line.
+    MESSAGE=$(printf '%s\n%s\n%s\n\nThis handoff verbatim on disk: %s' \
+      "$HANDOFF_PREFIX" "$AGENT_MESSAGE" "$HANDOFF_SUFFIX" "$MSGFILE")
 
     _mktemp_or_exit GOALFILE goal
     LOGFILE=""
