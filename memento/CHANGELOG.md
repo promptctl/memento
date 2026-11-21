@@ -1,5 +1,9 @@
 Each version's section is written in the PR that bumps `.claude-plugin/plugin.json` beside this file; `claude plugin tag memento --push` then publishes it as the release notes. Procedure: https://github.com/promptctl/.github/blob/master/RELEASING.md
 
+## v0.15.0 - 2026-11-20
+
+- feat(message-in-a-bottle): `finalize-session --reset compact` hands off with `/compact` instead of `/clear`, so the next agent wakes holding a summary of the session as well as the message. 0.8.0 removed `--reset clear|compact` to make the reset mandatory, and the compact mode went with it; the flag now chooses only how the session resets, `clear` by default, and an unknown value is refused with exit 2. On the tmux transport the worker sees the compaction land as a `compact_boundary` record newer than the one the launcher read from the session's transcript, since a compaction keeps the session id that a `/clear` changes; a carried `--goal` is typed only once it is seen. iTerm2 and the detached transport relaunch a fresh claude, and the remote-control worker sees only a `/clear` land, so on those `--reset compact` is refused rather than handed off as a `/clear`. `--reset clear`, which the dotfiles skill something-just-came-up passes, is accepted again.
+
 ## v0.14.0 - 2026-11-13
 
 Before updating: a handoff's framing changed. The opening line now carries `Sent from CLAUDE_CODE_SESSION_ID: <id>` (`<unknown>` when the environment names none), the closing line tells the reader that claims in the message may be stale and to double check the ones that matter to its work, and the footer's `Sent from Claude Code session …` line is gone, so the on-disk path line follows the closing line directly. A tool that read the old footer line needs the opening line instead; the `journal-wake` hook recognizes the new opening line and no other. A session running when the plugin is updated keeps the version it loaded until you run `/reload-plugins` in it or launch claude again.
