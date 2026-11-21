@@ -201,6 +201,35 @@ except Unrecorded as error:
     check("two transcripts for the id are a reason, not an answer",
           str(error).startswith("2 transcripts"), error)
 
+# --- whether a /compact landed ----------------------------------------------------
+
+
+def boundary(uuid, **fields):
+    """A compaction's record, as Claude Code appends it to the session's own transcript (2.1.299)."""
+    return {"type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+            "uuid": uuid, **fields}
+
+
+last = transcript.last_compaction
+check("a session never compacted has no compaction", last(config([prompt("auto"), answer("high")]), SESSION) == "")
+root = config([boundary("first"), prompt("auto"), boundary("second"), answer("high")])
+check("the newest compaction is the one named", last(root, SESSION) == "second")
+root = config([boundary("first"), boundary("a subagent's", isSidechain=True)])
+check("a subagent's record is no compaction of the session", last(root, SESSION) == "first")
+
+naps = []
+root = config([boundary("first")])
+try:
+    transcript.compacted(root, SESSION, "first", 1, 0.5, sleep=naps.append)
+    check("a wait that sees no new compaction is a reason, not an answer", False, "no raise")
+except transcript.Uncompacted as error:
+    check("a wait that sees no new compaction is a reason, not an answer",
+          "no compaction after first" in str(error) and naps, error)
+now, _ = transcript.compacted(config([boundary("first"), boundary("second")]), SESSION, "first", 1, 0.5)
+check("a compaction newer than the one named ends the wait", now == "second")
+now, _ = transcript.compacted(config([boundary("first")]), SESSION, "", 1, 0.5)
+check("so does a session's first compaction, named before as none", now == "first")
+
 # --- the script form, as the launcher runs it ------------------------------------
 
 SCRIPT = os.path.join(LIB, "transcript.py")
@@ -227,6 +256,17 @@ root = config([handoff(NEEDLE)], [handoff(NEEDLE)])
 done = script("prompted", root, SESSION, NEEDLE)
 check("and 2 with the reason when it cannot tell",
       done.returncode == 2 and "2 transcripts" in done.stderr, done)
+root = config([boundary("first"), prompt("auto")])
+done = script("last-compaction", root, SESSION)
+check("last-compaction prints the newest compaction", done.returncode == 0 and done.stdout == "first\n", done)
+done = script("last-compaction", config([prompt("auto")]), SESSION)
+check("and an empty line for a session never compacted", done.returncode == 0 and done.stdout == "\n", done)
+done = script("compacted", root, SESSION, "first", "0", "0")
+check("compacted refuses with exit 2 when no newer compaction lands",
+      done.returncode == 2 and "no compaction after first" in done.stderr, done)
+done = script("compacted", root, SESSION, "", "0", "0")
+check("and prints the compaction it saw with exit 0",
+      done.returncode == 0 and "compacted (boundary first)" in done.stdout, done)
 # Python's own exit on an uncaught exception is 1, the status that means not yet.
 root = config([{"type": "user", "message": "a message that is a string"}])
 done = script("prompted", root, SESSION, NEEDLE)
