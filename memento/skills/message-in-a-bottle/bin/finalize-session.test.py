@@ -1105,7 +1105,7 @@ done = run(dry_run="")
 # where the launcher's own would end in bash's.
 check("a tmux close-out hands its worker the config dir, claude pid, its identity and the session id",
       re.search(rf" {re.escape(done.config_dir)} {done.root_pid} \S.* {re.escape(os.path.basename(CLAUDE_BIN))} "
-                rf"{SESSION_ID} ", done.worker_argv.rstrip("\n") + " "),
+                rf"{SESSION_ID} clear ", done.worker_argv.rstrip("\n") + " "),
       f"argv={done.worker_argv!r} config={done.config_dir} pid={done.root_pid}")
 done = run(session_id=None, launcher_flags=("--goal", "the tests pass"))
 check("a tmux close-out carrying a goal with no session id refuses, naming the variable",
@@ -2483,6 +2483,18 @@ def dies(pid, signal_name):
     return f"kill -{signal_name} {pid}; while kill -0 {pid} 2>/dev/null; do sleep 0.05; done"
 
 
+def worker_transcript(entry):
+    """The old session's transcript under the config dir the entry is registered in."""
+    return os.path.join(os.path.dirname(os.path.dirname(entry)), "projects", "-case", "the-old-session.jsonl")
+
+
+def compacts(uuid):
+    """A /compact the pane's claude runs, as Claude Code runs it: a compaction lands in its transcript."""
+    record = json.dumps({"type": "system", "subtype": "compact_boundary", "uuid": uuid})
+    return lambda entry, pid: when("submit", "/compact",
+                                   f"printf '%s\\n' {shlex.quote(record)} >> {shlex.quote(worker_transcript(entry))}")
+
+
 # A claude that quits at the /clear takes its registry entry with it; one that crashes leaves the entry.
 QUITS = lambda entry, pid: when("submit", "/clear", f"{dies(pid, 'TERM')}; rm -f {shlex.quote(entry)}")  # noqa: E731
 CRASHES = lambda entry, pid: when("submit", "/clear", dies(pid, "KILL"))  # noqa: E731
@@ -2504,7 +2516,7 @@ os.waitpid(pid, 0)
 
 
 def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="foreground", timeout="2",
-                     settings=(), goal="", fail=""):
+                     settings=(), goal="", fail="", reset=("clear", "")):
     """Run one tmux worker and report what it did with the handoff.
 
     Returns (done, whether the handoff file still exists, tmux log). The pane shows the
@@ -2516,6 +2528,8 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
     does with what it is typed, given its entry's path and its pid, None for a /clear
     that never runs, so how the reset lands is a value, not a mode. `goal` is the
     carried goal, "" for none, and `fail` the tmux subcommand that fails, "" for none.
+    `reset` is the reset and the session's last compaction the launcher hands the worker;
+    the session's transcript holds that compaction, if any.
     """
     if claude == "background":
         # Its own session, so it holds no terminal, whatever terminal runs this suite.
@@ -2539,6 +2553,10 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
     if registered:
         with open(entry, "w") as handle:
             handle.write('{"sessionId": "the-old-session"}')
+    os.makedirs(os.path.dirname(worker_transcript(entry)))
+    with open(worker_transcript(entry), "w") as handle:
+        if reset[1]:
+            handle.write(json.dumps({"type": "system", "subtype": "compact_boundary", "uuid": reset[1]}) + "\n")
     tmuxlog = os.path.join(workdir, "tmux.log")
     env = {
         "PATH": ":".join([FIXTURES, REAL_DIRS]),
@@ -2558,7 +2576,7 @@ def tmux_worker_case(on_type=rewrites(RESET_ENTRY), registered=True, claude="for
             reaper.wait()
         done = subprocess.run(
             [LAUNCHER, "--worker", "%1", msgfile, goalfile, config_dir, str(pid), ident, "the-old-session",
-             *settings],
+             *reset, *settings],
             text=True, capture_output=True, env=env, timeout=180)
         log = open(tmuxlog).read() if os.path.exists(tmuxlog) else ""
         return done, os.path.exists(msgfile), log
@@ -2580,7 +2598,7 @@ def submitted(log, text):
     return at >= 0 and "send-keys -t %1 Enter" in log[at + len(marker):].split("buffer: ", 1)[0]
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=15) as pool:
+with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
     paste_fails = pool.submit(tmux_worker_case, goal="ship it", fail="paste-buffer")
     registered = pool.submit(tmux_worker_case)
     never = pool.submit(tmux_worker_case, on_type=None)
@@ -2601,6 +2619,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=15) as pool:
         tmux_worker_case, goal="ship it",
         on_type=lambda entry, pid: rewrites(RESET_ENTRY)(entry, pid) + "; "
         + when("submit", "the whole handoff", dies(pid, "TERM")))
+    compacted = pool.submit(tmux_worker_case, reset=("compact", "an-earlier-one"), goal="ship it",
+                            on_type=compacts("the-new-one"))
+    compact_never = pool.submit(tmux_worker_case, reset=("compact", "an-earlier-one"), goal="ship it",
+                                on_type=None)
 
 done, survived, log = registered.result()
 check("a reset the worker can see delivers the handoff",
@@ -2609,6 +2631,21 @@ check("and is seen as the pane's claude moving to a new session",
       "moved from session the-old-session to the-reset-session" in done.stdout, f"out={done.stdout!r}")
 check("and the handoff file outlives the worker that delivered it",
       survived, f"out={done.stdout!r}")
+
+# A /compact keeps the session, so it is seen as a compaction newer than the session's last.
+done, survived, log = compacted.result()
+check("a compaction the worker can see is typed as /compact, then the handoff, then the goal",
+      submitted(log, "/compact") and "buffer: /clear" not in log
+      and log.find("buffer: /compact") < log.find("buffer: the whole handoff") < log.find("buffer: /goal ship it"),
+      f"out={done.stdout!r} log={log!r}")
+check("and is seen as the session's new compaction",
+      "compacted (boundary the-new-one)" in done.stdout, f"out={done.stdout!r} err={done.stderr!r}")
+# The session's earlier compaction is in its transcript the whole time, as the banner is on screen.
+done, survived, log = compact_never.result()
+check("a compaction that never lands, after an earlier one, still delivers the handoff but not the goal",
+      "buffer: the whole handoff" in log and "/goal ship it" not in log and "carried goal NOT delivered" in done.stdout
+      and "no compaction after an-earlier-one" in done.stderr and survived,
+      f"out={done.stdout!r} err={done.stderr!r} log={log!r}")
 
 # The reset can be typed while the agent is still mid-turn, so Claude queues it and it
 # may not land within any fixed window. Tmux type-ahead preserves ordering, so
@@ -2731,13 +2768,37 @@ STRANGER.wait()
 done = run()
 check("every run resets: a transport is chosen with no flag asked for",
       "transport=" in done.stdout and "handoff recorded" not in done.stdout, done.stdout[:200])
-# The removed flag, in the value-carrying forms callers used to pass. A bare `--reset`
-# is refused either way, so it would prove nothing.
-for mode in ("clear", "compact"):
-    done, bodies = argv_case("--reset", mode, "real work goes here")
-    check(f"--reset {mode} is refused as the unknown flag it now is",
-          done.returncode == REFUSED_RC and "unknown flag '--reset'" in done.stderr
-          and bodies == [], f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+
+# --reset chooses how the session resets, not whether: /clear unless compact is asked for.
+check("a pane's session resets with /clear unless asked otherwise",
+      "reset=/clear" in done.stdout, done.stdout[:300])
+done = run(launcher_flags=("--reset", "compact"))
+check("--reset compact compacts a pane's session",
+      picked(done) == "%99" and "reset=/compact" in done.stdout, f"out={done.stdout!r} err={done.stderr!r}")
+done, bodies = argv_case("--reset", "compcat", "real work goes here")
+check("--reset refuses a word that names no reset, recording nothing",
+      done.returncode == REFUSED_RC and "--reset takes clear or compact, got 'compcat'" in done.stderr
+      and bodies == [], f"rc={done.returncode} err={done.stderr!r} handoffs={bodies!r}")
+# The relaunching transports start a fresh claude, so a compaction asked of them is refused, never
+# quietly delivered as a fresh start.
+for name, where in (("detached", dict(panes=None)), ("iTerm2", dict(panes=None, iterm=True))):
+    done = run(launcher_flags=("--reset", "compact"), **where)
+    check(f"--reset compact on the {name} transport refuses, saying a tmux pane is what compacts",
+          done.returncode == REFUSED_RC and "--reset compact compacts the session in its tmux pane" in done.stderr,
+          f"rc={done.returncode} err={done.stderr!r}")
+done = run(launcher_flags=("--reset", "compact"), session_id=None)
+check("--reset compact with no session id refuses, since its compaction could not be seen",
+      done.returncode == REFUSED_RC and "transcript a compaction lands in cannot be found" in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r}")
+done = run(launcher_flags=("--reset", "compact"), transcripts=())
+check("--reset compact with no transcript to read refuses",
+      done.returncode == REFUSED_RC and "cannot read this session's transcript" in done.stderr,
+      f"rc={done.returncode} err={done.stderr!r}")
+# The worker sees a compaction as one newer than the session's last, which the launcher reads first.
+done = run(dry_run="", launcher_flags=("--reset", "compact"),
+           transcripts=(BYPASS_HIGH + [{"type": "system", "subtype": "compact_boundary", "uuid": "the-last"}],))
+check("a compacting close-out hands its worker the reset and the session's last compaction",
+      f" {SESSION_ID} compact the-last" in done.worker_argv, f"rc={done.returncode} argv={done.worker_argv!r}")
 
 handoffs = tempfile.mkdtemp(prefix="finalize-recorded.")
 try:

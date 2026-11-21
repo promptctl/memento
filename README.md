@@ -77,7 +77,7 @@ hands off.
 
 ```bash
 journal summary --file <path> &&
-finalize-session [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
+finalize-session [--reset clear|compact] [--goal '<condition>'] [--model <model>] [--effort <level>] [--] [message...]
 ```
 
 The first command is the `journal` skill's, below: it records what the session did. The
@@ -85,8 +85,10 @@ launcher journals the session's close-out with that summary before it writes the
 and with none recorded it is refused, exit 2, with the journal's reason and no handoff
 written.
 
-With no message it hands off `/next`. The next session starts blank on every transport.
-`--goal` re-issues an active `/goal` condition into the reset session, which otherwise
+With no message it hands off `/next`. The next session starts blank on every transport,
+unless `--reset compact` resets a tmux pane's session with `/compact` instead of `/clear`,
+so the next agent wakes holding a summary of this session as well as the message. The
+other transports relaunch a fresh claude, so there it is refused, exit 2. `--goal` re-issues an active `/goal` condition into the reset session, which otherwise
 dies silently at the handoff and stops an unattended run. `--model` and `--effort` start
 the next session on that model or effort level; omit them and the transport decides: a tmux reset keeps the live
 session's model and effort, a relaunch keeps the effort the session's transcript records

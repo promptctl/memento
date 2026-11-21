@@ -2,9 +2,11 @@
 # finalize-session: hands the current session off to a fresh one holding the message.
 #
 # Transports, most reliable first:
-#   tmux      - schedules a worker that, after a fixed delay, clears the pane with /clear, sees it as its
-#               claude leaving this session, then pastes the message, typing nothing once that claude
-#               stops reading the pane. The launcher returns at once.
+#   tmux      - schedules a worker that, after a fixed delay, resets the pane: /clear, seen as its claude
+#               leaving this session, or /compact on --reset compact, seen as a new compaction in this
+#               session's transcript. It then pastes the message, typing nothing once that claude stops
+#               reading the pane. The launcher returns at once. The only transport that can compact,
+#               since it alone resets the session in place where a compaction can be seen.
 #   iTerm2    - schedules a worker that, after the delay, kills the running claude and relaunches it with
 #               the message as its initial prompt, sent with `write text` to the exact session. The
 #               launcher returns at once.
@@ -37,7 +39,7 @@
 #
 # Modes:
 #   launcher:         see --help
-#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <config dir> <claude pid> <claude identity> <session id> [<slash-command>...]
+#   tmux worker:      finalize-session --worker <target> <msgfile> <goalfile> <config dir> <claude pid> <claude identity> <session id> clear|compact <last compaction> [<slash-command>...]
 #   iTerm2 worker:    finalize-session --iterm-worker <uuid> <claude pid> <claude ident> <msgfile> <goalfile> <relaunch line> <config dir> <successor id>
 #   detached worker:  finalize-session --detached-worker <session> <cwd> <relaunch line> <config dir> <successor id> <msgfile> <goalfile> <old claude pid> <old claude ident> <old session id> <launcher pid> <launcher ident> signal|stop <claude> <background session id> 3><verdict pipe>
 #   remote worker:    finalize-session --remote-worker <session url> <log head> <msgfile> <goalfile> <launcher pid> <launcher ident> [<slash-command>...]
@@ -483,9 +485,12 @@ _usage() {
   cat <<'USAGE'
 finalize-session — record the session handoff and reset the session into it.
 
-usage: finalize-session [--goal <condition>] [--model <model>] [--effort <level>]
-                        [--] [message...]
+usage: finalize-session [--reset clear|compact] [--goal <condition>] [--model <model>]
+                        [--effort <level>] [--] [message...]
 
+  --reset clear|compact   how the session is reset: clear (the default) starts the
+                          next session blank; compact keeps a summary of this one.
+                          compact needs the tmux transport, which resets in place
   --goal <condition>      re-issue an active /goal into the reset session, which
                           otherwise wakes with no goal and stops an unattended run
   --model <model>         start the next session on this model; omit to leave the
@@ -555,10 +560,19 @@ case "$MODE" in
     # --model and --effort are set only when the caller asks. Empty means the transport's own behavior stands.
     MODEL=""
     EFFORT=""
+    # [LAW:parse-dont-validate] How the session is reset is one of the two words Claude Code's own commands
+    # name, checked here, so everything downstream holds clear or compact.
+    RESET=clear
     # A literal newline, for matching inside a case pattern below.
     NEWLINE=$'\n'
     while :; do
       case "${1:-}" in
+        --reset)
+          case "${2:-}" in
+            clear|compact) RESET="$2" ;;
+            *) echo "--reset takes clear or compact, got '${2:-}'" >&2; exit 2 ;;
+          esac
+          shift 2 ;;
         --goal)
           GOAL="${2:-}"
           shift 2 || { echo "--goal requires a condition argument" >&2; exit 2; }
@@ -653,7 +667,8 @@ case "$MODE" in
     [[ -n "$MODEL" ]] && SETTING_COMMANDS+=("/model $MODEL")
     [[ -n "$EFFORT" ]] && SETTING_COMMANDS+=("/effort $EFFORT")
 
-    # A handoff always resets the session. The next session starts blank and holds only the message.
+    # A handoff always resets the session. The next session holds the message and, after a compaction, a
+    # summary of this one; after a /clear or a relaunch it holds nothing else.
 
     # Transport detection runs once, here. Each worker receives the result as a typed value and does not
     # re-detect.
@@ -674,6 +689,11 @@ case "$MODE" in
       <<<"$WALK"
     [[ -z "${FINALIZE_DRY_RUN:-}" ]] || echo "[dry-run] ancestry: $KIND, $REASON"
     [[ "$KIND" != refused ]] || _refuse "$REASON"
+    # [LAW:no-silent-failure] Only a pane's session is reset in place. The relaunching transports start a
+    # fresh claude, and remote-control's log is read for a /clear's reset alone, so a compaction asked of
+    # them is refused rather than delivered as a /clear.
+    [[ "$RESET" == clear || "$KIND" == pane ]] \
+      || _refuse "--reset compact compacts the session in its tmux pane, and this session has none ($REASON); run it without --reset compact to hand off with /clear"
     # [LAW:one-source-of-truth] The session's URL on the session server is in one place a tool call can
     # read: the --sdk-url a `claude remote-control` server started this session's claude with. The walk
     # proved $CLAUDE_PID is that claude and, when hosted, that its parent is a claude, so only those two
@@ -738,11 +758,20 @@ case "$MODE" in
       # $CLAUDE_CODE_SESSION_ID names, so with no id the goal would never be typed.
       [[ -z "$GOAL" || -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
         || _refuse "tmux transport: \$CLAUDE_CODE_SESSION_ID is unset, so the reset cannot be seen and the carried goal would never be typed"
+      # A compaction is seen as one newer than the session's last, read now, while this turn holds the
+      # session, so the worker's /compact cannot have run yet. Empty for a /clear, which needs no mark.
+      LAST_COMPACTION=""
+      if [[ "$RESET" == compact ]]; then
+        [[ -n "${CLAUDE_CODE_SESSION_ID:-}" ]] \
+          || _refuse "tmux transport: \$CLAUDE_CODE_SESSION_ID is unset, so the transcript a compaction lands in cannot be found"
+        LAST_COMPACTION=$(python3 -I "$READER" last-compaction "$CONFIG_DIR" "$CLAUDE_CODE_SESSION_ID") \
+          || _refuse "tmux transport: cannot read this session's transcript, so the worker could not see its compaction land"
+      fi
       # The worker types nothing once this claude stops reading the pane, which it tells by this identity.
       CLAUDE_IDENT=$(_process_identity "$CLAUDE_PID") \
         || _refuse "tmux transport: cannot read the identity of claude process $CLAUDE_PID, so the worker could not tell when it stops reading pane $TARGET"
       if [[ -n "${FINALIZE_DRY_RUN:-}" ]]; then
-        echo "[dry-run] transport=tmux target=$TARGET msgfile=$MSGFILE"
+        echo "[dry-run] transport=tmux target=$TARGET reset=/$RESET msgfile=$MSGFILE"
         echo "[dry-run] carried goal: ${GOAL:-(none)}"
         echo "[dry-run] requested model: ${MODEL:-(none)} effort: ${EFFORT:-(none)}"
         echo "[dry-run] would type /goal clear into $TARGET"
@@ -758,10 +787,10 @@ case "$MODE" in
       # types into this pane the same way.
       printf '/goal clear' | _tmux_type command "$TARGET" \
         || _refuse "tmux transport: cannot type /goal clear into pane $TARGET, which the handoff is typed into too"
-      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$CONFIG_DIR" "$CLAUDE_PID" "$CLAUDE_IDENT" "${CLAUDE_CODE_SESSION_ID:-}" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
+      nohup "$SELF" --worker "$TARGET" "$MSGFILE" "$GOALFILE" "$CONFIG_DIR" "$CLAUDE_PID" "$CLAUDE_IDENT" "${CLAUDE_CODE_SESSION_ID:-}" "$RESET" "$LAST_COMPACTION" ${SETTING_COMMANDS[@]+"${SETTING_COMMANDS[@]}"} \
         </dev/null >>"$LOGFILE" 2>&1 &
       trap - EXIT
-      echo "handoff scheduled → tmux $TARGET in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
+      echo "handoff scheduled → tmux $TARGET (/$RESET) in ${HANDOFF_DELAY_SECONDS}s (log: $LOGFILE)"
 
     # $ITERM_SESSION_ID is inherited like $TMUX_PANE, so it names this session's terminal only when the walk
     # showed nothing above this session that could own it.
@@ -865,8 +894,8 @@ Nothing on this machine to deliver the close-out into."
     ;;
 
   tmux-worker)
-    if [[ $# -lt 7 ]]; then
-      echo "internal error: worker expects at least 7 args" >&2
+    if [[ $# -lt 9 ]]; then
+      echo "internal error: worker expects at least 9 args" >&2
       exit 2
     fi
     TARGET="$1"
@@ -876,7 +905,9 @@ Nothing on this machine to deliver the close-out into."
     CLAUDE_PID="$5"
     CLAUDE_IDENT="$6"
     SESSION_ID="$7"
-    shift 7
+    RESET="$8"
+    LAST_COMPACTION="$9"
+    shift 9
 
     # [LAW:single-enforcer] Every way this worker stops short, a gate stop or a tmux step that fails under
     # `set -e`, ends here, which says what was left undelivered.
@@ -910,21 +941,25 @@ Nothing on this machine to deliver the close-out into."
       "$@"
     }
 
-    log "waking; target=$TARGET claude_pid=$CLAUDE_PID session=$SESSION_ID"
+    log "waking; target=$TARGET claude_pid=$CLAUDE_PID session=$SESSION_ID reset=/$RESET"
     sleep "$HANDOFF_DELAY_SECONDS"
 
     _send tmux send-keys -t "$TARGET" Escape
     sleep 1
 
-    # [LAW:one-source-of-truth] The reset is seen as the pane's own claude leaving the session that asked for
-    # the handoff, which the launcher names and the claude's registry entry follows. A banner on the screen
-    # can be the old session's own, drawn at its start, and another pane's /clear is another process's.
-    # The registry's stdout is its answer, and its stderr, the reason it has none, goes to this log.
-    _tmux_type _send "$TARGET" < <(printf /clear)
+    # [LAW:one-source-of-truth] The reset is seen where Claude Code records it for the pane's own claude. A
+    # /clear moves that claude to a new session, which its registry entry follows; a /compact keeps the
+    # session and appends a compaction to its transcript. A banner on the screen can be the old session's
+    # own, drawn at its start, and another pane's reset is another process's. The witness's stdout is its
+    # answer, and its stderr, the reason it has none, goes to this log.
+    case "$RESET" in
+      clear)   WITNESS=("$REGISTRY" changed "$CONFIG_DIR" "$CLAUDE_PID" "$SESSION_ID") ;;
+      compact) WITNESS=("$READER" compacted "$CONFIG_DIR" "$SESSION_ID" "$LAST_COMPACTION") ;;
+    esac
+    _tmux_type _send "$TARGET" < <(printf '/%s' "$RESET")
     RESET_SEEN=""
-    OBSERVED="WARNING: not seen, as the registry says above"
-    if MOVED=$(python3 -I "$REGISTRY" changed "$CONFIG_DIR" "$CLAUDE_PID" "$SESSION_ID" \
-        "$RESET_REGISTER_TIMEOUT_SECONDS" "$RESET_REGISTER_POLL_SECONDS"); then
+    OBSERVED="WARNING: not seen, as the witness says above"
+    if MOVED=$(python3 -I "${WITNESS[@]}" "$RESET_REGISTER_TIMEOUT_SECONDS" "$RESET_REGISTER_POLL_SECONDS"); then
       RESET_SEEN=1
       OBSERVED="seen: $MOVED"
     fi
@@ -932,7 +967,7 @@ Nothing on this machine to deliver the close-out into."
     # The handoff is sent whether or not the reset was seen; the poll result goes into the log, and decides
     # only the carried goal below. tmux type-ahead keeps input in order, so the handoff lands after the
     # queued reset either way.
-    log "/clear $OBSERVED; sending handoff (preserved at $MSGFILE)"
+    log "/$RESET $OBSERVED; sending handoff (preserved at $MSGFILE)"
 
     # The requested /model and /effort go in before the handoff, while the reset session's box is idle, so the
     # handoff's first turn already runs on them.

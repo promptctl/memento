@@ -2,14 +2,19 @@
 """Reads a Claude Code session's transcript, `<config dir>/projects/<slug>/<session id>.jsonl`.
 
 The context ceiling reads its token usage here, and finalize-session reads the permission mode and
-effort it relaunches with, and whether a relaunch took its handoff. Run as a script:
+effort it relaunches with, whether a relaunch took its handoff, and whether a /compact has landed: a
+compaction keeps the session id and appends a `compact_boundary` system record (2.1.299). Run as a script:
 
   transcript.py flags <config dir> <session id>
       prints the relaunch flags the recorded settings make on one line and exits 0.
   transcript.py prompted <config dir> <session id> <needle>
       exits 0 when the session took a prompt containing the needle, 1 when it has not yet.
+  transcript.py last-compaction <config dir> <session id>
+      prints the uuid of the session's newest compaction, or an empty line when it has none.
+  transcript.py compacted <config dir> <session id> <before> <timeout seconds> <poll seconds>
+      waits for a compaction newer than <before>, a last-compaction answer, prints it and exits 0.
 
-Either prints why it cannot answer on stderr and exits 2.
+Each prints why it cannot answer on stderr and exits 2.
 """
 
 import collections
@@ -17,6 +22,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 TAIL_CHUNK = 256 * 1024
 # The values `claude --permission-mode` accepts. `default` is absent from `claude --help` and still
@@ -30,6 +36,10 @@ Settings = collections.namedtuple("Settings", "mode effort")
 
 class Unrecorded(Exception):
     """The transcript does not record a setting the caller needs; the message says which."""
+
+
+class Uncompacted(Unrecorded):
+    """The session recorded no compaction newer than the one named when the wait ran out."""
 
 
 def records_newest_first(transcript_path):
@@ -126,6 +136,26 @@ def took_prompt(config_dir, session_id, needle):
                for record in records_newest_first(_the_one(found, config_dir, session_id)))
 
 
+def last_compaction(config_dir, session_id):
+    """The uuid of the session's newest `compact_boundary` record, or "" when it was never compacted."""
+    return next((record["uuid"] for record in records_newest_first(session_transcript(config_dir, session_id))
+                 if record.get("type") == "system" and record.get("subtype") == "compact_boundary"), "")
+
+
+def compacted(config_dir, session_id, before, timeout, interval, sleep=time.sleep):
+    """The uuid of a compaction newer than `before`, a last_compaction answer, and the seconds the wait
+    took, reading the transcript every `interval` seconds for up to `timeout`."""
+    start = time.monotonic()
+    while True:
+        now = last_compaction(config_dir, session_id)
+        if now != before:
+            return now, time.monotonic() - start
+        if time.monotonic() - start >= timeout:
+            raise Uncompacted(f"session {session_id} recorded no compaction after {before or 'its start'} "
+                              f"within {timeout:g}s")
+        sleep(interval)
+
+
 def relaunch_flags(settings):
     """The claude flags that start a session in these settings. Every token is a word from a closed
     set, so the line needs no quoting, and an absent effort is an absent pair of tokens."""
@@ -142,7 +172,19 @@ def _prompted(config_dir, session_id, needle):
     return 0 if took_prompt(config_dir, session_id, needle) else 1
 
 
-COMMANDS = {"flags": _flags, "prompted": _prompted}
+def _last_compaction(config_dir, session_id):
+    print(last_compaction(config_dir, session_id))
+    return 0
+
+
+def _compacted(config_dir, session_id, before, timeout_seconds, poll_seconds):
+    now, waited = compacted(config_dir, session_id, before, float(timeout_seconds), float(poll_seconds))
+    print(f"session {session_id} compacted (boundary {now}) after {waited:.1f}s")
+    return 0
+
+
+COMMANDS = {"flags": _flags, "prompted": _prompted, "last-compaction": _last_compaction,
+            "compacted": _compacted}
 
 
 if __name__ == "__main__":
